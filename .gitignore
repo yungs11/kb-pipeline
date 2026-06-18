@@ -1,0 +1,21 @@
+# OS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+*.egg-info/
+.pytest_cache/
+
+# Logs / tmp
+*.log
+*.tmp
+
+# Worktrees (git worktree 기본 위치 — 추적 금지)
+.worktrees/
+
+# Node tooling (if any)
+node_modules/

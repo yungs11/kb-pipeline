@@ -1,0 +1,3 @@
+[submodule "edgequake"]
+	path = edgequake
+	url = https://github.com/yungs11/edgequake.git
