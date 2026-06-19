@@ -38,7 +38,10 @@ def healthz():
 async def ingest(file: UploadFile = File(...), workspace_id: str = Form(...), doc_id: str = Form(...),
                  content_type: str | None = Form(None), eq=Depends(get_edgequake)):
     data = await file.read()
-    out = run_ingest(data, file.filename, workspace_id=workspace_id, doc_id=doc_id,
+    # The incoming workspace_id is the kb id; edgequake addresses storage by an
+    # assigned workspace UUID, so register (idempotently) and use THAT uuid.
+    eq_ws = eq.ensure_workspace(workspace_id, name=workspace_id)
+    out = run_ingest(data, file.filename, workspace_id=eq_ws, doc_id=doc_id,
                      content_type=content_type or file.content_type, edgequake=eq,
                      text_llm=get_text_llm(), vision_llm=None,
                      ocr_url=os.environ.get("KBP_OCR_URL", "http://localhost:18050"),
@@ -49,12 +52,14 @@ async def ingest(file: UploadFile = File(...), workspace_id: str = Form(...), do
 
 @app.get("/chunks")
 def chunks(workspace_id: str, doc_id: str, eq=Depends(get_edgequake)):
-    return eq.fetch_chunks(workspace_id, doc_id)
+    eq_ws = eq.ensure_workspace(workspace_id, name=workspace_id)
+    return eq.fetch_chunks(eq_ws, doc_id)
 
 
 @app.delete("/doc", status_code=204)
 def delete(workspace_id: str, doc_id: str, eq=Depends(get_edgequake)):
-    eq.delete_doc(workspace_id, doc_id)
+    eq_ws = eq.ensure_workspace(workspace_id, name=workspace_id)
+    eq.delete_doc(eq_ws, doc_id)
 
 
 def _build_communities_job(workspace_id: str) -> None:
@@ -68,6 +73,10 @@ def _build_communities_job(workspace_id: str) -> None:
 
 
 @app.post("/communities/build", status_code=202)
-def communities_build(workspace_id: str, background_tasks: BackgroundTasks):
-    background_tasks.add_task(_build_communities_job, workspace_id)
-    return {"status": "started", "workspace_id": workspace_id}
+def communities_build(workspace_id: str, background_tasks: BackgroundTasks,
+                      eq=Depends(get_edgequake)):
+    # Community graph rows are scoped by the edgequake workspace UUID (stored in node
+    # properties), so resolve the kb id to that uuid for the DSN/workspace scope.
+    eq_ws = eq.ensure_workspace(workspace_id, name=workspace_id)
+    background_tasks.add_task(_build_communities_job, eq_ws)
+    return {"status": "started", "workspace_id": eq_ws}

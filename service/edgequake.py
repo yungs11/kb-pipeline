@@ -20,6 +20,8 @@ handlers:
 """
 from __future__ import annotations
 
+import time
+
 import httpx
 
 _TENANT_ID = "00000000-0000-0000-0000-000000000002"
@@ -35,6 +37,59 @@ class EdgequakeClient:
         if workspace_id is not None:
             h["X-Workspace-ID"] = workspace_id
         return h
+
+    @staticmethod
+    def _slug_for(kb_id: str) -> str:
+        """Deterministic, globally-unique slug derived from the kb id (idempotency key)."""
+        return f"kb-{kb_id.replace('-', '')}"
+
+    def ensure_workspace(
+        self, kb_id: str, name: str, tenant_id: str = _TENANT_ID
+    ) -> str:
+        """Idempotently create-or-find an edgequake workspace; return its UUID.
+
+        edgequake stores everything under an *assigned* workspace UUID and rejects
+        arbitrary ``X-Workspace-ID`` strings (403). The kb_id must therefore be
+        registered first: POST ``/api/v1/tenants/{tid}/workspaces`` (idempotent via a
+        deterministic slug). On a 4xx (already-exists / unique-violation race) we list
+        and find by slug. Returns the edgequake workspace UUID to use as the header.
+        """
+        slug = self._slug_for(kb_id)
+        url = f"{self.base}/api/v1/tenants/{tenant_id}/workspaces"
+        body = {"name": name, "slug": slug}
+        # 5xx are retried: a freshly (re)started edgequake transiently returns a
+        # 500 ``pool timed out`` while its sqlx pool warms up against postgres.
+        r = self.http.post(url, headers={"X-Tenant-ID": tenant_id}, json=body)
+        for _ in range(3):
+            if r.status_code < 500:
+                break
+            time.sleep(1.0)
+            r = self.http.post(url, headers={"X-Tenant-ID": tenant_id}, json=body)
+        if 400 <= r.status_code < 500:
+            return self._find_workspace_by_slug(tenant_id, slug)
+        r.raise_for_status()
+        data = r.json() or {}
+        ws_id = data.get("id") or data.get("workspace_id")
+        if not ws_id:
+            raise ValueError(
+                f"edgequake workspace create response missing id: keys={list(data.keys())}"
+            )
+        return str(ws_id)
+
+    def _find_workspace_by_slug(self, tenant_id: str, slug: str) -> str:
+        url = f"{self.base}/api/v1/tenants/{tenant_id}/workspaces"
+        r = self.http.get(url, headers={"X-Tenant-ID": tenant_id})
+        r.raise_for_status()
+        body = r.json()
+        # Live shape is `{"items":[...]}` (paginated); defend list/workspaces/data too.
+        if isinstance(body, dict):
+            spaces = body.get("items") or body.get("workspaces") or body.get("data") or []
+        else:
+            spaces = body
+        for w in spaces or []:
+            if isinstance(w, dict) and (w.get("slug") == slug or w.get("name") == slug):
+                return str(w.get("id"))
+        raise ValueError(f"edgequake workspace lookup failed (slug={slug})")
 
     def post_document(self, content, *, workspace_id, tenant_id, filename):
         r = self.http.post(
