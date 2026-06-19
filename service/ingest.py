@@ -27,9 +27,13 @@ _TENANT_ID = "00000000-0000-0000-0000-000000000002"
 def run_ingest(file_bytes: bytes, filename: str, *, workspace_id: str, doc_id: str,
                content_type: str | None, edgequake: Any,
                text_llm: Callable[[str, str], str], vision_llm: Callable[[str, str], str] | None,
-               ocr_url: str, excel_url: str) -> dict:
+               ocr_url: str, excel_url: str,
+               parse: Callable[..., str] | None = None) -> dict:
+    # ``parse`` lets the caller inject (and tests patch) the parser used; it
+    # defaults to this module's ``parse_to_markdown``.
+    parse = parse or parse_to_markdown
     try:
-        md = parse_to_markdown(file_bytes, filename, ocr_url=ocr_url, excel_url=excel_url)
+        md = parse(file_bytes, filename, ocr_url=ocr_url, excel_url=excel_url)
         blocks = hybrid_to_blocks(md)
         enriched, _modal_ids = enrich(blocks, text_llm=text_llm, vision_llm=vision_llm)
     except Exception as e:  # noqa: BLE001  (ParseError is a subclass of Exception)
