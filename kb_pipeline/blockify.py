@@ -8,6 +8,25 @@ Block schema (SoT 5.1, no extra required fields):
     {"type":"table",    "table_body":"<table>…</table>", "table_caption":[], "page_idx":0}
     {"type":"image",    "img_path":"…", "image_caption":[], "page_idx":0}
     {"type":"equation", "latex":"…", "text_format":"latex", "page_idx":0}
+
+Parser routing (W6 finding)
+---------------------------
+blockify renders markdown pipe tables to <table>, but it CANNOT recover
+colspan/rowspan that a parser already flattened at PARSE time. markitdown
+emits pptx/docx tables as GFM pipe tables, so every merged cell is lost
+before blockify ever sees the document (a rowspan becomes one filled cell +
+N blank pipe cells, unrecoverable).
+
+Measured on the test corpus (table blocks identical count, merge survival
+differs sharply):
+    doc                       markitdown merges   structural merges (kordoc/mineru)
+    02 DOCX (guide)           colspan 0 rowspan 0  colspan 10 rowspan 0
+    03 PPTX (process def)     colspan 0 rowspan 0  colspan  5 rowspan 9
+    05 PPTX (kickoff/Gantt)   colspan 0 rowspan 0  colspan 68 rowspan 43
+
+The pptx/docx tables in this corpus ARE merge-critical (schedule/Gantt and
+role-authority matrices rely on spans), so route pptx + docx to a structural
+parser. See ``PARSER_ROUTING`` below.
 """
 
 from __future__ import annotations
@@ -16,6 +35,29 @@ import re
 from typing import Any
 
 from markdown_it import MarkdownIt
+
+# W6 verdict: route-to-structural for merge-bearing formats. markitdown
+# flattens colspan/rowspan at parse time; blockify cannot reconstruct them.
+# Map source extension -> preferred parser. Consumers may override per-doc.
+PARSER_ROUTING: dict[str, str] = {
+    # merge-critical office formats -> structural parser that emits <table>
+    # with colspan/rowspan (e.g. kordoc / mineru / opendataloader).
+    ".pptx": "structural",
+    ".docx": "structural",
+    # markitdown remains fine for formats without merged-cell tables.
+    ".xlsx": "markitdown",
+    ".pdf": "structural",
+}
+
+
+def recommended_parser(filename: str) -> str:
+    """Return 'structural' or 'markitdown' for a given source filename.
+
+    Defaults to 'markitdown' for unknown extensions. See PARSER_ROUTING and
+    the W6 finding in the module docstring for rationale.
+    """
+    ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    return PARSER_ROUTING.get(ext, "markitdown")
 
 
 def _new_parser() -> MarkdownIt:
