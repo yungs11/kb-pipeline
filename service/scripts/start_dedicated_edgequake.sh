@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+KEY=$(grep -E '^OPENAI_API_KEY=' /Users/xxx/workspace/99.projects/rag-edgequake-benchmark/docker/.env | head -1 | cut -d= -f2-)
+docker rm -f eq-pg-kbp 2>/dev/null || true
+docker run -d --name eq-pg-kbp -p 5433:5432 \
+  -e POSTGRES_USER=edgequake -e POSTGRES_PASSWORD=edgequake_secret -e POSTGRES_DB=edgequake \
+  ghcr.io/raphaelmansuy/edgequake-postgres:latest
+# The edgequake-postgres image runs an init pass that restarts the server mid-startup,
+# so a single pg_isready can pass against the transient init server. Require the DB to
+# accept a real connection N times in a row before launching edgequake.
+ok=0
+until [ "$ok" -ge 5 ]; do
+  if docker exec eq-pg-kbp psql -U edgequake -d edgequake -c 'SELECT 1' >/dev/null 2>&1; then
+    ok=$((ok+1))
+  else
+    ok=0
+  fi
+  sleep 1
+done
+EQ=/Users/xxx/workspace/8.kb-pipeline/edgequake/edgequake
+nohup env \
+  HOST=0.0.0.0 PORT=8081 \
+  EDGEQUAKE_HOST=0.0.0.0 EDGEQUAKE_PORT=8081 EDGEQUAKE_CHUNKER=adaptive \
+  ADAPTIVE_CHUNK_URL=http://localhost:18060 \
+  DATABASE_URL='postgres://edgequake:edgequake_secret@localhost:5433/edgequake?options=-c%20search_path%3Dpublic' \
+  EDGEQUAKE_LLM_PROVIDER=openai OPENAI_BASE_URL=https://openrouter.ai/api/v1 OPENAI_API_KEY="$KEY" \
+  EDGEQUAKE_DEFAULT_LLM_MODEL=qwen/qwen3.5-122b-a10b EDGEQUAKE_LLM_MODEL=qwen/qwen3.5-122b-a10b \
+  EDGEQUAKE_EMBEDDING_PROVIDER=openai EDGEQUAKE_EMBEDDING_BASE_URL=http://localhost:7997/v1 \
+  EDGEQUAKE_EMBEDDING_API_KEY=dummy EDGEQUAKE_EMBEDDING_MODEL=BAAI/bge-m3 EDGEQUAKE_EMBEDDING_DIMENSION=1024 \
+  PDFIUM_AUTO_CACHE_DIR=/tmp/eqkbp-pdfium RUST_LOG=info \
+  "$EQ/target/debug/edgequake" > /tmp/edgequake_kbp.log 2>&1 &
+disown
