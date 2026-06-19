@@ -9,14 +9,18 @@ Endpoints:
 """
 from __future__ import annotations
 
+import logging
 import os
 
-from fastapi import FastAPI, UploadFile, File, Form, Depends
+from fastapi import FastAPI, UploadFile, File, Form, Depends, BackgroundTasks
 
 from service.parsing import parse_to_markdown
 from service.ingest import run_ingest
 from service.edgequake import EdgequakeClient
 from service.llm import get_text_llm
+from kb_pipeline.community import build_workspace_communities
+
+logger = logging.getLogger("kb_pipeline.service")
 
 app = FastAPI(title="kb-pipeline")
 
@@ -51,3 +55,19 @@ def chunks(workspace_id: str, doc_id: str, eq=Depends(get_edgequake)):
 @app.delete("/doc", status_code=204)
 def delete(workspace_id: str, doc_id: str, eq=Depends(get_edgequake)):
     eq.delete_doc(workspace_id, doc_id)
+
+
+def _build_communities_job(workspace_id: str) -> None:
+    # W3 community build runs as a background task; never raise to the caller.
+    try:
+        build_workspace_communities(
+            workspace_id, llm=get_text_llm(), dsn=os.environ["KBP_PG_DSN"]
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("community build failed for workspace_id=%s", workspace_id)
+
+
+@app.post("/communities/build", status_code=202)
+def communities_build(workspace_id: str, background_tasks: BackgroundTasks):
+    background_tasks.add_task(_build_communities_job, workspace_id)
+    return {"status": "started", "workspace_id": workspace_id}
