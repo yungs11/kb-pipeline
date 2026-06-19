@@ -11,11 +11,14 @@ long as ``chunk_count > 0``.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable
 
 from service.parsing import parse_to_markdown, ParseError
 from kb_pipeline.blockify import hybrid_to_blocks
 from kb_pipeline.modal import enrich
+
+log = logging.getLogger(__name__)
 
 #: edgequake sync-upload statuses that count as a successful index.
 _OK_STATUSES = {"completed", "indexed", "processed"}
@@ -36,8 +39,12 @@ def run_ingest(file_bytes: bytes, filename: str, *, workspace_id: str, doc_id: s
         md = parse(file_bytes, filename, ocr_url=ocr_url, excel_url=excel_url)
         blocks = hybrid_to_blocks(md)
         enriched, _modal_ids = enrich(blocks, text_llm=text_llm, vision_llm=vision_llm)
-    except Exception as e:  # noqa: BLE001  (ParseError is a subclass of Exception)
-        return {"document_id": None, "chunk_count": 0, "status": "failed", "detail": f"front: {e}"}
+    except ParseError:
+        log.exception("parse failed for %s", filename)
+        return {"document_id": None, "chunk_count": 0, "status": "failed", "detail": "parse_failed"}
+    except Exception:  # noqa: BLE001
+        log.exception("ingest front-end failed for %s", filename)
+        return {"document_id": None, "chunk_count": 0, "status": "failed", "detail": "internal_error"}
 
     res = edgequake.post_document(enriched, workspace_id=workspace_id,
                                   tenant_id=_TENANT_ID, filename=filename)

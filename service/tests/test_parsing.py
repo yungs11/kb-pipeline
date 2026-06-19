@@ -1,4 +1,15 @@
-from service.parsing import parse_to_markdown, ParseError, _route
+from service.parsing import parse_to_markdown, ParseError, _route, _safe_basename
+
+
+def test_safe_basename_blocks_traversal():
+    assert _safe_basename("../../etc/passwd") == "passwd"
+    assert _safe_basename("/abs/x.pdf") == "x.pdf"
+    assert _safe_basename("a\\b.pdf") == "b.pdf"            # windows separator
+    assert _safe_basename("normal.pdf") == "normal.pdf"
+    assert _safe_basename("") == "upload"                    # empty default
+    assert not _safe_basename("..\x00evil").startswith(".")  # null stripped, no leading dot
+    # no path separators survive sanitation
+    assert "/" not in _safe_basename("../../x") and "\\" not in _safe_basename("..\\x")
 
 
 def test_route_uses_recommended_parser():

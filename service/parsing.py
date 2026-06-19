@@ -18,6 +18,22 @@ class ParseError(Exception):
     ...
 
 
+def _safe_basename(name: str) -> str:
+    """Sanitize an upload filename to a safe basename (no path traversal).
+
+    Takes the last path component for both POSIX and Windows separators,
+    strips nulls, and replaces anything outside ``[A-Za-z0-9._-]``.
+    """
+    import os
+    import re
+
+    base = os.path.basename((name or "").replace("\\", "/")).replace("\x00", "")
+    base = re.sub(r"[^A-Za-z0-9._-]", "_", base) or "upload"
+    if base.startswith("."):
+        base = "_" + base
+    return base
+
+
 def _route(filename: str) -> str:
     return recommended_parser(filename)  # "structural" | "markitdown"
 
@@ -58,7 +74,10 @@ def _parse_structural(file_bytes: bytes, filename: str, *, ocr_url: str, excel_u
     if ext == "pdf":
         import opendataloader_pdf, glob, os, tempfile
         with tempfile.TemporaryDirectory() as tmp:
-            src = os.path.join(tmp, filename)
+            src = os.path.join(tmp, _safe_basename(filename))
+            # Belt-and-braces: confirm the resolved path stays inside tmp.
+            if os.path.commonpath([os.path.realpath(tmp), os.path.realpath(src)]) != os.path.realpath(tmp):
+                raise ParseError("unsafe filename")
             with open(src, "wb") as fh:
                 fh.write(file_bytes)
             opendataloader_pdf.convert(
@@ -74,7 +93,7 @@ def _parse_structural(file_bytes: bytes, filename: str, *, ocr_url: str, excel_u
     # pptx/docx/image -> OCR/VLM structural service (:18050).
     r = httpx.post(
         f"{ocr_url}/api/v1/ocr",
-        files={"file": (filename, file_bytes)},
+        files={"file": (_safe_basename(filename), file_bytes)},
         data={"strategy": "hybrid"},
         timeout=600,
     )
