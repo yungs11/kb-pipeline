@@ -1,4 +1,8 @@
 markdown-it-py>=3.0
 beautifulsoup4>=4.12
 lxml>=5.0
+networkx>=3.0
+python-louvain>=0.16
+psycopg[binary]>=3.1
+httpx>=0.27
 pytest>=7.0
