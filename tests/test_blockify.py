@@ -150,3 +150,51 @@ def test_real_kordoc_sample_html_tables_preserved():
     # the markdown ## headings became text blocks with levels
     assert len(heading_blocks) >= 1
     assert any(h["text_level"] == 2 for h in heading_blocks)
+
+
+# --- W6: parser routing for merge-critical formats --------------------------
+
+from kb_pipeline.blockify import recommended_parser, PARSER_ROUTING
+
+
+def test_blockify_preserves_merges_from_structural_html():
+    """A structural parser's colspan/rowspan survives blockify intact."""
+    doc = (
+        "<table><tr><td rowspan=\"2\">A</td><td colspan=\"3\">B</td></tr>"
+        "<tr><td>c</td><td>d</td><td>e</td></tr></table>"
+    )
+    blocks = hybrid_to_blocks(doc)
+    tables = [b for b in blocks if b["type"] == "table"]
+    assert len(tables) == 1
+    body = tables[0]["table_body"]
+    assert 'rowspan="2"' in body
+    assert 'colspan="3"' in body
+
+
+def test_blockify_cannot_recover_merges_from_pipe_table():
+    """markitdown-style pipe table has no spans; blockify cannot invent them.
+
+    This is the W6 loss: a merged cell arrives as one filled + N blank cells.
+    """
+    doc = (
+        "| 구분 | 시간 | 발표자 |\n"
+        "| --- | --- | --- |\n"
+        "| 착수보고회 | 16:30 | 김프로 |\n"
+        "|  | 16:35 | 정프로 |\n"
+    )
+    blocks = hybrid_to_blocks(doc)
+    tables = [b for b in blocks if b["type"] == "table"]
+    assert len(tables) == 1
+    body = tables[0]["table_body"]
+    # blockify renders <table> but no merges can be recovered.
+    assert "<table>" in body
+    assert "colspan" not in body.lower()
+    assert "rowspan" not in body.lower()
+
+
+def test_recommended_parser_routes_office_to_structural():
+    assert recommended_parser("deck.pptx") == "structural"
+    assert recommended_parser("guide.DOCX") == "structural"
+    assert recommended_parser("sheet.xlsx") == "markitdown"
+    assert recommended_parser("notes.txt") == "markitdown"
+    assert PARSER_ROUTING[".pptx"] == "structural"
