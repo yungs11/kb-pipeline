@@ -1,5 +1,5 @@
-<!-- plan-version: v7 -->
-<!-- codex-validation: READY v7 at 2026-06-19T04:14:37Z -->
+<!-- plan-version: v9 -->
+<!-- codex-validation: READY v9 at 2026-06-19T07:42:06Z -->
 <!-- evidence-note: edgequake가 이 repo에 clone됨. 실제 Rust 워크스페이스 = `edgequake/edgequake/`(자체 Cargo.toml; crates/·migrations/ 여기). 아래 모든 edgequake 경로는 이 nested 워크스페이스(`edgequake/edgequake/`) 기준. 루트 `edgequake/crates/`는 별도 crate 세트라 무시. -->
 
 # 지식베이스 파이프라인 — SoT v2
@@ -66,8 +66,8 @@
 |--|--|--|--|--|
 | XLS/XLSX/HWP/HWPX/HWPML | **kordoc** | md + HTML 표 | ✅ 병합 colspan/rowspan 보존 | 모든 Excel 출력에 `<table>` 확인. HWP/HWPX/HWPML은 kordoc 신뢰(실측 생략, 사용자 결정) |
 | PDF | **OpenDataLoader** | md + HTML 표(`markdown_with_html=True`) | ✅ 실측(06=70개, pipe=0) | JRE 11+ 의존 |
-| pptx | **markitdown** | md(pipe표) | ❌ `<table>=0` | 표 단순 가정. 병합시 소실(W6) |
-| DOCX | **markitdown** | md(pipe표) | ❌ | 동일. 사용자 실측상 일반문서 우세 |
+| pptx | **markitdown(단순)/kordoc·MinerU(병합)** | md | markitdown ❌ / 구조파서 ✅ | **W6 실측**: markitdown은 병합(colspan/rowspan) 전부 소실(파싱시점, blockify 복구불가). 일정·간트·매트릭스 등 병합 중요 → kordoc/MinerU 라우팅 |
+| DOCX | **markitdown(단순)/kordoc·MinerU(병합)** | md | 동일 | **W6 실측**: 헤더 colspan 등 병합 소실 → 병합 중요시 구조파서. 텍스트형은 markitdown |
 | image/scanned PDF | **VLM/OCR(:18050)** | md + HTML 표 **+ `elements[]`** | ✅ + 구조배열 | `content.{markdown,html,text}` + `elements[{category,content}]` 보유 |
 
 - **표준 중간표현**: "markdown + inline HTML 표". kordoc·OpenDataLoader·VLM은 네이티브로 이 형태. markitdown만 pipe표 → §3.2에서 HTML로 승격.
@@ -181,10 +181,10 @@ edgequake `detect_communities_guarded`(Louvain, `edgequake-storage`) + 커뮤니
   - **구현(as built)**: `Pipeline`에 청킹 전략 주입 빌더가 없었기에(`Chunker::with_strategy`만 존재, Pipeline은 `Chunker::new`로 내부 생성) `crates/edgequake-pipeline/src/pipeline/mod.rs`에 `Pipeline::with_chunking_strategy(Arc<dyn ChunkingStrategy>)`를 **신설**했고, 적재 파이프라인 생성부 `crates/edgequake-api/src/workspace_pipeline_factory.rs`(`default_pipeline().with_extractor().with_embedding_provider()`)에서 `EDGEQUAKE_CHUNKER=adaptive`일 때 그 빌더를 호출하도록 배선했다.
   - 추출/임베딩/그래프/persistence/RLS는 edgequake 그대로 차용. default(플래그 미설정) 시 기존 토큰 청커 불변 — E2E로 확인(§11). (대안이었던 "크레이트 링크 별도 서비스"는 미채택.)
 - **W2 Modal enrichment**: 모달 블록 LLM 서술(텍스트/비전) + atomic 인라인 + (옵션)앵커 엔티티 등록.
-- **W3 Community 배치**: Louvain+리포트 트리거(스케줄/임계) + 가드 임계 설정.
-- **W4 정합성/RLS 운용**: 단일 Postgres 트랜잭션 경계 + RLS 세션 주입을 모든 경로에 누락없이 + 삭제/갱신 시 고아 엔티티/커뮤니티 무효화.
-- **W5 Search 머지**: 벡터+그래프+커뮤니티 결합 + RLS 적용(상당부분 edgequake 재사용, 튜닝).
-- **W6 파서 검증**: pptx/DOCX 병합표 손실 평가(필요시 pipe→HTML 승격 or 대체파서). (HWP/HWPX/HWPML은 kordoc 신뢰 → 실측 생략, 사용자 결정.)
+- ✅ **W3 Community 배치** (merged, §11): `kb_pipeline/community.py` — Louvain + qwen 리포트 + `global_query`. kb-pipeline 순수 Python(edgequake 불변).
+- ◐ **W4 정합성/RLS** (§8.7/§11): 앱레벨 격리 검증됨. DB레벨 FORCE RLS는 **superuser 롤 우회로 무력** → 프로덕션 하드닝 과제(비-superuser 롤+FORCE RLS+요청당 tx GUC).
+- ✅ **W5 Search 머지** (merged, §11): `kb_pipeline/search.py` — local(edgequake vector+graph)/global(community map-reduce) `route` + 워크스페이스 스코프.
+- ◐ **W6 파서 라우팅** (§3.1): markitdown은 pptx/DOCX 병합 소실(실측) → 병합 중요시 kordoc/MinerU 라우팅 권고. HWP 계열은 kordoc 신뢰(실측 생략).
 
 ---
 
@@ -201,7 +201,7 @@ edgequake `detect_communities_guarded`(Louvain, `edgequake-storage`) + 커뮤니
 4. **모달 이중추출 회피**: 모달 서술 청크를 edgequake가 추출할 때, (옵션)앵커 엔티티와 중복/충돌 안 나게 dedup 규칙 필요.
 5. **커뮤니티 재생성 비용/주기**(W3): 가드 임계 초과 시 거부 → KB 성장 곡선에 맞춘 임계·주기 설계.
 6. **offset/line 근사**(§5.3): adaptive_chunk 텍스트 변형 시 lineage 정확도.
-7. **RLS 세션 누락 위험**(W4): `set_config` 빠지면 조용한 빈 결과 → 미들웨어로 강제.
+7. ◐ **W4 RLS — 앱레벨 격리 검증됨, DB레벨은 프로덕션 하드닝 과제(§11)**: 워크스페이스 격리 실측 확인(별도 벡터테이블+필터, 교차누출 0). 단 **앱이 Postgres superuser 롤(`edgequake`, rolbypassrls=t)로 접속 → FORCE RLS도 무조건 우회**(롤백 tx로 실증) → DB레벨 RLS 현재 무력. 활성화 = (비-superuser 롤+GRANT)+FORCE RLS+요청당 tx GUC(요청=단일 tx)+NULL-tenant 폴백 정리, 결합 all-or-nothing.
 8. ✅ **임베딩 모델/차원**: **BGE-M3 1024d**(`BAAI/bge-m3`)를 세 구간(adaptive/edgequake/검색)에서 단일화 — E2E로 147행 전부 1024d 확인(§11). (KURE-v1도 1024d·BGE-M3 계열로 호환.) 운영 메모: bge-m3 main 리비전은 safetensors 부재(torch 2.2.2 CVE로 `pytorch_model.bin` 차단) → safetensors revision 심링크 필요.
 
 ---
@@ -217,7 +217,7 @@ edgequake `detect_communities_guarded`(Louvain, `edgequake-storage`) + 커뮤니
 ## 10. Codex 검증 체크리스트
 1. ✅(v6) W1 빌더+팩토리 배선 **구현·E2E 검증 완료**(§11) — config 플래그 `EDGEQUAKE_CHUNKER=adaptive`로 선택, default 경로 불변.
 2. `ChunkResult`/`TextChunk` 필드(§5.3)와 매핑이 코드와 일치하는지.
-3. RLS 정책이 `chunks`·graph까지 덮는지, `set_config` 주입 경로(§4)가 실재하는지.
+3. ◐(v8) RLS 정책은 documents/entities/relationships/chunks/graph 다 덮으나 **앱이 superuser라 미강제**(§11 W4) — `set_config` 주입 경로 부재 확인됨.
 4. 커뮤니티 가드 임계·트리거(§3.6)가 운영 가능한 형태인지.
 5. ✅(v2 반영) 모달 원자성은 adaptive_chunk가 아니라 **AdaptiveChunkStrategy**가 소유(§3.3/§3.4) — 잔여 검증: 전략의 `〈MODAL〉` 분리 로직이 토큰수/순서 정합을 유지하는지.
 6. ✅(v6) 단일 Postgres + **BGE-M3 1024d** 정합 — E2E로 147행 전부 1024d 확인(§11).
@@ -234,6 +234,7 @@ edgequake `detect_communities_guarded`(Louvain, `edgequake-storage`) + 커뮤니
 - W0 blockify + W2 modal: kb-pipeline `main` (pytest 21).
 - W1 AdaptiveChunkStrategy + `Pipeline::with_chunking_strategy()` + 팩토리 플래그: edgequake fork `edgequake-main`. cargo green, 유닛테스트 10.
 - kb-pipeline `main`이 edgequake submodule을 머지된 `edgequake-main`에 핀.
+- 테스트(main, writable venv `.venv-kb`): **pytest 60 passed** (blockify/modal 21 + community 14 + search 25; 2026-06-19 실행). W6 라우팅 테스트(+14)는 PR#4 브랜치. (codex read-only 샌드박스는 tmpdir 제약으로 pytest 미실행 — 환경 한계, 결함 아님.)
 
 **런타임 중 발견·수정한 edgequake 버그 2건(fork 반영)**
 1. 임베딩 차원 미적용: `OpenAIProvider`가 미지 모델을 1536 하드코딩 + `provider_setup`이 `EDGEQUAKE_EMBEDDING_DIMENSION`을 로깅만 함 → `with_embedding_dimension` 추가+적용. `edgequake-llm`이 crates.io 의존(0.6.23)이라 `vendor/edgequake-llm`+`[patch.crates-io]`로 패치.
@@ -242,7 +243,11 @@ edgequake `detect_communities_guarded`(Louvain, `edgequake-storage`) + 커뮤니
 **정정 사실**
 - 실 서버 바이너리 = 루트 패키지 `edgequake`(`cargo build --bin edgequake`), `edgequake-api`(lib) 아님.
 
-**미완(다음 = W3~W5)**: W3 커뮤니티 배치(Louvain 리포트), W4 RLS 세션 미들웨어·삭제 정합성, W5 검색 머지 고도화(검색 기본은 §11에서 동작 확인).
+**W3~W6 (2026-06-19)**
+- ✅ **W3 community reports** (merged): `kb_pipeline/community.py` — AGE 그래프→Louvain(python-louvain)→커뮤니티별 qwen 리포트(GraphRAG 프롬프트 이식)→같은 Postgres `community_reports` 저장→`global_query` map-reduce. 라이브: 커뮤니티 60/리포트 15/광역질의가 휴가분류·핵심기준 복원. edgequake Rust 불변.
+- ✅ **W5 unified search** (merged): `kb_pipeline/search.py` — `route`(local/global)+워크스페이스 스코프. 라이브 2워크스페이스(휴가/담보신탁): local 정확, global map-reduce, **교차 스코핑 누출 0**.
+- ◐ **W4 RLS**: 앱레벨 격리 실측 확인. DB레벨 FORCE RLS는 **앱이 Postgres superuser 롤로 접속해 무조건 우회**되어 현재 무력 → 프로덕션 하드닝 과제(§8.7). 변경 미적용(known-good 유지).
+- ◐ **W6 parser routing**: markitdown은 pptx/DOCX 병합표를 파싱시점에 소실(복구불가) → **병합 중요 pptx/DOCX는 kordoc/MinerU 라우팅**(§3.1 반영). 텍스트형은 markitdown.
 
 ---
 
