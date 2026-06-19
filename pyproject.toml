@@ -1,0 +1,23 @@
+[project]
+name = "kb-pipeline"
+version = "0.1.0"
+description = "Front-end stages (W0 Blockify, W2 Modal enrichment) of the KB pipeline."
+requires-python = ">=3.9"
+dependencies = [
+    "markdown-it-py>=3.0",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["kb_pipeline*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
