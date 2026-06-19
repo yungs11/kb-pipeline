@@ -21,3 +21,6 @@ venv/
 
 # Node tooling (if any)
 node_modules/
+
+# Large binary test corpus (track via git-lfs if needed)
+test_doc/
