@@ -24,6 +24,12 @@ from .community import (
     global_query,
     make_openrouter_llm,
 )
+from .search import (
+    local_search,
+    global_search,
+    route,
+    unified_search,
+)
 
 __all__ = [
     "hybrid_to_blocks",
@@ -39,4 +45,9 @@ __all__ = [
     "build_workspace_communities",
     "global_query",
     "make_openrouter_llm",
+    # W5 unified search
+    "local_search",
+    "global_search",
+    "route",
+    "unified_search",
 ]
