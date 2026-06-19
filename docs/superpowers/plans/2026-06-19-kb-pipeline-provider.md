@@ -1,5 +1,5 @@
-<!-- plan-version: v1 -->
-<!-- codex-validation: PENDING -->
+<!-- plan-version: v2 -->
+<!-- codex-validation: READY v2 at 2026-06-19T08:18:22Z -->
 
 # kb-pipeline knowledge_base provider — Implementation Plan
 
@@ -379,7 +379,7 @@ NOTE: verify the real edgequake chunk-fetch route in `edgequake/edgequake/crates
 - Produces: `KbPipelineClient(base_url, timeout=600, max_retries=3)` with `ingest(*, file_bytes, filename, content_type, workspace_id, doc_id) -> KbPipelineIngestOutcome`, `fetch_chunk_meta(workspace_id, doc_id) -> list[dict]`, `delete_doc(workspace_id, doc_id) -> None`, `build_communities(workspace_id) -> None`. `KbPipelineIngestOutcome` has `document_id, chunk_count, status` and `succeeded = status=="completed" and chunk_count>0`.
 
 - [ ] **Step 1: Failing test** — with a mocked httpx transport, assert `ingest` POSTs multipart to `{base}/ingest` and maps `{document_id,chunk_count,status}` → outcome with `succeeded` True when status=="completed" & chunk_count>0; `fetch_chunk_meta` GETs `/chunks`; `delete_doc` DELETEs `/doc`.
-- [ ] **Step 2: Run → FAIL** — `cd <kb> && <venv>/bin/python -m pytest backend/tests/test_kb_pipeline_client.py -q`
+- [ ] **Step 2: Run → FAIL** — `cd /Users/xxx/workspace/99.projects/shinhan_trust/knowledge_base && /Users/xxx/workspace/99.projects/shinhan_trust/knowledge_base/.venv/bin/python -m pytest backend/tests/test_kb_pipeline_client.py -q`
 - [ ] **Step 3: Implement** the client (mirror `raganything_client.py`; multipart upload via httpx; dataclass outcome with `succeeded` property).
 - [ ] **Step 4: Run → PASS.**
 - [ ] **Step 5: Commit** — `git add backend/app/clients/kb_pipeline_client.py backend/tests/test_kb_pipeline_client.py && git commit -m "feat(provider): KbPipelineClient"`
@@ -420,7 +420,7 @@ NOTE: verify the real edgequake chunk-fetch route in `edgequake/edgequake/crates
 - Modify: `frontend/app/kb/page.tsx` (add `<option value="kb_pipeline">kb-pipeline (내부 파이프라인)</option>`)
 
 - [ ] **Step 1: Add the option** under the existing `<select id="kb-provider">`.
-- [ ] **Step 2: Verify build** — Run: `cd <kb>/frontend && npm run build` (or `npx tsc --noEmit`) → no type errors.
+- [ ] **Step 2: Verify build** — Run: `cd /Users/xxx/workspace/99.projects/shinhan_trust/knowledge_base/frontend && npm run build` (or `npx tsc --noEmit`) → no type errors.
 - [ ] **Step 3: Commit** — `git commit -am "feat(provider): kb_pipeline frontend dropdown option"`
 
 ### Task B5: Community job after ingest (non-blocking)
@@ -449,7 +449,7 @@ NOTE: verify the real edgequake chunk-fetch route in `edgequake/edgequake/crates
 **Files:**
 - Create: `service/tests/test_e2e_smoke.md` (manual/automated runbook)
 
-- [ ] **Step 1:** Bring up: dedicated edgequake (Task 0), bge-m3 :7997, adaptive_chunk :18060, OCR :18050; start kb-pipeline service `cd /Users/xxx/workspace/8.kb-pipeline && KBP_OPENAI_API_KEY=$(...) KBP_PG_DSN=postgres://edgequake:edgequake_secret@localhost:5433/edgequake .venv-kb/bin/uvicorn service.app:app --port 19000`.
+- [ ] **Step 1:** Bring up: dedicated edgequake (Task 0), bge-m3 :7997, adaptive_chunk :18060, OCR :18050; start kb-pipeline service: `cd /Users/xxx/workspace/8.kb-pipeline && KBP_OPENAI_API_KEY=$(grep -E '^OPENAI_API_KEY=' /Users/xxx/workspace/99.projects/rag-edgequake-benchmark/docker/.env | cut -d= -f2-) KBP_PG_DSN='postgres://edgequake:edgequake_secret@localhost:5433/edgequake' KBP_EDGEQUAKE_URL=http://localhost:8081 .venv-kb/bin/uvicorn service.app:app --port 19000`.
 - [ ] **Step 2:** Verify `curl :19000/healthz` and a direct `POST /ingest` with a real `test_doc` PDF (`/Users/xxx/workspace/8.kb-pipeline/test_doc/3-3. 휴가규정*.pdf`) → `{chunk_count>0,status:"completed"}`; `GET /chunks` returns chunks whose text includes a `〈MODAL` table span.
 - [ ] **Step 3:** In knowledge_base: start backend (:8001) with `kb_pipeline_base_url=http://localhost:19000` + frontend; create a KB with provider=kb_pipeline; upload the same test_doc; confirm doc_guard runs, document reaches status=ready, and chunks render on `/kb/{id}/documents/{docId}`.
 - [ ] **Step 4:** Confirm a community-build job was enqueued (and, when it finishes, `community_reports` rows exist for the KB workspace).
