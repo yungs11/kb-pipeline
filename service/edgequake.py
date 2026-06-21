@@ -3,9 +3,14 @@
 Routes verified against ``edgequake/crates/edgequake-api/src/routes.rs`` and the
 handlers:
 
-  * ``POST  /api/v1/documents``                 -> UploadDocumentResponse
-        ``{document_id, status, track_id, chunk_count?, ...}``. The synchronous
-        path returns ``status == "processed"`` with a populated ``chunk_count``.
+  * ``POST  /api/v1/documents`` (``async_processing: true``) -> UploadDocumentResponse
+        ``{document_id, status:"pending", task_id, track_id}``. The async path
+        enqueues a background task; ``chunk_count`` is NOT populated here. We then
+        poll ``GET /api/v1/tasks/{track_id}`` (workspace-scoped) until the
+        ``TaskStatus`` reaches ``indexed`` (success) or ``failed``/``cancelled``,
+        reading ``chunk_count``/``document_id`` from the task ``result``. Async is
+        used (over sync ``async_processing:false``) so slow qwen extraction is not
+        capped by edgequake's sync HTTP timeout (120s cloud / 600s local).
   * ``GET   /api/v1/documents/{document_id}``    -> DocumentDetailResponse
         ``{id, chunk_count, content, ...}``. There is NO ``/documents/{id}/chunks``
         route; chunk bodies are fetched per-chunk.
@@ -91,18 +96,157 @@ class EdgequakeClient:
                 return str(w.get("id"))
         raise ValueError(f"edgequake workspace lookup failed (slug={slug})")
 
-    def post_document(self, content, *, workspace_id, tenant_id, filename):
+    #: Task-poll terminal states (TaskStatus Display strings, lowercase).
+    #: success == "indexed"; "failed"/"cancelled" are terminal failures. The
+    #: document-detail gate then re-confirms via the authoritative chunk_count.
+    _POLL_OK = "indexed"
+    _POLL_FAIL = ("failed", "cancelled")
+
+    def post_document(
+        self,
+        content,
+        *,
+        workspace_id,
+        tenant_id,
+        filename,
+        poll_timeout=1200.0,
+        poll_interval=3.0,
+    ):
+        """Submit a document ASYNC and poll its task until terminal.
+
+        WHY async: synchronous ``POST /api/v1/documents`` (async_processing:false)
+        is wrapped in a provider-side HTTP timeout (120s for cloud, 600s for
+        local providers) — too tight for slow qwen entity extraction on large
+        docs in production. Async enqueues a background task and we poll
+        ``GET /api/v1/tasks/{track_id}`` (workspace-scoped) until the
+        ``TaskStatus`` reaches ``indexed`` (success) or ``failed``/``cancelled``,
+        with our own generous overall ``poll_timeout``.
+
+        Per-workspace isolation is unchanged: the same X-Workspace-ID/X-Tenant-ID
+        headers scope both the submit and every poll (the task endpoint 404s if
+        the header workspace does not own the task). The returned dict shape is
+        identical to the old sync path: ``{document_id, chunk_count, status}``.
+        """
+        hdr = {"X-Workspace-ID": workspace_id, "X-Tenant-ID": tenant_id}
+        # 1) Submit async — 201 returns {document_id, status:"pending", task_id, track_id};
+        #    chunk_count is NOT populated on the async path (only on sync).
         r = self.http.post(
             f"{self.base}/api/v1/documents",
-            headers={"X-Workspace-ID": workspace_id, "X-Tenant-ID": tenant_id},
-            json={"content": content, "title": filename, "async_processing": False},
+            headers=hdr,
+            json={"content": content, "title": filename, "async_processing": True},
         )
         r.raise_for_status()
-        j = r.json()
+        j = r.json() or {}
+        document_id = j.get("document_id") or j.get("id")
+        # Prefer task_id (the queue's task.track_id) for polling; fall back to the
+        # batch track_id, then any returned id.
+        track_id = j.get("task_id") or j.get("track_id") or document_id
+        submit_status = (j.get("status") or "").lower()
+
+        # A duplicate that is still processing is reported by the server with no
+        # new task (task_id:None, status:"duplicate_processing"); fall through to
+        # the document gate which reads chunk_count/status for the existing doc.
+        if not track_id or submit_status == "duplicate_processing":
+            return self._gate_by_document(document_id, hdr)
+
+        # 2) Poll the task until a terminal TaskStatus (indexed/failed/cancelled).
+        poll_status, poll_err, result = self._poll_task(
+            track_id, hdr, poll_timeout, poll_interval
+        )
+        if poll_status in self._POLL_FAIL:
+            return {
+                "document_id": document_id,
+                "chunk_count": 0,
+                "status": "failed",
+                "detail": poll_err or f"task {poll_status}",
+            }
+        if poll_status != self._POLL_OK:
+            # timed out without reaching a terminal state.
+            return {
+                "document_id": document_id,
+                "chunk_count": 0,
+                "status": "failed",
+                "detail": f"task poll timeout after {poll_timeout:.0f}s (last={poll_status})",
+            }
+
+        # 3) Indexed → chunk_count/document_id are written atomically into the
+        #    task ``result`` by mark_success ({document_id, chunk_count, ...}).
+        #    Prefer that (provider-independent, no extra round-trip); only fall
+        #    back to GET /documents/{id} if result lacks a usable chunk_count.
+        rid = result.get("document_id") if isinstance(result, dict) else None
+        rcc = result.get("chunk_count") if isinstance(result, dict) else None
+        document_id = rid or document_id
+        if rcc is not None:
+            chunk_count = int(rcc or 0)
+            ok = chunk_count > 0
+            return {
+                "document_id": document_id,
+                "chunk_count": chunk_count,
+                # normalize to the terminal-OK token the ingest layer accepts.
+                "status": "indexed" if ok else "failed",
+                "detail": None if ok else "task indexed but chunk_count=0",
+            }
+        return self._gate_by_document(document_id, hdr)
+
+    def _poll_task(self, track_id, headers, poll_timeout, poll_interval):
+        """Poll GET /api/v1/tasks/{track_id} until terminal.
+
+        Returns ``(status, error_message, result)`` where ``status`` is the
+        lowercase TaskStatus, ``result`` is the task's nested result dict (holds
+        ``document_id``/``chunk_count`` on success).
+
+        The task endpoint is workspace-scoped (X-Workspace-ID must own the task),
+        so we pass the same headers as the submit. A transient 404 right after
+        submit (task not yet visible) or a 5xx (pool warmup) is tolerated and
+        re-polled until the deadline.
+        """
+        url = f"{self.base}/api/v1/tasks/{track_id}"
+        deadline = time.monotonic() + poll_timeout
+        last_status = "pending"
+        while True:
+            t = self.http.get(url, headers=headers)
+            if t.status_code == 404 or t.status_code >= 500:
+                # not visible yet / pool warming — retry until deadline.
+                if time.monotonic() >= deadline:
+                    return last_status, None, None
+                time.sleep(poll_interval)
+                continue
+            t.raise_for_status()
+            tj = t.json() or {}
+            last_status = (tj.get("status") or "").lower()
+            if last_status == self._POLL_OK or last_status in self._POLL_FAIL:
+                err = tj.get("error_message")
+                if not err and isinstance(tj.get("error"), dict):
+                    err = tj["error"].get("message")
+                result = tj.get("result") if isinstance(tj.get("result"), dict) else None
+                return last_status, err, result
+            if time.monotonic() >= deadline:
+                return last_status, None, None
+            time.sleep(poll_interval)
+
+    def _gate_by_document(self, document_id, headers):
+        """Read chunk_count/status from GET /documents/{id} (fallback gate).
+
+        Used only when the task result is unavailable (duplicate-processing path
+        or a result missing chunk_count). The async pipeline stores chunks under
+        the deterministic ``{document_id}-chunk-{N}`` key (chunker/mod.rs), which
+        the detail handler counts via its ``-chunk-`` prefix scan — so this
+        chunk_count is the same ground truth the old sync response carried.
+        Returns the stable ``{document_id, chunk_count, status}`` shape; ``status``
+        stays the doc's own string for the ingest layer's _OK_STATUSES check.
+        """
+        if not document_id:
+            return {"document_id": None, "chunk_count": 0, "status": "failed",
+                    "detail": "async submit returned no document_id"}
+        d = self.http.get(
+            f"{self.base}/api/v1/documents/{document_id}", headers=headers
+        )
+        d.raise_for_status()
+        dj = d.json() or {}
         return {
-            "document_id": j.get("document_id") or j.get("id"),
-            "chunk_count": int(j.get("chunk_count") or 0),
-            "status": j.get("status"),
+            "document_id": dj.get("id") or document_id,
+            "chunk_count": int(dj.get("chunk_count") or 0),
+            "status": dj.get("status"),
         }
 
     def fetch_chunks(self, workspace_id, doc_id):

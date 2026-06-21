@@ -2,11 +2,21 @@ from service.ingest import run_ingest
 
 
 class FakeEq:
+    """Fake modelling the ASYNC submit+poll path of EdgequakeClient.post_document.
+
+    The real client submits with ``async_processing:true``, polls the task to
+    ``indexed``, and returns ``{document_id, chunk_count, status:"indexed"}`` read
+    from the task ``result``. The fake records the submitted content and emits the
+    same terminal shape, accepting the poll knobs the real signature now exposes.
+    """
+
     def __init__(self):
         self.posted = None
 
-    def post_document(self, content, *, workspace_id, tenant_id, filename):
+    def post_document(self, content, *, workspace_id, tenant_id, filename,
+                      poll_timeout=1200.0, poll_interval=3.0):
         self.posted = content
+        # submit -> poll(indexed) collapsed: terminal result of the async flow.
         return {"document_id": "d1", "chunk_count": 3, "status": "indexed"}
 
 

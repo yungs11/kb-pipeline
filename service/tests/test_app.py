@@ -17,6 +17,7 @@ class FakeEq:
     def post_document(self, content, **k):
         # the resolved edgequake uuid (not the raw kb id) must be used downstream.
         assert k["workspace_id"] == EQ_WS
+        # terminal shape of the async submit+poll flow (task reached "indexed").
         return {"document_id": "d1", "chunk_count": 2, "status": "indexed"}
 
     def fetch_chunks(self, workspace_id, doc_id):
