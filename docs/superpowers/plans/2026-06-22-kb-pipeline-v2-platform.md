@@ -1,5 +1,5 @@
-<!-- plan-version: v2 -->
-<!-- codex-validation: READY v2 at 2026-06-22T03:29:58Z -->
+<!-- plan-version: v3 -->
+<!-- codex-validation: PENDING -->
 
 # kb-pipeline v2 — RAG 수집 플랫폼 Implementation Plan
 
@@ -18,6 +18,7 @@
 - 임베딩 1024d `BAAI/bge-m3`(:7997), LLM `qwen/qwen3.5-122b-a10b`(OpenRouter, 키는 `/Users/xxx/workspace/99.projects/rag-edgequake-benchmark/docker/.env`의 OPENAI_API_KEY — **절대 출력 금지**).
 - edgequake DATABASE_URL에 `search_path=public` **금지**(AGE 연산자 깨짐).
 - facade 규율: 각 엔드포인트는 은닉/정책/변환 가치 추가(단순 forward 금지).
+- **knowledge_base = RAG 비교 플랫폼**(provider×chunker 선택→적재·검색 비교). v2 변경은 **ADDITIVE only**: 기존 provider(dify/edgequake/raganything/ragflow)의 적재·검색·**진행단계 표시**·문서상세 동작을 **100% 보존**. kb_pipeline 전용 분기만 추가. kb_pipeline은 dropdown의 **한 peer provider**(특별취급 금지) — provider=kb_pipeline일 때만 tail이 facade를 단계별 호출.
 - 호환: adaptive_chunk 기존 호출자(마커 없는 입력)·v1 `/ingest`·다른 provider(dify/edgequake/raganything/ragflow) 동작 보존, 기존 테스트 green.
 - 포트: facade :19000, parse-svc :19001(신규), adaptive_chunk :18060, edgequake(passthrough) :8081, bge-m3 :7997, OCR :18050, doc_guard :8000, knowledge_base :8088.
 
@@ -115,9 +116,10 @@
 - (a) app-router 풀페이지 `frontend/app/kb/[kbId]/documents/[docId]/page.tsx` — **`ChunkingSelectionCard`(line ~382) 이미 완비**(method_selected + methods_compared 비교표 SC/ICC/DCC/BI/RC/BA/avg; `detail.chunking_selection` 있을 때만, line ~690). 이게 사용자가 본 화면.
 - (b) 모달 `frontend/components/DocumentDetailModal.tsx`(DocumentList에서 사용) — **chunking_selection 렌더 없음**(메타/gate/chunks_meta만, line 85-91·195-369).
 
-**Files:** Modify `frontend/components/JobList.tsx`(STAGE_ORDER); Modify `frontend/app/kb/[kbId]/documents/[docId]/page.tsx`(ChunkingSelectionCard에 R3 캐비엇 주석); Create `frontend/components/ChunkingSelectionCard.tsx`(page.tsx의 카드를 공유 컴포넌트로 추출); Modify `frontend/components/DocumentDetailModal.tsx`(공유 카드 렌더 추가); Modify `frontend/lib/types.ts`/문서상세 스키마(모달의 detail 타입에 `chunking_selection` 포함 확인).
+**Files:** Modify `frontend/components/JobList.tsx`(**provider-aware 단계**: 기존 STAGE_ORDER 유지 + kb_pipeline 전용 order 추가, 절대 전역 교체 ✗); Modify `frontend/app/kb/[kbId]/documents/[docId]/page.tsx`(ChunkingSelectionCard에 R3 캐비엇 주석); Create `frontend/components/ChunkingSelectionCard.tsx`(page.tsx의 카드를 공유 컴포넌트로 추출); Modify `frontend/components/DocumentDetailModal.tsx`(공유 카드 렌더 추가); Modify `frontend/lib/types.ts`/문서상세 스키마(모달의 detail 타입에 `chunking_selection` 포함 확인).
 **Interfaces:** `ChunkingSelectionCard({selection: ChunkingSelection})` 공유 컴포넌트(page.tsx·모달 양쪽 import).
-- [ ] Step1: `JobList.tsx` `STAGE_ORDER = [gate→게이트, parse→파싱, chunk→청킹, insert→적재, persist_meta→메타저장]` (misleading `select/"청킹선택"` 제거, 레거시 `dify→"적재"` 라벨 fallback만 유지해 다른 provider 렌더 보존). StageSteps tick 로직 불변.
+- [ ] Step1: **provider-aware 단계표시** (knowledge_base 비교도구 본질 보존). 기존 `STAGE_ORDER`(`gate→select→dify→persist_meta→graph_rebuild`)는 **절대 건드리지 않음** → dify/edgequake/raganything/ragflow 잡 진행표시 **100% 불변**. 신규 상수 `KB_PIPELINE_STAGE_ORDER = [gate→"게이트", parse→"파싱", chunk→"청킹", insert→"적재", persist_meta→"메타저장"]` 추가. `StageSteps`가 잡의 **provider(=kb_pipeline 여부)** 로 두 order 중 선택(provider가 JobStatus에 없으면, kb_pipeline이 emit하는 stage 어휘 `parse/chunk/insert` 감지로 분기 — 백엔드 JobStatus에 provider 노출이 더 확실하니 가능하면 그 경로). kb_pipeline 잡만 새 단계 렌더, 그 외 0 영향. tick 로직 자체는 공통.
+  - (확인) `JobStatus`/jobs API에 provider가 있는지 실측 — 없으면 stage-어휘 감지로, 있으면 provider로 분기.
 - [ ] Step2: page.tsx의 `ChunkingSelectionCard`를 `frontend/components/ChunkingSelectionCard.tsx`로 **추출**(동일 렌더), page.tsx는 import해 사용(동작 불변). 카드 헤더/설명에 **R3 캐비엇 주석** 추가: kb_pipeline 문서는 "본문 gap 기준 선택(modal 영역 제외)" 한 줄.
 - [ ] Step3: `DocumentDetailModal.tsx`에 `detail.chunking_selection && <ChunkingSelectionCard selection={detail.chunking_selection} />` 추가(chunks_meta 섹션 근처). 모달의 detail 타입/응답에 `chunking_selection`이 포함되는지 확인(미포함이면 백엔드 DocumentDetail 응답·`lib/types.ts`에 추가 — page.tsx와 동일 스키마라 이미 있을 가능성 높음, 실측).
 - [ ] Step4: `cd frontend && npx tsc --noEmit` → clean(exit 0). 두 view 모두 `chunking_selection` 있을 때 카드 렌더(없으면 미표시 — dify/다른 provider 화면 불변).
@@ -144,5 +146,5 @@
 ## Self-Review
 - **Spec 커버리지**: parse-svc(2.1) / adaptive_chunk marker(1.1) / edgequake passthrough(1.2) / facade capability(1.3-1.5,2.2-2.3) / knowledge_base 소비자(3.1-3.5) / 스모크(4.1). spec §3-§10 매핑.
 - **타입 일관**: chunk 응답 키(chunks/method_selected/scores/methods_compared) 1.3↔3.2; insert 키(document_id/chunk_count/status) 1.4↔3.1↔3.2; chunk_id `{document_id}-chunk-{i}` 1.4↔3.2; 구분자 `\u{001e}` 1.2↔1.4.
-- **호환**: adaptive_chunk 마커0 회귀(1.1), 다른 provider 회귀(3.2), v1 `/ingest` 보존.
+- **호환/비교도구 보존**: adaptive_chunk 마커0 회귀(1.1), 다른 provider tail 회귀(3.2), v1 `/ingest` 보존, **프론트 진행표시 provider-aware(기존 provider STAGE_ORDER 불변, kb_pipeline만 추가)**(3.4), ChunkingSelectionCard는 chunking_selection 있을 때만(dify 화면 불변). knowledge_base는 비교 플랫폼 본질 유지 — kb_pipeline은 peer provider.
 - **구현시 확인(flag)**: edgequake `/query` 검색 응답 형식(1.5), parse-svc OCR 계약(2.1) — 실코드 확인.
