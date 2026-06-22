@@ -1,4 +1,4 @@
-<!-- plan-version: v1 -->
+<!-- plan-version: v2 -->
 <!-- codex-validation: PENDING -->
 
 # kb-pipeline v2 — RAG 수집 플랫폼 Implementation Plan
@@ -110,9 +110,18 @@
 **Files:** Modify `backend/app/workers/tasks.py`(kb_pipeline 경로 on_stage→set_state), `backend/app/config.py`(`kb_pipeline_base_url=:19000`), `backend/app/dependencies.py`(KbPipelineClient 주입). Test `backend/tests/test_kb_provider_accept.py`.
 - [ ] Step1 실패테스트: kb_pipeline ingest가 phase별 set_state. Step2 → FAIL. Step3 구현. Step4 → PASS. Step5 commit.
 
-### Task 3.4: 프론트 단계 + 선택근거 카드
-**Files:** Modify `frontend/components/JobList.tsx`(STAGE_ORDER = gate→parse→chunk→insert→persist_meta; select/dify 제거, fallback 라벨 유지). 문서상세 카드는 기존 `chunking_selection` 렌더 재사용(진짜 데이터).
-- [ ] Step1 STAGE_ORDER 교체. Step2 `cd frontend && npx tsc --noEmit` clean. Step3 commit.
+### Task 3.4: 프론트 단계 + 선택근거 카드 (두 detail view 일관)
+**상태 확인(코드 실측):** 문서상세는 **두 곳**에서 렌더된다 —
+- (a) app-router 풀페이지 `frontend/app/kb/[kbId]/documents/[docId]/page.tsx` — **`ChunkingSelectionCard`(line ~382) 이미 완비**(method_selected + methods_compared 비교표 SC/ICC/DCC/BI/RC/BA/avg; `detail.chunking_selection` 있을 때만, line ~690). 이게 사용자가 본 화면.
+- (b) 모달 `frontend/components/DocumentDetailModal.tsx`(DocumentList에서 사용) — **chunking_selection 렌더 없음**(메타/gate/chunks_meta만, line 85-91·195-369).
+
+**Files:** Modify `frontend/components/JobList.tsx`(STAGE_ORDER); Modify `frontend/app/kb/[kbId]/documents/[docId]/page.tsx`(ChunkingSelectionCard에 R3 캐비엇 주석); Create `frontend/components/ChunkingSelectionCard.tsx`(page.tsx의 카드를 공유 컴포넌트로 추출); Modify `frontend/components/DocumentDetailModal.tsx`(공유 카드 렌더 추가); Modify `frontend/lib/types.ts`/문서상세 스키마(모달의 detail 타입에 `chunking_selection` 포함 확인).
+**Interfaces:** `ChunkingSelectionCard({selection: ChunkingSelection})` 공유 컴포넌트(page.tsx·모달 양쪽 import).
+- [ ] Step1: `JobList.tsx` `STAGE_ORDER = [gate→게이트, parse→파싱, chunk→청킹, insert→적재, persist_meta→메타저장]` (misleading `select/"청킹선택"` 제거, 레거시 `dify→"적재"` 라벨 fallback만 유지해 다른 provider 렌더 보존). StageSteps tick 로직 불변.
+- [ ] Step2: page.tsx의 `ChunkingSelectionCard`를 `frontend/components/ChunkingSelectionCard.tsx`로 **추출**(동일 렌더), page.tsx는 import해 사용(동작 불변). 카드 헤더/설명에 **R3 캐비엇 주석** 추가: kb_pipeline 문서는 "본문 gap 기준 선택(modal 영역 제외)" 한 줄.
+- [ ] Step3: `DocumentDetailModal.tsx`에 `detail.chunking_selection && <ChunkingSelectionCard selection={detail.chunking_selection} />` 추가(chunks_meta 섹션 근처). 모달의 detail 타입/응답에 `chunking_selection`이 포함되는지 확인(미포함이면 백엔드 DocumentDetail 응답·`lib/types.ts`에 추가 — page.tsx와 동일 스키마라 이미 있을 가능성 높음, 실측).
+- [ ] Step4: `cd frontend && npx tsc --noEmit` → clean(exit 0). 두 view 모두 `chunking_selection` 있을 때 카드 렌더(없으면 미표시 — dify/다른 provider 화면 불변).
+- [ ] Step5: commit.
 
 ### Task 3.5: 검색 배선
 **Files:** Modify `backend/app/...`(kb_pipeline KB 검색 → KbPipelineClient.search) + 테스트.
