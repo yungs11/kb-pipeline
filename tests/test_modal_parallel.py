@@ -65,3 +65,45 @@ def test_invalid_max_workers_rejected():
                 [{"type": "table", "table_body": "<x/>"}],
                 text_llm=lambda p, pl: "{}", vision_llm=None, max_workers=bad,
             )
+
+
+def test_modal_llm_failure_does_not_fail_whole_document():
+    # 런타임 LLM 실패(524/timeout 등)는 그 모달만 흡수 0·요약 생략으로 강등하고
+    # 문서 전체 enrich 는 성공해야 한다(표 payload 는 보존).
+    calls = {"n": 0}
+
+    def llm(prompt, payload):
+        calls["n"] += 1
+        raise RuntimeError("524 proxy timeout")
+
+    blocks = [
+        {"type": "text", "text": "INTRO"},
+        {"type": "table", "table_body": "<TBL/>"},
+        {"type": "text", "text": "OUTRO"},
+    ]
+    content, ids = enrich(blocks, text_llm=llm, vision_llm=None)
+    assert ids == ["T1"]                     # 모달은 여전히 방출
+    assert "<TBL/>" in content               # 표 본문 보존
+    assert "INTRO" in content and "OUTRO" in content
+    # 흡수 0 → 주변 텍스트는 모달 밖
+    assert content.index("INTRO") < content.index("〈MODAL")
+    assert content.index("OUTRO") > content.index("〈/MODAL〉")
+    assert calls["n"] == 2                    # 1회 재시도 후 폴백
+
+
+def test_partial_modal_failure_other_modals_unaffected():
+    # 표1만 실패, 표2는 정상 → 표2 요약은 살아있고 문서 성공.
+    def llm(prompt, payload):
+        if "<BAD/>" in payload:
+            raise RuntimeError("524")
+        return json.dumps({"summary": "정상요약", "title_count": 0, "footnote_count": 0})
+
+    blocks = [
+        {"type": "table", "table_body": "<BAD/>"},
+        {"type": "text", "text": "사이"},
+        {"type": "table", "table_body": "<GOOD/>"},
+    ]
+    content, ids = enrich(blocks, text_llm=llm, vision_llm=None)
+    assert ids == ["T1", "T2"]
+    assert "<BAD/>" in content and "<GOOD/>" in content
+    assert "정상요약" in content              # 정상 표 요약 보존

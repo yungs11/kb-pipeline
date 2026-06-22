@@ -225,14 +225,22 @@ def enrich(
         })
 
     # Phase B — 모달 LLM 병렬 호출(ex.map 은 입력 순서 보존).
+    # 런타임 LLM 실패(524/timeout/5xx 등)는 **그 모달만** 흡수 0·요약 생략으로 강등하고
+    # 문서 전체는 살린다(표 payload 는 wrap 에 그대로 보존). 1회 재시도(일시적 524 흡수).
     def _call(m: dict) -> tuple[str, int, int]:
         prompt = _boundary_prompt(m["type"])
         payload = _boundary_payload(m["before"], m["after"], m["body"])
-        if m["type"] == "image":
-            raw = vision_llm(m["body"], prompt + "\n\n" + payload)
-        else:
-            raw = text_llm(prompt, payload)
-        return _parse_boundary_response(raw, len(m["before"]), len(m["after"]))
+        for attempt in range(2):
+            try:
+                if m["type"] == "image":
+                    raw = vision_llm(m["body"], prompt + "\n\n" + payload)
+                else:
+                    raw = text_llm(prompt, payload)
+                return _parse_boundary_response(raw, len(m["before"]), len(m["after"]))
+            except Exception:  # noqa: BLE001 — 어떤 LLM 실패든 모달 단위로 강등
+                if attempt == 0:
+                    continue
+                return ("", 0, 0)
 
     if modals:
         workers = min(max_workers, len(modals))  # max_workers>=1 검증됨; modals 비어있지 않음
