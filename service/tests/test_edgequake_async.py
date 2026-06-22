@@ -157,3 +157,79 @@ def test_post_document_async_poll_timeout_is_failure():
                            poll_interval=0, poll_timeout=0)
     assert out["status"] == "failed"
     assert "timeout" in out["detail"]
+
+
+# ─────────────── submit_document + document_phase (pollable per-phase) ───────────────
+
+
+def test_submit_document_returns_immediately_no_poll():
+    """submit_document fires POST /documents async and returns ids WITHOUT polling."""
+    calls = {"submit": 0, "poll": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers.get("X-Workspace-ID") == WS
+        assert request.headers.get("X-Tenant-ID") == TENANT
+        if request.method == "POST" and request.url.path == "/api/v1/documents":
+            calls["submit"] += 1
+            import json
+            body = json.loads(request.content)
+            assert body["async_processing"] is True
+            assert body["content"] == "enriched"
+            return httpx.Response(201, json={
+                "document_id": DOC, "status": "pending",
+                "task_id": "task-9", "track_id": "batch-9",
+            })
+        calls["poll"] += 1  # must never happen
+        raise AssertionError(f"submit_document must not poll: {request.url.path}")
+
+    eq = _client_with(handler)
+    out = eq.submit_document("enriched", workspace_id=WS, tenant_id=TENANT, filename="d.pdf")
+    assert out == {"document_id": DOC, "track_id": "task-9"}
+    assert calls["submit"] == 1 and calls["poll"] == 0
+
+
+def test_document_phase_maps_status_to_phase():
+    """document_phase maps the live document status into a coarse UI phase."""
+    cases = [
+        ("chunking", "chunking", False, False),
+        ("extracting", "extracting", False, False),
+        ("embedding", "embedding", False, False),
+        ("indexing", "storing", False, False),
+        ("storing", "storing", False, False),
+        ("failed", "failed", True, False),
+        ("partial_failure", "failed", True, False),
+        ("cancelled", "failed", True, False),
+        ("pending", "processing", False, False),
+    ]
+    for raw, phase, terminal, succeeded in cases:
+        def handler(request, _raw=raw):
+            assert request.headers.get("X-Workspace-ID") == WS
+            return httpx.Response(200, json={"id": DOC, "status": _raw, "chunk_count": 0})
+        eq = _client_with(handler)
+        ph = eq.document_phase(WS, DOC)
+        assert ph["phase"] == phase, raw
+        assert ph["terminal"] is terminal, raw
+        assert ph["succeeded"] is succeeded, raw
+        assert ph["raw_status"] == raw
+
+
+def test_document_phase_completed_with_chunks_succeeds():
+    """completed + chunk_count>0 → terminal & succeeded."""
+    def handler(request):
+        return httpx.Response(200, json={"id": DOC, "status": "completed", "chunk_count": 9})
+    eq = _client_with(handler)
+    ph = eq.document_phase(WS, DOC)
+    assert ph["phase"] == "completed"
+    assert ph["chunk_count"] == 9
+    assert ph["terminal"] is True
+    assert ph["succeeded"] is True
+
+
+def test_document_phase_completed_zero_chunks_not_succeeded():
+    """completed but chunk_count==0 → terminal yet NOT succeeded (no success-faking)."""
+    def handler(request):
+        return httpx.Response(200, json={"id": DOC, "status": "completed", "chunk_count": 0})
+    eq = _client_with(handler)
+    ph = eq.document_phase(WS, DOC)
+    assert ph["terminal"] is True
+    assert ph["succeeded"] is False

@@ -188,6 +188,85 @@ class EdgequakeClient:
             }
         return self._gate_by_document(document_id, hdr)
 
+    #: Raw DOCUMENT `status` (GET /documents/{id}) → our coarse phase label. The
+    #: live edgequake document status transitions
+    #: ``pending → chunking → extracting → embedding → indexing/storing → completed``.
+    #: This is the LIVE per-phase signal the UI ticks on (current_stage is None on
+    #: the async path, so the document `status` field is the source of truth).
+    _PHASE_MAP = {
+        "chunking": "chunking",
+        "extracting": "extracting",
+        "embedding": "embedding",
+        "indexing": "storing",
+        "storing": "storing",
+        "completed": "completed",
+        "indexed": "completed",
+        "failed": "failed",
+        "partial_failure": "failed",
+        "cancelled": "failed",
+    }
+    #: Document statuses that are terminal (no more transitions).
+    _PHASE_TERMINAL = {"completed", "indexed", "failed", "partial_failure", "cancelled"}
+    #: Terminal statuses that count as a SUCCESSFUL index (given chunk_count>0).
+    _PHASE_SUCCESS = {"completed", "indexed"}
+
+    def submit_document(self, content, *, workspace_id, tenant_id, filename):
+        """Submit a document ASYNC and return immediately (NO poll).
+
+        Unlike ``post_document`` (which blocks polling the task to terminal), this
+        only fires ``POST /api/v1/documents`` with ``async_processing:true`` and
+        returns the identifiers so the caller can poll ``document_phase`` itself to
+        observe the LIVE per-phase progress (chunking→extracting→…→completed).
+
+        Returns ``{document_id, track_id}`` (track_id = the task/batch id for the
+        async pipeline; not required for ``document_phase`` polling, which keys off
+        the document_id, but surfaced for parity with the submit response).
+        """
+        hdr = {"X-Workspace-ID": workspace_id, "X-Tenant-ID": tenant_id}
+        r = self.http.post(
+            f"{self.base}/api/v1/documents",
+            headers=hdr,
+            json={"content": content, "title": filename, "async_processing": True},
+        )
+        r.raise_for_status()
+        j = r.json() or {}
+        document_id = j.get("document_id") or j.get("id")
+        track_id = j.get("task_id") or j.get("track_id") or document_id
+        return {"document_id": document_id, "track_id": track_id}
+
+    def document_phase(self, workspace_id, document_id):
+        """GET /documents/{id} → live phase snapshot for per-phase progress.
+
+        Reads the authoritative DOCUMENT ``status`` field (NOT current_stage, which
+        is None on the async path) and maps it to a coarse phase the UI ticks on.
+
+        Returns ``{raw_status, phase, chunk_count, terminal, succeeded}`` where:
+          * ``raw_status`` — the document status string as returned by edgequake.
+          * ``phase``      — mapped coarse phase (chunking/extracting/embedding/
+                             storing/completed/failed, else "processing").
+          * ``chunk_count``— authoritative chunk count (``-chunk-`` prefix scan).
+          * ``terminal``   — status reached a terminal state (no more transitions).
+          * ``succeeded``  — terminal-OK (completed/indexed) AND chunk_count>0.
+        """
+        d = self.http.get(
+            f"{self.base}/api/v1/documents/{document_id}",
+            headers=self._headers(workspace_id),
+        )
+        d.raise_for_status()
+        dj = d.json() or {}
+        raw_status = (dj.get("status") or "").lower()
+        chunk_count = int(dj.get("chunk_count") or 0)
+        phase = self._PHASE_MAP.get(raw_status, "processing")
+        terminal = raw_status in self._PHASE_TERMINAL
+        succeeded = raw_status in self._PHASE_SUCCESS and chunk_count > 0
+        return {
+            "raw_status": raw_status,
+            "phase": phase,
+            "chunk_count": chunk_count,
+            "terminal": terminal,
+            "succeeded": succeeded,
+        }
+
     def _poll_task(self, track_id, headers, poll_timeout, poll_interval):
         """Poll GET /api/v1/tasks/{track_id} until terminal.
 
