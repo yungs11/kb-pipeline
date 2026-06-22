@@ -1,5 +1,5 @@
 <!-- plan-version: v5 -->
-<!-- codex-validation: PENDING -->
+<!-- codex-validation: READY v5 at 2026-06-22T03:57:02Z -->
 
 # kb-pipeline v2 — RAG 수집 플랫폼 Implementation Plan
 
