@@ -6,17 +6,29 @@ Walk blocks in document order, produce a single enriched content string:
   * image blocks            -> vision_llm(img_path, prompt) description
 Each modal is inlined as ONE ATOMIC marker.
 
+Title/footnote absorption (Philosophy A — parser owns atomicity)
+----------------------------------------------------------------
+A table/image/equation's **title/caption** (the text block(s) immediately before)
+and **footnote/notes** (the text block(s) immediately after) are absorbed VERBATIM
+into the same atomic 〈MODAL…〈/MODAL〉 span so they never get split away by the
+downstream chunker. Which surrounding lines belong to the modal is decided by the
+SAME per-modal LLM call that already produces the description: it returns a Korean
+``summary`` plus ``title_count`` / ``footnote_count``. If the LLM does not return
+valid JSON, we fall back to no absorption (summary = raw response) — byte-compatible
+with the pre-absorption behavior.
+
 EXACT modal marker (single source of truth — producer here and the W1 Rust
 consumer MUST use byte-identical markers). The angle-bracket chars are
 U+3008 〈 (open) and U+3009 〉 (close):
 
-    〈MODAL id="X" type="table|image|equation"〉{description}\n{payload}〈/MODAL〉
+    〈MODAL id="X" type="table|image|equation"〉{body}〈/MODAL〉
 
 The marker is closed with:  〈/MODAL〉
 """
 
 from __future__ import annotations
 
+import json
 from typing import Callable
 
 # U+3008 / U+3009 — byte-identical with the Rust consumer.
@@ -28,29 +40,128 @@ MODAL_OPEN_PREFIX = f"{_LANGLE}MODAL"
 #: Literal closing marker.
 MODAL_CLOSE = f"{_LANGLE}/MODAL{_RANGLE}"
 
-_TABLE_PROMPT = (
-    "Describe this table in natural language for retrieval. "
-    "Summarize what it contains and its key rows/columns."
-)
-_EQUATION_PROMPT = (
-    "Describe this equation in natural language: what it expresses and its variables."
-)
-_IMAGE_PROMPT = (
-    "Describe this image/figure in natural language for retrieval."
-)
+#: 모달 앞/뒤에서 제목·각주 후보로 고려할 연속 text 블록 최대 수.
+BEFORE_WINDOW = 3
+AFTER_WINDOW = 6
 
+
+# --- candidate windows (pure) -------------------------------------------------
+
+def _is_text(block: dict) -> bool:
+    return block.get("type") == "text"
+
+
+def _gather_before_window(blocks: list[dict], i: int, consumed: set[int]) -> list[tuple[int, str]]:
+    """모달 직전의 연속 text 블록을 nearest-first(i-1 먼저)로 수집.
+
+    비-text 블록 또는 이미 ``consumed`` 된 인덱스를 만나면 중단(원자 경계 침범 방지).
+    최대 ``BEFORE_WINDOW`` 개.
+    """
+    out: list[tuple[int, str]] = []
+    j = i - 1
+    while j >= 0 and len(out) < BEFORE_WINDOW:
+        if j in consumed or not _is_text(blocks[j]):
+            break
+        out.append((j, blocks[j].get("text", "")))
+        j -= 1
+    return out
+
+
+def _gather_after_window(blocks: list[dict], i: int, consumed: set[int]) -> list[tuple[int, str]]:
+    """모달 직후의 연속 text 블록을 nearest-first(i+1 먼저)로 수집. 최대 ``AFTER_WINDOW`` 개."""
+    out: list[tuple[int, str]] = []
+    j, n = i + 1, len(blocks)
+    while j < n and len(out) < AFTER_WINDOW:
+        if j in consumed or not _is_text(blocks[j]):
+            break
+        out.append((j, blocks[j].get("text", "")))
+        j += 1
+    return out
+
+
+# --- boundary LLM response parser (pure) --------------------------------------
+
+def _parse_boundary_response(raw: str, n_before: int, n_after: int) -> tuple[str, int, int]:
+    """LLM 응답 → ``(summary, title_count, footnote_count)``.
+
+    첫 유효 JSON 객체를 ``json.JSONDecoder().raw_decode`` 로 파싱한다(코드펜스/선후행
+    잡음/바깥 중괄호 무시, 문자열 내부 중괄호 안전 — greedy 정규식 회귀 방지). 성공 시
+    counts 를 ``[0, n_before]`` / ``[0, n_after]`` 로 clamp. 파싱 실패·요약 누락·정수
+    아님이면 fallback ``(text, 0, 0)`` (``text == raw.strip()``) — 흡수 0건(하위호환).
+    """
+    text = (raw or "").strip()
+    decoder = json.JSONDecoder()
+    idx = text.find("{")
+    while idx != -1:
+        try:
+            obj, _ = decoder.raw_decode(text[idx:])
+        except json.JSONDecodeError:
+            idx = text.find("{", idx + 1)
+            continue
+        if isinstance(obj, dict) and isinstance(obj.get("summary"), str) and obj["summary"].strip():
+            try:
+                tc, fc = int(obj["title_count"]), int(obj["footnote_count"])
+            except (ValueError, TypeError, KeyError):
+                break
+            return obj["summary"].strip(), max(0, min(tc, n_before)), max(0, min(fc, n_after))
+        idx = text.find("{", idx + 1)
+    return text, 0, 0
+
+
+# --- Korean prompt + boundary payload -----------------------------------------
+
+_SUMMARY_LANG = "반드시 한국어(한글)로"
+
+_TYPE_INTRO = {
+    "table": "다음은 문서에서 추출한 표와 그 앞뒤 후보 줄이다.",
+    "equation": "다음은 문서에서 추출한 수식과 그 앞뒤 후보 줄이다.",
+    "image": "다음은 문서에서 추출한 이미지/도표와 그 앞뒤 후보 줄이다.",
+}
+
+
+def _boundary_prompt(modal_type: str) -> str:
+    """한국어 요약 + 제목/각주 개수 판정을 JSON 으로 요구하는 프롬프트."""
+    intro = _TYPE_INTRO.get(modal_type, "다음은 문서에서 추출한 본문과 그 앞뒤 후보 줄이다.")
+    return (
+        f"{intro}\n"
+        f"1) 본문을 검색용으로 {_SUMMARY_LANG} 요약하라.\n"
+        "2) '앞 후보' 중 이 본문의 제목/캡션인 줄 수(title_count)를 세어라"
+        "(본문에 가까운 쪽부터 연속, 무관한 줄 제외).\n"
+        "3) '뒤 후보' 중 이 본문의 각주/설명인 줄 수(footnote_count)를 세어라"
+        "(본문에 가까운 쪽부터 연속, 무관한 줄 제외).\n"
+        '오직 JSON만 출력하라: {"summary": "...", "title_count": N, "footnote_count": M}'
+    )
+
+
+def _boundary_payload(before: list[tuple[int, str]], after: list[tuple[int, str]], body: str) -> str:
+    """앞 후보(B1..)/본문/뒤 후보(A1..)를 한 문자열로. before/after 는 nearest-first."""
+    lines = ["[앞 후보 — 본문에서 가까운 순]"]
+    lines += [f"B{k}: {t}" for k, (_, t) in enumerate(before, 1)] or ["(없음)"]
+    lines += ["", "[본문]", body, "", "[뒤 후보 — 본문에서 가까운 순]"]
+    lines += [f"A{k}: {t}" for k, (_, t) in enumerate(after, 1)] or ["(없음)"]
+    return "\n".join(lines)
+
+
+# --- marker assembly ----------------------------------------------------------
 
 def _open_marker(modal_id: str, modal_type: str) -> str:
     return f'{MODAL_OPEN_PREFIX} id="{modal_id}" type="{modal_type}"{_RANGLE}'
 
 
-def _wrap(modal_id: str, modal_type: str, description: str, payload: str) -> str:
-    """Build one atomic 〈MODAL …〉{description}\n{payload}〈/MODAL〉 span."""
-    return (
-        f"{_open_marker(modal_id, modal_type)}"
-        f"{description}\n{payload}"
-        f"{MODAL_CLOSE}"
-    )
+def _wrap(modal_id: str, modal_type: str, description: str, payload: str,
+          *, title: str = "", footnote: str = "") -> str:
+    """원자 〈MODAL …〉[title]\\n{desc}\\n{payload}\\n[footnote]〈/MODAL〉 span 생성.
+
+    title/footnote 가 비면 ``{open}{desc}\\n{payload}{close}`` 로 현재와 byte 동일.
+    """
+    segments: list[str] = []
+    if title:
+        segments.append(title)
+    segments.append(description)
+    segments.append(payload)
+    if footnote:
+        segments.append(footnote)
+    return f"{_open_marker(modal_id, modal_type)}" + "\n".join(segments) + MODAL_CLOSE
 
 
 def enrich(
@@ -61,23 +172,28 @@ def enrich(
 ) -> tuple[str, list[str]]:
     """Enrich blocks into a single content string + ordered modal ids.
 
+    모달(table/image/equation)마다 LLM 호출 1회로 한국어 요약 + 주변 text 의
+    제목/각주 개수를 판정해, 제목·각주를 원문 그대로 〈MODAL…〈/MODAL〉 안으로 흡수한다.
+    LLM 이 JSON 을 주지 않으면 흡수 0건 + 요약=원문(하위호환).
+
     :param text_llm: ``(prompt, payload) -> description`` for table/equation.
     :param vision_llm: ``(img_path, prompt) -> description`` for image.
     :returns: ``(enriched_content, modal_ids)``.
     :raises ValueError: if a modal of a kind appears but its callable is None.
     """
-    segments: list[str] = []
-    modal_ids: list[str] = []
+    n = len(blocks)
+    consumed: set[int] = set()
+    decisions: dict[int, dict] = {}
     counters = {"table": 0, "image": 0, "equation": 0}
 
-    for block in blocks:
-        btype = block.get("type")
-
-        if btype == "text":
-            text = block.get("text", "")
-            if text:
-                segments.append(text)
+    # Pass 1 — 모달별 id/요약/흡수범위 결정(문서 순서; consumed 로 이중흡수 방지).
+    for i in range(n):
+        btype = blocks[i].get("type")
+        if btype not in ("table", "image", "equation"):
             continue
+
+        before = _gather_before_window(blocks, i, consumed)
+        after = _gather_after_window(blocks, i, consumed)
 
         if btype == "table":
             if text_llm is None:
@@ -86,42 +202,57 @@ def enrich(
                     "a text LLM callable is required to describe tables."
                 )
             counters["table"] += 1
-            modal_id = f"T{counters['table']}"
-            payload = block.get("table_body", "")
-            description = text_llm(_TABLE_PROMPT, payload)
-            segments.append(_wrap(modal_id, "table", description, payload))
-            modal_ids.append(modal_id)
-            continue
-
-        if btype == "equation":
+            modal_id, body = f"T{counters['table']}", blocks[i].get("table_body", "")
+            raw = text_llm(_boundary_prompt("table"), _boundary_payload(before, after, body))
+        elif btype == "equation":
             if text_llm is None:
                 raise ValueError(
                     "equation block encountered but text_llm is None; "
                     "a text LLM callable is required to describe equations."
                 )
             counters["equation"] += 1
-            modal_id = f"E{counters['equation']}"
-            payload = block.get("latex", "")
-            description = text_llm(_EQUATION_PROMPT, payload)
-            segments.append(_wrap(modal_id, "equation", description, payload))
-            modal_ids.append(modal_id)
-            continue
-
-        if btype == "image":
+            modal_id, body = f"E{counters['equation']}", blocks[i].get("latex", "")
+            raw = text_llm(_boundary_prompt("equation"), _boundary_payload(before, after, body))
+        else:  # image
             if vision_llm is None:
                 raise ValueError(
                     "image block encountered but vision_llm is None; "
                     "a vision LLM callable is required to describe images."
                 )
             counters["image"] += 1
-            modal_id = f"I{counters['image']}"
-            img_path = block.get("img_path", "")
-            description = vision_llm(img_path, _IMAGE_PROMPT)
-            segments.append(_wrap(modal_id, "image", description, img_path))
-            modal_ids.append(modal_id)
+            modal_id, body = f"I{counters['image']}", blocks[i].get("img_path", "")
+            prompt = _boundary_prompt("image") + "\n\n" + _boundary_payload(before, after, body)
+            raw = vision_llm(body, prompt)
+
+        summary, tc, fc = _parse_boundary_response(raw, len(before), len(after))
+        title_idxs = sorted(idx for idx, _ in before[:tc])     # nearest tc → 문서 순서
+        footnote_idxs = sorted(idx for idx, _ in after[:fc])
+        consumed.update(title_idxs)
+        consumed.update(footnote_idxs)
+        decisions[i] = {
+            "modal_id": modal_id, "modal_type": btype, "payload": body,
+            "summary": summary, "title_idxs": title_idxs, "footnote_idxs": footnote_idxs,
+        }
+
+    # Pass 2 — 출력(흡수된 text 는 건너뜀).
+    segments: list[str] = []
+    modal_ids: list[str] = []
+    for i in range(n):
+        if i in consumed:
             continue
+        if i in decisions:
+            d = decisions[i]
+            title = "\n".join(blocks[j].get("text", "") for j in d["title_idxs"])
+            footnote = "\n".join(blocks[j].get("text", "") for j in d["footnote_idxs"])
+            segments.append(_wrap(
+                d["modal_id"], d["modal_type"], d["summary"], d["payload"],
+                title=title, footnote=footnote,
+            ))
+            modal_ids.append(d["modal_id"])
+        elif blocks[i].get("type") == "text":
+            text = blocks[i].get("text", "")
+            if text:
+                segments.append(text)
+        # 알 수 없는 타입: 무시(기존과 동일).
 
-        # Unknown block type: ignore (front-end is lenient).
-
-    enriched_content = "\n\n".join(segments)
-    return enriched_content, modal_ids
+    return "\n\n".join(segments), modal_ids

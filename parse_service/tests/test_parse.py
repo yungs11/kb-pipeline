@@ -42,6 +42,34 @@ def test_run_parse_computes_enriched_and_modal_spans(monkeypatch):
     assert "TABLE_DESC" in sub
 
 
+def test_modal_span_covers_absorbed_title_and_footnote(monkeypatch):
+    """제목·각주 흡수 후에도 modal_spans char_range 가 확장 span 전체를 가리킨다."""
+    import json
+    import parse_service.app as svc
+
+    # text 단락 + 파이프표 + text 각주.
+    md = "캡션줄\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\n각주줄\n"
+    monkeypatch.setattr(svc, "parse_to_markdown", lambda b, f, **k: md)
+
+    out = svc.run_parse(
+        b"x", "d.pdf",
+        text_llm=lambda prompt, payload: json.dumps(
+            {"summary": "요약", "title_count": 1, "footnote_count": 1}
+        ),
+        vision_llm=None, ocr_url="http://x", excel_url="http://y",
+    )
+    enriched = out["enriched_content"]
+    spans = out["modal_spans"]
+    assert len(spans) == 1
+    start, end = spans[0]["char_range"]
+    sub = enriched[start:end]
+    assert sub.startswith(MODAL_OPEN_PREFIX) and sub.endswith(MODAL_CLOSE)
+    assert "요약" in sub          # 요약이 span 안
+    assert "각주줄" in sub         # 흡수된 각주가 span 안
+    # 흡수된 각주는 enriched 전체에서 1회만(외부 중복 0)
+    assert enriched.count("각주줄") == 1
+
+
 def test_parse_endpoint_returns_contract(monkeypatch):
     """POST /parse (multipart) -> {enriched_content, n_blocks, modal_spans}."""
     import parse_service.app as svc
