@@ -117,6 +117,12 @@ def test_prompt_varies_by_type():
     assert "이미지" in _boundary_prompt("image")
 
 
+def test_prompt_pushes_title_and_markerless_footnote_inclusion():
+    p = _boundary_prompt("table")
+    assert "머리글" in p and "반드시 포함" in p      # 제목 줄을 더 적극 흡수
+    assert "마커" in p                                 # 마커 없는 각주도 포함 지시
+
+
 def test_payload_lists_candidates_nearest_first_and_body():
     before = [(5, "가까운제목"), (4, "먼제목")]   # nearest-first
     after = [(7, "가까운각주")]

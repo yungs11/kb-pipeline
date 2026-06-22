@@ -30,8 +30,17 @@ export KBP_OCR_URL="${KBP_OCR_URL:-http://localhost:18050}"
 export KBP_EXCEL_URL="${KBP_EXCEL_URL:-http://localhost:18055}"
 
 # 3) restart (no --reload by design; relaunch to pick up code changes).
+#    Wait for the old process to release :19001 — a bare `sleep 1` races the port
+#    (graceful uvicorn shutdown can take a few seconds → "address already in use").
 pkill -f "parse_service.app:app" 2>/dev/null || true
-sleep 1
+for _ in $(seq 1 20); do
+  if ! lsof -nP -iTCP:19001 -sTCP:LISTEN >/dev/null 2>&1; then break; fi
+  sleep 0.5
+done
+if lsof -nP -iTCP:19001 -sTCP:LISTEN >/dev/null 2>&1; then
+  pkill -9 -f "parse_service.app:app" 2>/dev/null || true
+  sleep 1
+fi
 LOG="${PARSE_SVC_LOG:-/tmp/parse_svc.log}"
 nohup "$ROOT/.venv-kb/bin/python" -m uvicorn parse_service.app:app \
   --host 127.0.0.1 --port 19001 > "$LOG" 2>&1 &

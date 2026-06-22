@@ -40,7 +40,13 @@ def get_adaptive_chunk():
 
 
 def get_parse_client():
-    return ParseSvcClient(os.environ.get("KBP_PARSE_SVC_URL", "http://localhost:19001"))
+    # Multi-table PDFs make parse-svc call the modal LLM once per table (sequential),
+    # so a 4-table doc can take ~400s+. Default the read timeout high (1800s) and allow
+    # env override so the facade does not ReadTimeout before parse-svc finishes.
+    return ParseSvcClient(
+        os.environ.get("KBP_PARSE_SVC_URL", "http://localhost:19001"),
+        timeout=float(os.environ.get("KBP_PARSE_SVC_TIMEOUT", "1800")),
+    )
 
 
 @app.get("/healthz")
