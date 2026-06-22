@@ -76,6 +76,32 @@ def chunk(enriched_content: str = Body(..., embed=True),
     }
 
 
+@app.post("/search")
+def search(workspace_id: str = Body(..., embed=True),
+           query: str = Body(..., embed=True),
+           top_k: int = Body(10, embed=True),
+           eq=Depends(get_edgequake)):
+    """Search a workspace via edgequake ``/api/v1/query`` (edgequake hidden).
+
+    Value added (R5): resolves the kb id to the edgequake workspace UUID so the
+    retrieval is workspace-scoped (isolation), maps ``top_k`` to edgequake's
+    ``max_results``, and normalizes edgequake's ``sources`` into a stable
+    ``results`` shape (chunk_id/text/score/document_id) plus the generated answer.
+    """
+    eq_ws = eq.ensure_workspace(workspace_id, name=workspace_id)
+    res = eq.search(workspace_id=eq_ws, query=query, top_k=top_k)
+    results = [
+        {
+            "chunk_id": src.get("id"),
+            "text": src.get("snippet") or "",
+            "score": src.get("score"),
+            "document_id": src.get("document_id"),
+        }
+        for src in (res.get("sources") or [])
+    ]
+    return {"answer": res.get("answer"), "results": results}
+
+
 @app.post("/insert")
 def insert(workspace_id: str = Body(..., embed=True),
            doc_id: str = Body(..., embed=True),

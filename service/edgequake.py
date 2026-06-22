@@ -400,6 +400,22 @@ class EdgequakeClient:
             })
         return rows
 
+    def search(self, *, workspace_id, query, top_k):
+        """POST /api/v1/query (workspace-scoped) → raw query response dict.
+
+        ``top_k`` maps to edgequake's ``max_results``. The X-Workspace-ID header
+        scopes the retrieval to this workspace (isolation). The raw response
+        (``{answer, mode, sources, ...}``) is returned unchanged; the facade
+        normalizes it for its own ``/search`` contract.
+        """
+        r = self.http.post(
+            f"{self.base}/api/v1/query",
+            headers=self._headers(workspace_id),
+            json={"query": query, "max_results": top_k},
+        )
+        r.raise_for_status()
+        return r.json() or {}
+
     def delete_doc(self, workspace_id, doc_id):
         self.http.delete(
             f"{self.base}/api/v1/documents/{doc_id}",
