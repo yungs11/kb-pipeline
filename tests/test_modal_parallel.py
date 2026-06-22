@@ -88,7 +88,7 @@ def test_modal_llm_failure_does_not_fail_whole_document():
     # 흡수 0 → 주변 텍스트는 모달 밖
     assert content.index("INTRO") < content.index("〈MODAL")
     assert content.index("OUTRO") > content.index("〈/MODAL〉")
-    assert calls["n"] == 2                    # 1회 재시도 후 폴백
+    assert calls["n"] == 1                    # 재시도 없음 — 즉시 폴백
 
 
 def test_partial_modal_failure_other_modals_unaffected():

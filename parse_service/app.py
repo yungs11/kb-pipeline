@@ -82,10 +82,15 @@ def run_parse(file_bytes: bytes, filename: str, *,
     ``internal_error`` otherwise).
     """
     parse = parse or parse_to_markdown
+    # 모달 LLM 동시호출 상한. 프록시(LiteLLM/Cloudflare) 과부하로 인한 524 를 줄이려고
+    # 기본 3 으로 낮춘다(KBP_MODAL_MAX_WORKERS 로 조정; 524 잦으면 2/1 로).
+    max_workers = max(1, int(os.environ.get("KBP_MODAL_MAX_WORKERS", "3")))
     try:
         md = parse(file_bytes, filename, ocr_url=ocr_url, excel_url=excel_url)
         blocks = hybrid_to_blocks(md)
-        enriched, _modal_ids = enrich(blocks, text_llm=text_llm, vision_llm=vision_llm)
+        enriched, _modal_ids = enrich(
+            blocks, text_llm=text_llm, vision_llm=vision_llm, max_workers=max_workers,
+        )
     except ParseError:
         log.exception("parse failed for %s", filename)
         raise FrontError("parse_failed")
