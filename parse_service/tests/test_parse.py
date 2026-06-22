@@ -42,6 +42,28 @@ def test_run_parse_computes_enriched_and_modal_spans(monkeypatch):
     assert "TABLE_DESC" in sub
 
 
+def test_strip_pua_removes_private_use_chars():
+    from parse_service.app import _strip_pua
+    assert _strip_pua("휴가규정(개정)") == "휴가규정(개정)"
+    assert _strip_pua("섞임") == "섞임"
+    assert _strip_pua("normal text 한글") == "normal text 한글"
+
+
+def test_run_parse_strips_pua_garbage(monkeypatch):
+    """OpenDataLoader 의 U+F000 깨진 글자가 enriched_content 에서 제거된다."""
+    import parse_service.app as svc
+
+    md = "휴가결근 신청서\n\n\n| a | b |\n| - | - |\n| 1 | 2 |\n"
+    monkeypatch.setattr(svc, "parse_to_markdown", lambda b, f, **k: md)
+    out = svc.run_parse(
+        b"x", "d.pdf",
+        text_llm=lambda p, pl: "DESC", vision_llm=None,
+        ocr_url="x", excel_url="y",
+    )
+    assert "" not in out["enriched_content"]
+    assert "휴가결근 신청서" in out["enriched_content"]
+
+
 def test_modal_span_covers_absorbed_title_and_footnote(monkeypatch):
     """제목·각주 흡수 후에도 modal_spans char_range 가 확장 span 전체를 가리킨다."""
     import json

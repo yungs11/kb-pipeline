@@ -26,6 +26,16 @@ from kb_pipeline.modal import enrich, MODAL_OPEN_PREFIX, MODAL_CLOSE
 
 log = logging.getLogger("kb_pipeline.parse_service")
 
+# U+E000–U+F8FF: Unicode Private Use Area. OpenDataLoader 는 PDF 의 매핑 불가 글자
+# (커스텀 폰트 기호·장식선 등)를 이 영역으로 쏟아낸다 → 깨진 글자처럼 보이고, 텍스트에
+# 끼어 "제목↔표" 인접을 끊어 모달 제목/각주 흡수까지 방해한다. 파싱 직후 제거한다.
+_PUA_RE = re.compile("[-]")
+
+
+def _strip_pua(text: str) -> str:
+    """Private Use Area(깨진/미매핑 글자) 제거."""
+    return _PUA_RE.sub("", text)
+
 app = FastAPI(title="kb-pipeline parse-svc")
 
 
@@ -86,7 +96,7 @@ def run_parse(file_bytes: bytes, filename: str, *,
     # 기본 3 으로 낮춘다(KBP_MODAL_MAX_WORKERS 로 조정; 524 잦으면 2/1 로).
     max_workers = max(1, int(os.environ.get("KBP_MODAL_MAX_WORKERS", "3")))
     try:
-        md = parse(file_bytes, filename, ocr_url=ocr_url, excel_url=excel_url)
+        md = _strip_pua(parse(file_bytes, filename, ocr_url=ocr_url, excel_url=excel_url))
         blocks = hybrid_to_blocks(md)
         enriched, _modal_ids = enrich(
             blocks, text_llm=text_llm, vision_llm=vision_llm, max_workers=max_workers,
