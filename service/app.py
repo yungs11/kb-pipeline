@@ -16,11 +16,12 @@ from __future__ import annotations
 import logging
 import os
 
-from fastapi import FastAPI, UploadFile, File, Form, Depends, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, Form, Depends, BackgroundTasks, Body
 
 from service.parsing import parse_to_markdown
 from service.ingest import run_ingest, run_front, FrontError, _TENANT_ID
 from service.edgequake import EdgequakeClient
+from service.adaptive_chunk import AdaptiveChunkClient, MODAL_ATOMIC_MARKERS
 from service.llm import get_text_llm
 from kb_pipeline.community import build_workspace_communities
 
@@ -33,9 +34,46 @@ def get_edgequake():
     return EdgequakeClient(os.environ.get("KBP_EDGEQUAKE_URL", "http://localhost:8081"))
 
 
+def get_adaptive_chunk():
+    return AdaptiveChunkClient(os.environ.get("KBP_ADAPTIVE_CHUNK_URL", "http://localhost:18060"))
+
+
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
+
+
+@app.post("/chunk")
+def chunk(enriched_content: str = Body(..., embed=True),
+          doc_name: str = Body("", embed=True),
+          ac=Depends(get_adaptive_chunk)):
+    """Chunk enriched content via the adaptive_chunk hub (hidden) and normalize.
+
+    Value added (R5, not a bare forward):
+      * forwards the modal markers as ``atomic_markers`` so each 〈MODAL…〈/MODAL〉
+        span stays a single atomic chunk;
+      * normalizes the hub's R1 chunk schema (``chunk_text``/``chunk_pages``) into
+        the facade contract (``text``/``pages``), dropping internal fields;
+      * surfaces the real selection rationale (method_selected/scores/
+        methods_compared) for the UI's "why this chunker" card.
+    """
+    res = ac.chunk(text=enriched_content, doc_name=doc_name,
+                   atomic_markers=MODAL_ATOMIC_MARKERS)
+    chunks = [
+        {
+            "chunk_index": ch.get("chunk_index"),
+            "text": ch.get("chunk_text", ""),
+            "titles_context": ch.get("titles_context"),
+            "pages": ch.get("chunk_pages") or [],
+        }
+        for ch in (res.get("chunks") or [])
+    ]
+    return {
+        "chunks": chunks,
+        "method_selected": res.get("method_selected"),
+        "scores": res.get("scores") or {},
+        "methods_compared": res.get("methods_compared") or [],
+    }
 
 
 @app.post("/ingest")
