@@ -18,10 +18,11 @@ import os
 
 from fastapi import FastAPI, UploadFile, File, Form, Depends, BackgroundTasks, Body
 
-from service.parsing import parse_to_markdown
+from service.parsing import parse_to_markdown, _safe_basename
 from service.ingest import run_ingest, run_front, FrontError, _TENANT_ID
 from service.edgequake import EdgequakeClient
 from service.adaptive_chunk import AdaptiveChunkClient, MODAL_ATOMIC_MARKERS
+from service.parse_client import ParseSvcClient
 from service.llm import get_text_llm
 from kb_pipeline.community import build_workspace_communities
 
@@ -38,9 +39,29 @@ def get_adaptive_chunk():
     return AdaptiveChunkClient(os.environ.get("KBP_ADAPTIVE_CHUNK_URL", "http://localhost:18060"))
 
 
+def get_parse_client():
+    return ParseSvcClient(os.environ.get("KBP_PARSE_SVC_URL", "http://localhost:19001"))
+
+
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
+
+
+@app.post("/parse")
+async def parse(file: UploadFile = File(...), content_type: str | None = Form(None),
+                pc=Depends(get_parse_client)):
+    """Parse one upload into enriched content via parse-svc (parser fleet hidden).
+
+    Value added (R5): hides parse-svc behind the stable capability contract,
+    sanitizes the upload filename (``_safe_basename`` — no path traversal reaches
+    the backend), and returns the consistent
+    ``{enriched_content, n_blocks, modal_spans}`` shape.
+    """
+    data = await file.read()
+    safe_name = _safe_basename(file.filename or "upload")
+    return pc.parse(file_bytes=data, filename=safe_name,
+                    content_type=content_type or file.content_type)
 
 
 @app.post("/chunk")
