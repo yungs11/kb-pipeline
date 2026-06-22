@@ -28,6 +28,7 @@ The marker is closed with:  〈/MODAL〉
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 from typing import Callable
 
@@ -173,72 +174,95 @@ def enrich(
     *,
     text_llm: Callable[[str, str], str] | None,
     vision_llm: Callable[[str, str], str] | None,
+    max_workers: int = 8,
 ) -> tuple[str, list[str]]:
     """Enrich blocks into a single content string + ordered modal ids.
 
     모달(table/image/equation)마다 LLM 호출 1회로 한국어 요약 + 주변 text 의
     제목/각주 개수를 판정해, 제목·각주를 원문 그대로 〈MODAL…〈/MODAL〉 안으로 흡수한다.
-    LLM 이 JSON 을 주지 않으면 흡수 0건 + 요약=원문(하위호환).
+    LLM 호출은 스레드풀로 **병렬** 실행하고(표 많은 문서의 parse 시간 단축), 두 모달이
+    같은 사이 블록을 다투면 문서순으로 앞 모달이 선점한다(사후 충돌 해소). LLM 이 JSON 을
+    주지 않으면 흡수 0건 + 요약=원문(하위호환).
 
     :param text_llm: ``(prompt, payload) -> description`` for table/equation.
     :param vision_llm: ``(img_path, prompt) -> description`` for image.
+    :param max_workers: 모달 LLM 동시 호출 상한(기본 8, 모달 수로 추가 제한).
     :returns: ``(enriched_content, modal_ids)``.
-    :raises ValueError: if a modal of a kind appears but its callable is None.
+    :raises ValueError: if ``max_workers < 1``, or if a modal of a kind appears but
+        its callable is None.
     """
+    if max_workers < 1:
+        raise ValueError(f"max_workers must be >= 1, got {max_workers}")
     n = len(blocks)
-    consumed: set[int] = set()
-    decisions: dict[int, dict] = {}
-    counters = {"table": 0, "image": 0, "equation": 0}
+    _KEY = {"table": "table_body", "equation": "latex", "image": "img_path"}
+    _PREFIX = {"table": "T", "equation": "E", "image": "I"}
 
-    # Pass 1 — 모달별 id/요약/흡수범위 결정(문서 순서; consumed 로 이중흡수 방지).
+    # Phase A — 모달 식별/ id 부여/ 최대 윈도우 수집/ None 검증 (문서순, LLM 없음).
+    modals: list[dict] = []
+    counters = {"table": 0, "image": 0, "equation": 0}
     for i in range(n):
         btype = blocks[i].get("type")
         if btype not in ("table", "image", "equation"):
             continue
+        if btype in ("table", "equation") and text_llm is None:
+            raise ValueError(
+                f"{btype} block encountered but text_llm is None; "
+                f"a text LLM callable is required to describe {btype}s."
+            )
+        if btype == "image" and vision_llm is None:
+            raise ValueError(
+                "image block encountered but vision_llm is None; "
+                "a vision LLM callable is required to describe images."
+            )
+        counters[btype] += 1
+        modals.append({
+            "i": i,
+            "type": btype,
+            "modal_id": f"{_PREFIX[btype]}{counters[btype]}",
+            "body": blocks[i].get(_KEY[btype], ""),
+            "before": _gather_before_window(blocks, i, set()),  # 최대 윈도우(consumed 무시)
+            "after": _gather_after_window(blocks, i, set()),
+        })
 
-        before = _gather_before_window(blocks, i, consumed)
-        after = _gather_after_window(blocks, i, consumed)
+    # Phase B — 모달 LLM 병렬 호출(ex.map 은 입력 순서 보존).
+    def _call(m: dict) -> tuple[str, int, int]:
+        prompt = _boundary_prompt(m["type"])
+        payload = _boundary_payload(m["before"], m["after"], m["body"])
+        if m["type"] == "image":
+            raw = vision_llm(m["body"], prompt + "\n\n" + payload)
+        else:
+            raw = text_llm(prompt, payload)
+        return _parse_boundary_response(raw, len(m["before"]), len(m["after"]))
 
-        if btype == "table":
-            if text_llm is None:
-                raise ValueError(
-                    "table block encountered but text_llm is None; "
-                    "a text LLM callable is required to describe tables."
-                )
-            counters["table"] += 1
-            modal_id, body = f"T{counters['table']}", blocks[i].get("table_body", "")
-            raw = text_llm(_boundary_prompt("table"), _boundary_payload(before, after, body))
-        elif btype == "equation":
-            if text_llm is None:
-                raise ValueError(
-                    "equation block encountered but text_llm is None; "
-                    "a text LLM callable is required to describe equations."
-                )
-            counters["equation"] += 1
-            modal_id, body = f"E{counters['equation']}", blocks[i].get("latex", "")
-            raw = text_llm(_boundary_prompt("equation"), _boundary_payload(before, after, body))
-        else:  # image
-            if vision_llm is None:
-                raise ValueError(
-                    "image block encountered but vision_llm is None; "
-                    "a vision LLM callable is required to describe images."
-                )
-            counters["image"] += 1
-            modal_id, body = f"I{counters['image']}", blocks[i].get("img_path", "")
-            prompt = _boundary_prompt("image") + "\n\n" + _boundary_payload(before, after, body)
-            raw = vision_llm(body, prompt)
+    if modals:
+        workers = min(max_workers, len(modals))  # max_workers>=1 검증됨; modals 비어있지 않음
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+            for m, (summary, tc, fc) in zip(modals, ex.map(_call, modals)):
+                m["summary"], m["tc"], m["fc"] = summary, tc, fc
 
-        summary, tc, fc = _parse_boundary_response(raw, len(before), len(after))
-        title_idxs = sorted(idx for idx, _ in before[:tc])     # nearest tc → 문서 순서
-        footnote_idxs = sorted(idx for idx, _ in after[:fc])
+    # Phase C — 충돌 해소(문서순; 앞 모달 우선, 모달에서 연속, consumed 만나면 중단).
+    consumed: set[int] = set()
+    decisions: dict[int, dict] = {}
+    for m in modals:
+        title_idxs: list[int] = []
+        for idx, _ in m["before"][:m["tc"]]:
+            if idx in consumed:
+                break
+            title_idxs.append(idx)
+        footnote_idxs: list[int] = []
+        for idx, _ in m["after"][:m["fc"]]:
+            if idx in consumed:
+                break
+            footnote_idxs.append(idx)
         consumed.update(title_idxs)
         consumed.update(footnote_idxs)
-        decisions[i] = {
-            "modal_id": modal_id, "modal_type": btype, "payload": body,
-            "summary": summary, "title_idxs": title_idxs, "footnote_idxs": footnote_idxs,
+        decisions[m["i"]] = {
+            "modal_id": m["modal_id"], "modal_type": m["type"], "payload": m["body"],
+            "summary": m["summary"],
+            "title_idxs": sorted(title_idxs), "footnote_idxs": sorted(footnote_idxs),
         }
 
-    # Pass 2 — 출력(흡수된 text 는 건너뜀).
+    # Phase D — 출력(흡수된 text 는 건너뜀).
     segments: list[str] = []
     modal_ids: list[str] = []
     for i in range(n):
