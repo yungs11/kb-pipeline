@@ -16,6 +16,9 @@ venv/
 *.log
 *.tmp
 
+# Service launcher secrets (KBP_* env incl. OpenRouter key) — never commit
+scripts/*.env
+
 # Worktrees (git worktree 기본 위치 — 추적 금지)
 .worktrees/
 
