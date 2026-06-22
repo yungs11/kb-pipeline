@@ -1,4 +1,4 @@
-<!-- plan-version: v4 -->
+<!-- plan-version: v5 -->
 <!-- codex-validation: PENDING -->
 
 # kb-pipeline v2 — RAG 수집 플랫폼 Implementation Plan
@@ -104,6 +104,7 @@
 ### Task 3.2: `_ingest_kb_pipeline_tail` 단계별 오케스트레이션
 **Files:** Modify `backend/app/core/pipeline.py`(tail: parse→chunk→insert + on_stage + chunks_meta 병합 + chunking_selection); Modify `backend/tests/test_pipeline_kb_pipeline.py`.
 **Interfaces:** tail이 §8 단계 수행 — chunks_meta = chunk 응답(text/titles/pages)+chunk_id; chunking_selection = method/scores/methods_compared.
+**현재 코드 교체 명시(codex)**: 기존 v1-phase `_ingest_kb_pipeline_tail`(pipeline.py ~1943-1960)은 `submit→poll_status→on_stage(poll_status.phase)`로 edgequake 세부 phase(`chunking/extracting/embedding/storing`)를 그대로 forward하고, 워커(`tasks.py:169-176`)는 `on_stage=lambda phase: set_state(stage=phase)`. v2는 이를 **parse→chunk→insert 3 facade 호출 오케스트레이션으로 재작성** — `on_stage`는 정확히 `"parse"/"chunk"/"insert"`만 emit(insert 내부 `insert_status` 폴링은 detail/로깅, top-level stage는 `"insert"` 유지). 즉 forwarded edgequake 어휘는 **더는 top-level stage로 안 나감**(KB_PIPELINE_STAGE_ORDER 어휘와 정합). 워커 on_stage 람다는 유지하되 tail이 넘기는 stage가 parse/chunk/insert.
 - [ ] Step1 실패테스트: fake deps(parse/chunk/insert) → 순서 + `on_stage("parse")→on_stage("chunk")→on_stage("insert")` **3개 top-level stage만** 호출(insert 동안 insert_status 폴링은 로깅/detail용 — top-level stage는 `"insert"` 유지, edgequake 세부 extracting/embedding/storing을 top-level on_stage로 올리지 않음 → KB_PIPELINE_STAGE_ORDER 어휘[parse/chunk/insert] 일치) + `set_chunking_selection(real)` + `replace_chunks_meta`(병합) + ready; 실패경로 delete_doc+failed.
 - [ ] Step2 → FAIL. Step3 구현(placeholder `kb_pipeline_internal` 제거). Step4 → PASS + raganything/edgequake 회귀 green. Step5 commit.
 
@@ -120,8 +121,8 @@
 **Interfaces:** `ChunkingSelectionCard({selection: ChunkingSelection})` 공유 컴포넌트(page.tsx·모달 양쪽 import).
 - [ ] Step1: **provider-aware 단계표시** (stage 어휘 기반 분기 — `provider`는 JobStatus/jobs API에 **미노출**[codex 실측], 어휘로 분기). **현재 상태(실측)**: `JobList.tsx` line 34-42의 단일 전역 `STAGE_ORDER`는 이미 `gate→parsing→chunking→extracting→embedding→storing→persist_meta`(v1 phase 작업이 전역 교체 → 누수). 이를 **두 order로 분리**:
   - `KB_PIPELINE_STAGE_ORDER = [gate"게이트검증", parse"파싱", chunk"청킹", insert"적재", persist_meta"메타저장"]` — kb_pipeline 잡 전용.
-  - `DEFAULT_STAGE_ORDER = [gate"게이트검증", parsing"파싱", dify"적재", persist_meta"메타저장", graph_rebuild"그래프재구성"]` — 그 외 provider용(워커 `tasks.py`가 비-kb_pipeline 경로에서 emit하는 어휘 gate/parsing/dify/persist_meta/graph_rebuild과 일치 — 실측 확인).
-  - `StageSteps`: 잡이 도달한 stage가 kb_pipeline 어휘(`parse`/`chunk`/`insert` 중 하나)면 `KB_PIPELINE_STAGE_ORDER`, 아니면 `DEFAULT_STAGE_ORDER`. tick 로직 공통.
+  - `DEFAULT_STAGE_ORDER = [gate"게이트검증", select"청킹선택", dify"적재", persist_meta"메타저장", graph_rebuild"그래프재구성"]` — 그 외 provider용. **근거(codex 실측)**: `JobStatus` 타입 enum = `gate|select|dify|persist_meta|graph_rebuild`(`frontend/lib/types.ts`, `backend/app/schemas/jobs.py`), 비-kb_pipeline 워커(`tasks.py`)가 emit하는 stage = `gate/dify/persist_meta/graph_rebuild`. `parsing`은 **kb_pipeline 어휘**이므로 DEFAULT에 **없음**.
+  - `StageSteps`: 잡이 도달한 stage가 **kb_pipeline 전용 어휘(`parse`/`chunk`/`insert` 중 하나)** 면 `KB_PIPELINE_STAGE_ORDER`, 아니면 `DEFAULT_STAGE_ORDER`. tick 로직 공통. (Task 3.2가 kb_pipeline tail이 정확히 parse/chunk/insert만 emit하도록 보장 — 아래.)
   → kb_pipeline 잡만 parse/chunk/insert 단계 렌더, **다른 provider는 자기 어휘(parsing/dify)로 정상 렌더 → kb_pipeline phase가 안 새어나감.** 비교도구 본질 보존.
 - [ ] Step2: page.tsx의 `ChunkingSelectionCard`를 `frontend/components/ChunkingSelectionCard.tsx`로 **추출**(동일 렌더), page.tsx는 import해 사용(동작 불변). 카드 헤더/설명에 **R3 캐비엇 주석** 추가: kb_pipeline 문서는 "본문 gap 기준 선택(modal 영역 제외)" 한 줄.
 - [ ] Step3: `DocumentDetailModal.tsx`에 `detail.chunking_selection && <ChunkingSelectionCard selection={detail.chunking_selection} />` 추가(chunks_meta 섹션 근처). 모달의 detail 타입/응답에 `chunking_selection`이 포함되는지 확인(미포함이면 백엔드 DocumentDetail 응답·`lib/types.ts`에 추가 — page.tsx와 동일 스키마라 이미 있을 가능성 높음, 실측).
