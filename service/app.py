@@ -76,6 +76,48 @@ def chunk(enriched_content: str = Body(..., embed=True),
     }
 
 
+@app.post("/insert")
+def insert(workspace_id: str = Body(..., embed=True),
+           doc_id: str = Body(..., embed=True),
+           title: str = Body("", embed=True),
+           chunks: list[str] = Body(..., embed=True),
+           eq=Depends(get_edgequake)):
+    """Insert pre-chunked texts into edgequake as a passthrough document.
+
+    Value added (R5, policy ownership): the consumer hands a list of chunk texts
+    and never touches edgequake — the facade resolves the kb id to the edgequake
+    workspace UUID, joins the chunks with the U+001E passthrough separator, submits
+    a passthrough document, and polls to terminal. Returns the stable
+    ``{document_id, chunk_count, status}`` contract.
+    """
+    eq_ws = eq.ensure_workspace(workspace_id, name=workspace_id)
+    res = eq.insert_chunks(workspace_id=eq_ws, tenant_id=_TENANT_ID,
+                           title=title or doc_id, chunk_texts=chunks)
+    return {
+        "document_id": res.get("document_id"),
+        "chunk_count": res.get("chunk_count"),
+        "status": res.get("status"),
+    }
+
+
+@app.get("/insert/status")
+def insert_status(workspace_id: str, doc_id: str, eq=Depends(get_edgequake)):
+    """Relay the live edgequake phase for a passthrough insert (edgequake hidden).
+
+    ``doc_id`` is the edgequake document_id returned by ``/insert``. Returns
+    ``{phase, chunk_count, terminal, succeeded}`` from ``document_phase`` so the
+    consumer's UI ticks without knowing edgequake's internal vocabulary.
+    """
+    eq_ws = eq.ensure_workspace(workspace_id, name=workspace_id)
+    ph = eq.document_phase(eq_ws, doc_id)
+    return {
+        "phase": ph.get("phase"),
+        "chunk_count": ph.get("chunk_count"),
+        "terminal": ph.get("terminal"),
+        "succeeded": ph.get("succeeded"),
+    }
+
+
 @app.post("/ingest")
 async def ingest(file: UploadFile = File(...), workspace_id: str = Form(...), doc_id: str = Form(...),
                  content_type: str | None = Form(None), eq=Depends(get_edgequake)):

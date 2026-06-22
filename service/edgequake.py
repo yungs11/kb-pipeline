@@ -31,6 +31,11 @@ import httpx
 
 _TENANT_ID = "00000000-0000-0000-0000-000000000002"
 
+#: Passthrough chunk-boundary separator (U+001E RECORD SEPARATOR). The facade joins
+#: chunk texts with this; edgequake's PassthroughStrategy splits on the same byte so
+#: the stored chunks match the upstream chunker's chunks exactly.
+PASSTHROUGH_SEP = chr(0x1E)
+
 
 class EdgequakeClient:
     def __init__(self, base_url: str, timeout: float = 600.0):
@@ -326,6 +331,42 @@ class EdgequakeClient:
             "document_id": dj.get("id") or document_id,
             "chunk_count": int(dj.get("chunk_count") or 0),
             "status": dj.get("status"),
+        }
+
+    def insert_chunks(self, *, workspace_id, tenant_id, title, chunk_texts,
+                      poll_timeout=1200.0, poll_interval=3.0):
+        """Insert pre-chunked texts as ONE passthrough document and poll to terminal.
+
+        The chunk texts are joined with ``PASSTHROUGH_SEP`` (U+001E) into a single
+        document body; edgequake's PassthroughStrategy splits on the same separator
+        so the stored chunks correspond 1:1 (and in order) to ``chunk_texts``. The
+        document is submitted async and polled via ``document_phase`` until terminal,
+        returning the stable ``{document_id, chunk_count, status}`` shape where
+        ``status`` is ``"indexed"`` on a terminal-OK success and ``"failed"`` otherwise.
+        """
+        content = PASSTHROUGH_SEP.join(chunk_texts)
+        res = self.submit_document(content, workspace_id=workspace_id,
+                                   tenant_id=tenant_id, filename=title)
+        document_id = res.get("document_id")
+        if not document_id:
+            return {"document_id": None, "chunk_count": 0, "status": "failed",
+                    "detail": "passthrough submit returned no document_id"}
+        deadline = time.monotonic() + poll_timeout
+        ph = self.document_phase(workspace_id, document_id)
+        while not ph.get("terminal"):
+            if time.monotonic() >= deadline:
+                return {"document_id": document_id,
+                        "chunk_count": int(ph.get("chunk_count") or 0),
+                        "status": "failed",
+                        "detail": f"insert poll timeout after {poll_timeout:.0f}s"}
+            time.sleep(poll_interval)
+            ph = self.document_phase(workspace_id, document_id)
+        succeeded = bool(ph.get("succeeded"))
+        return {
+            "document_id": document_id,
+            "chunk_count": int(ph.get("chunk_count") or 0),
+            "status": "indexed" if succeeded else "failed",
+            "detail": None if succeeded else f"terminal status={ph.get('raw_status')}",
         }
 
     def fetch_chunks(self, workspace_id, doc_id):
