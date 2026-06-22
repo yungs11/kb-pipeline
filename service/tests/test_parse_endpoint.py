@@ -97,3 +97,50 @@ def test_parse_client_posts_multipart(monkeypatch):
     assert ctype == "application/pdf"
     # filename also sent as a form field (parse-svc reads form ``filename``).
     assert captured["data"]["filename"] == "doc.pdf"
+
+
+def test_is_excel():
+    from service.app import _is_excel
+    assert _is_excel("a.xlsx") and _is_excel("A.XLSM") and _is_excel("b.xls")
+    assert not _is_excel("a.pdf") and not _is_excel("noext")
+
+
+def test_parse_routes_excel_to_excel_client(monkeypatch):
+    from fastapi.testclient import TestClient
+    import service.app as svc
+
+    class _FakeExcel:
+        def parse_chunks(self, *, file_bytes, filename):
+            return [{"chunk_index": 0, "text": "셀A", "titles_context": ["시트1"], "pages": []}]
+
+    svc.app.dependency_overrides[svc.get_excel_client] = lambda: _FakeExcel()
+    try:
+        c = TestClient(svc.app)
+        r = c.post("/parse", files={"file": ("book.xlsx", b"PK\x03\x04", "application/octet-stream")},
+                   data={})
+        assert r.status_code == 200
+        j = r.json()
+        assert j["chunk_strategy"] == "excel_rag_parser"
+        assert j["chunks"][0]["text"] == "셀A"
+        assert j["modal_spans"] == []
+    finally:
+        svc.app.dependency_overrides.pop(svc.get_excel_client, None)
+
+
+def test_parse_routes_nonexcel_to_parse_svc(monkeypatch):
+    from fastapi.testclient import TestClient
+    import service.app as svc
+
+    class _FakeParse:
+        def parse(self, *, file_bytes, filename, content_type=None):
+            return {"enriched_content": "본문", "n_blocks": 1, "modal_spans": []}
+
+    svc.app.dependency_overrides[svc.get_parse_client] = lambda: _FakeParse()
+    try:
+        c = TestClient(svc.app)
+        r = c.post("/parse", files={"file": ("doc.pdf", b"%PDF", "application/pdf")}, data={})
+        assert r.status_code == 200
+        j = r.json()
+        assert "chunks" not in j and j["enriched_content"] == "본문"
+    finally:
+        svc.app.dependency_overrides.pop(svc.get_parse_client, None)

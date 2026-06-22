@@ -23,6 +23,7 @@ from service.ingest import run_front, FrontError, _TENANT_ID
 from service.edgequake import EdgequakeClient
 from service.adaptive_chunk import AdaptiveChunkClient, MODAL_ATOMIC_MARKERS
 from service.parse_client import ParseSvcClient
+from service.excel_parser_client import ExcelRagParserClient
 from service.llm import get_text_llm
 from kb_pipeline.community import build_workspace_communities
 
@@ -49,6 +50,20 @@ def get_parse_client():
     )
 
 
+_EXCEL_EXTS = {"xlsx", "xlsm", "xls"}
+
+
+def _is_excel(filename: str) -> bool:
+    return "." in filename and filename.rsplit(".", 1)[-1].lower() in _EXCEL_EXTS
+
+
+def get_excel_client():
+    return ExcelRagParserClient(
+        os.environ.get("KBP_EXCEL_URL", "http://localhost:18055"),
+        timeout=float(os.environ.get("KBP_EXCEL_TIMEOUT", "1800")),
+    )
+
+
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
@@ -56,16 +71,22 @@ def healthz():
 
 @app.post("/parse")
 async def parse(file: UploadFile = File(...), content_type: str | None = Form(None),
-                pc=Depends(get_parse_client)):
-    """Parse one upload into enriched content via parse-svc (parser fleet hidden).
+                pc=Depends(get_parse_client), ec=Depends(get_excel_client)):
+    """Parse one upload. Excel → excel-rag-parser (parse+chunk, LLM-free); else → parse-svc.
 
-    Value added (R5): hides parse-svc behind the stable capability contract,
-    sanitizes the upload filename (``_safe_basename`` — no path traversal reaches
-    the backend), and returns the consistent
-    ``{enriched_content, n_blocks, modal_spans}`` shape.
+    Excel returns native chunks (+ ``chunk_strategy``) so the caller skips adaptive /chunk.
     """
     data = await file.read()
     safe_name = _safe_basename(file.filename or "upload")
+    if _is_excel(safe_name):
+        chunks = ec.parse_chunks(file_bytes=data, filename=safe_name)
+        return {
+            "enriched_content": "\n\n".join(c.get("text", "") for c in chunks),
+            "n_blocks": len(chunks),
+            "modal_spans": [],
+            "chunks": chunks,
+            "chunk_strategy": "excel_rag_parser",
+        }
     return pc.parse(file_bytes=data, filename=safe_name,
                     content_type=content_type or file.content_type)
 
