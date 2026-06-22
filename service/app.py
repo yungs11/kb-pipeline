@@ -19,7 +19,7 @@ import os
 from fastapi import FastAPI, UploadFile, File, Form, Depends, BackgroundTasks, Body
 
 from service.parsing import parse_to_markdown, _safe_basename
-from service.ingest import run_ingest, run_front, FrontError, _TENANT_ID
+from service.ingest import run_front, FrontError, _TENANT_ID
 from service.edgequake import EdgequakeClient
 from service.adaptive_chunk import AdaptiveChunkClient, MODAL_ATOMIC_MARKERS
 from service.parse_client import ParseSvcClient
@@ -166,19 +166,47 @@ def insert_status(workspace_id: str, doc_id: str, eq=Depends(get_edgequake)):
 
 
 @app.post("/ingest")
-async def ingest(file: UploadFile = File(...), workspace_id: str = Form(...), doc_id: str = Form(...),
-                 content_type: str | None = Form(None), eq=Depends(get_edgequake)):
+async def ingest(file: UploadFile = File(...), workspace_id: str = Form(...),
+                 doc_id: str = Form(...), content_type: str | None = Form(None),
+                 pc=Depends(get_parse_client), ac=Depends(get_adaptive_chunk),
+                 eq=Depends(get_edgequake)):
+    """End-to-end orchestration (parse→chunk→insert) for one-shot consumers.
+
+    Value added (R5, orchestration ownership): drives the three capabilities in
+    order so a consumer that doesn't want phase-by-phase control still gets the
+    SAME result as the step-by-step path — including the real chunking selection
+    rationale. Returns ``{document_id, chunk_count, status, chunking_selection}``.
+    """
     data = await file.read()
-    # The incoming workspace_id is the kb id; edgequake addresses storage by an
-    # assigned workspace UUID, so register (idempotently) and use THAT uuid.
+    safe_name = _safe_basename(file.filename or doc_id)
+
+    # 1) parse-svc → enriched content (modal markers embedded).
+    parsed = pc.parse(file_bytes=data, filename=safe_name,
+                      content_type=content_type or file.content_type)
+    enriched = parsed.get("enriched_content", "")
+
+    # 2) adaptive_chunk hub → chunks + real selection rationale. Modal spans are
+    #    forwarded as atomic markers so each 〈MODAL…〈/MODAL〉 region stays one chunk.
+    chunk_res = ac.chunk(text=enriched, doc_name=doc_id,
+                         atomic_markers=MODAL_ATOMIC_MARKERS)
+    chunk_texts = [ch.get("chunk_text", "") for ch in (chunk_res.get("chunks") or [])]
+    chunking_selection = {
+        "method_selected": chunk_res.get("method_selected"),
+        "scores": chunk_res.get("scores") or {},
+        "methods_compared": chunk_res.get("methods_compared") or [],
+    }
+
+    # 3) edgequake passthrough insert (kb id → workspace uuid; chunks joined with
+    #    U+001E by the client; polled to terminal).
     eq_ws = eq.ensure_workspace(workspace_id, name=workspace_id)
-    out = run_ingest(data, file.filename, workspace_id=eq_ws, doc_id=doc_id,
-                     content_type=content_type or file.content_type, edgequake=eq,
-                     text_llm=get_text_llm(), vision_llm=None,
-                     ocr_url=os.environ.get("KBP_OCR_URL", "http://localhost:18050"),
-                     excel_url=os.environ.get("KBP_EXCEL_URL", "http://localhost:18055"),
-                     parse=parse_to_markdown)
-    return out
+    ins = eq.insert_chunks(workspace_id=eq_ws, tenant_id=_TENANT_ID,
+                           title=doc_id, chunk_texts=chunk_texts)
+    return {
+        "document_id": ins.get("document_id"),
+        "chunk_count": ins.get("chunk_count"),
+        "status": ins.get("status"),
+        "chunking_selection": chunking_selection,
+    }
 
 
 @app.post("/ingest/submit")

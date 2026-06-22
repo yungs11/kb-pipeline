@@ -1,5 +1,5 @@
 from fastapi.testclient import TestClient
-from service.app import app, get_edgequake
+from service.app import app, get_edgequake, get_parse_client, get_adaptive_chunk
 
 
 #: fixed edgequake-assigned workspace uuid the fake resolves every kb_id to.
@@ -26,6 +26,12 @@ class FakeEq:
         self.submitted = content
         return {"document_id": "d1", "track_id": "t1"}
 
+    def insert_chunks(self, *, workspace_id, tenant_id, title, chunk_texts):
+        # passthrough insert of the pre-chunked texts (used by v2 /ingest).
+        assert workspace_id == EQ_WS
+        self.inserted = list(chunk_texts)
+        return {"document_id": "d1", "chunk_count": 2, "status": "completed"}
+
     def document_phase(self, workspace_id, document_id):
         # live phase snapshot for /ingest/status — resolved uuid scopes the read.
         assert workspace_id == EQ_WS
@@ -41,13 +47,33 @@ class FakeEq:
         return None
 
 
+class _FakeParse:
+    def parse(self, *, file_bytes, filename, content_type=None):
+        return {"enriched_content": "## H\n〈MODAL id=\"T1\" type=\"table\"〉d\np〈/MODAL〉",
+                "n_blocks": 2, "modal_spans": []}
+
+
+class _FakeChunk:
+    def chunk(self, *, text, doc_name, atomic_markers):
+        return {"method_selected": "semantic", "scores": {"avg": 0.8},
+                "methods_compared": [{"method": "semantic", "selected": True}],
+                "chunks": [{"chunk_index": 0, "chunk_text": "## H", "chunk_pages": [1],
+                            "titles_context": "## H"},
+                           {"chunk_index": 1, "chunk_text": "〈MODAL id=\"T1\" type=\"table\"〉d\np〈/MODAL〉",
+                            "chunk_pages": [1], "titles_context": "## H"}],
+                "timing_ms": 1.0}
+
+
 def test_ingest_and_chunks(monkeypatch):
-    monkeypatch.setattr("service.app.parse_to_markdown", lambda b, f, **k: "## H\n<table><tr><td>x</td></tr></table>")
-    monkeypatch.setattr("service.app.get_text_llm", lambda: (lambda p, payload: "요약"))
+    # v2 /ingest orchestrates parse→chunk→insert (parse-svc/hub/edgequake mocked).
+    app.dependency_overrides[get_parse_client] = lambda: _FakeParse()
+    app.dependency_overrides[get_adaptive_chunk] = lambda: _FakeChunk()
     app.dependency_overrides[get_edgequake] = lambda: FakeEq()
     c = TestClient(app)
     r = c.post("/ingest", data={"workspace_id": "ws", "doc_id": "dc"}, files={"file": ("d.pdf", b"b", "application/pdf")})
     assert r.status_code == 200 and r.json()["chunk_count"] == 2 and r.json()["status"] == "completed"
+    # the one-shot path still surfaces the real selection rationale.
+    assert r.json()["chunking_selection"]["method_selected"] == "semantic"
     g = c.get("/chunks", params={"workspace_id": "ws", "doc_id": "dc"})
     assert g.status_code == 200 and g.json()[0]["chunk_id"] == "c0"
     assert c.get("/healthz").json()["status"] == "ok"
