@@ -18,11 +18,14 @@ until [ "$ok" -ge 5 ]; do
   sleep 1
 done
 EQ=/Users/xxx/workspace/8.kb-pipeline/edgequake/edgequake
+# NOTE: DATABASE_URL must NOT pin `?options=-c search_path=public` — that drops
+# ag_catalog from the search_path and breaks AGE graph operators (graphid =),
+# making GET /api/v1/chunks/{id} return 500 on its entity/relationship edge query.
 nohup env \
   HOST=0.0.0.0 PORT=8081 \
   EDGEQUAKE_HOST=0.0.0.0 EDGEQUAKE_PORT=8081 EDGEQUAKE_CHUNKER=adaptive \
   ADAPTIVE_CHUNK_URL=http://localhost:18060 \
-  DATABASE_URL='postgres://edgequake:edgequake_secret@localhost:5433/edgequake?options=-c%20search_path%3Dpublic' \
+  DATABASE_URL='postgres://edgequake:edgequake_secret@localhost:5433/edgequake' \
   EDGEQUAKE_LLM_PROVIDER=openai OPENAI_BASE_URL=https://openrouter.ai/api/v1 OPENAI_API_KEY="$KEY" \
   EDGEQUAKE_DEFAULT_LLM_MODEL=qwen/qwen3.5-122b-a10b EDGEQUAKE_LLM_MODEL=qwen/qwen3.5-122b-a10b \
   EDGEQUAKE_EMBEDDING_PROVIDER=openai EDGEQUAKE_EMBEDDING_BASE_URL=http://localhost:7997/v1 \
