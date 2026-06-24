@@ -18,9 +18,11 @@ class FakeAdaptiveChunk:
     def __init__(self):
         self.calls = []
 
-    def chunk(self, *, text, doc_name, atomic_markers):
+    def chunk(self, *, text, doc_name, atomic_markers,
+              page_spans=None, pages=None):
         self.calls.append({"text": text, "doc_name": doc_name,
-                           "atomic_markers": atomic_markers})
+                           "atomic_markers": atomic_markers,
+                           "page_spans": page_spans, "pages": pages})
         # adaptive_chunk R1 shape (runner.run_chunk): chunks carry chunk_text/chunk_pages.
         return {
             "method_selected": "semantic",
@@ -69,5 +71,109 @@ def test_chunk_normalizes_response_and_passes_modal_markers():
     assert call["atomic_markers"] == MODAL_ATOMIC_MARKERS
     # markers are exactly the modal open/close pair (U+3008/U+3009).
     assert MODAL_ATOMIC_MARKERS == [["〈MODAL", "〈/MODAL〉"]]
+    # regression: no page_spans/pages in the body → forwarded as None (unchanged).
+    assert call["page_spans"] is None
+    assert call["pages"] is None
 
     app.dependency_overrides.clear()
+
+
+def test_chunk_forwards_page_spans_and_pages():
+    """The facade forwards the optional ``page_spans`` (+ ``pages``) body fields to
+    the adaptive hub so every chunk can be page-attributed; normalization unchanged."""
+    fake = FakeAdaptiveChunk()
+    app.dependency_overrides[get_adaptive_chunk] = lambda: fake
+    c = TestClient(app)
+    page_spans = [
+        {"page_number": 1, "char_start": 0, "char_end": 5},
+        {"page_number": 2, "char_start": 5, "char_end": 30},
+    ]
+    pages = [
+        {"page_number": 1, "markdown": "## H\nalpha"},
+        {"page_number": 2, "markdown": "〈MODAL id=\"x\"〉TBL〈/MODAL〉"},
+    ]
+    body = {
+        "enriched_content": "## H\nalpha\n〈MODAL id=\"x\"〉TBL〈/MODAL〉",
+        "doc_name": "d",
+        "page_spans": page_spans,
+        "pages": pages,
+    }
+    r = c.post("/chunk", json=body)
+    assert r.status_code == 200
+    # response normalization (chunk_pages->pages) still holds.
+    j = r.json()
+    assert j["chunks"][0]["pages"] == [1]
+    assert j["chunks"][1]["pages"] == [2]
+
+    # the additive fields were forwarded verbatim to the hub.
+    assert len(fake.calls) == 1
+    call = fake.calls[0]
+    assert call["page_spans"] == page_spans
+    assert call["pages"] == pages
+    assert call["atomic_markers"] == MODAL_ATOMIC_MARKERS
+
+    app.dependency_overrides.clear()
+
+
+def test_chunk_forwards_page_spans_without_pages():
+    """``page_spans`` may be sent without ``pages`` (pages stays None)."""
+    fake = FakeAdaptiveChunk()
+    app.dependency_overrides[get_adaptive_chunk] = lambda: fake
+    c = TestClient(app)
+    page_spans = [{"page_number": 1, "char_start": 0, "char_end": 10}]
+    body = {"enriched_content": "## H\nalpha", "doc_name": "d",
+            "page_spans": page_spans}
+    r = c.post("/chunk", json=body)
+    assert r.status_code == 200
+    call = fake.calls[0]
+    assert call["page_spans"] == page_spans
+    assert call["pages"] is None
+
+    app.dependency_overrides.clear()
+
+
+def test_adaptive_client_includes_page_fields_in_job_body():
+    """AdaptiveChunkClient.chunk puts page_spans/pages into the /chunk/jobs body
+    only when supplied; otherwise the body is unchanged (regression)."""
+    from service.adaptive_chunk import AdaptiveChunkClient
+
+    class FakeResp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._payload
+
+    class FakeHttp:
+        def __init__(self):
+            self.posts = []
+
+        def post(self, url, *, json=None):
+            self.posts.append(json)
+            return FakeResp({"job_id": "j1"})
+
+        def get(self, url):
+            return FakeResp({"status": "succeeded", "result": {"chunks": []}})
+
+    # with page fields -> present in the submit body.
+    client = AdaptiveChunkClient("http://adaptive:18060")
+    client.http = FakeHttp()
+    page_spans = [{"page_number": 1, "char_start": 0, "char_end": 3}]
+    pages = [{"page_number": 1, "markdown": "abc"}]
+    client.chunk(text="abc", doc_name="d", page_spans=page_spans, pages=pages)
+    submitted = client.http.posts[0]
+    assert submitted["page_spans"] == page_spans
+    assert submitted["pages"] == pages
+    assert submitted["options"]["atomic_markers"] == MODAL_ATOMIC_MARKERS
+
+    # without page fields -> keys absent (regression: body shape unchanged).
+    client2 = AdaptiveChunkClient("http://adaptive:18060")
+    client2.http = FakeHttp()
+    client2.chunk(text="abc", doc_name="d")
+    submitted2 = client2.http.posts[0]
+    assert "page_spans" not in submitted2
+    assert "pages" not in submitted2
+    assert set(submitted2.keys()) == {"text", "doc_name", "options"}

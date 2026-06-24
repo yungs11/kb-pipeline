@@ -47,24 +47,37 @@ class AdaptiveChunkClient:
         self.poll_interval = poll_interval
 
     def chunk(self, *, text: str, doc_name: str,
-              atomic_markers: list | None = None) -> dict:
+              atomic_markers: list | None = None,
+              page_spans: list | None = None,
+              pages: list | None = None) -> dict:
         """Delegate to adaptive_chunk ASYNC job and return its R1 result dict.
 
         Submits ``POST /chunk/jobs`` (atomic_markers forwarded inside ``options``)
         then polls ``GET /chunk/jobs/{id}`` until terminal. On success returns the
         raw R1 ``result`` (the facade normalizes it); on failure/timeout raises.
+
+        ``page_spans`` (``[{page_number, char_start, char_end}]``, char offsets in
+        ``text`` = enriched_content) and the optional ``pages``
+        (``[{page_number, markdown}]``) are additive: when supplied they are placed
+        in the job body so adaptive can attribute a ``chunk_pages`` to every chunk
+        (and join the page method). When omitted the body is unchanged (regression).
         """
         if atomic_markers is None:
             atomic_markers = MODAL_ATOMIC_MARKERS
 
         # 1) submit async job — no sync size cap; slow llm_regex/semantic safe.
+        body: dict = {
+            "text": text,
+            "doc_name": doc_name,
+            "options": {"atomic_markers": atomic_markers},
+        }
+        if page_spans is not None:
+            body["page_spans"] = page_spans
+        if pages is not None:
+            body["pages"] = pages
         r = self.http.post(
             f"{self.base}/chunk/jobs",
-            json={
-                "text": text,
-                "doc_name": doc_name,
-                "options": {"atomic_markers": atomic_markers},
-            },
+            json=body,
         )
         r.raise_for_status()
         job_id = (r.json() or {}).get("job_id")

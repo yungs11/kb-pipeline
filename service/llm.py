@@ -19,7 +19,15 @@ def get_text_llm():
         r = httpx.post(
             f"{base}/chat/completions",
             headers={"Authorization": f"Bearer {key}"},
-            json={"model": model, "messages": [{"role": "user", "content": f"{prompt}\n\n{payload}"}]},
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": f"{prompt}\n\n{payload}"}],
+                # qwen3.5 는 reasoning(thinking) 모델. 모달 요약/경계판정(JSON 추출)은 추론이
+                # 불필요한데, thinking ON 이면 호출마다 추론 토큰을 생성해 표/이미지당 지연이
+                # 크다(검증: 표 1건 6.1s→2.9s, reasoning_tokens 0). OpenRouter reasoning 파라미터로
+                # thinking 을 꺼 호출당 지연을 제거한다(프롬프트·응답 JSON 형식은 동일).
+                "reasoning": {"enabled": False},
+            },
             timeout=timeout,
         )
         r.raise_for_status()
