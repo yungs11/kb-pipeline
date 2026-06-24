@@ -180,6 +180,8 @@ def _assemble(
     blocks: list[dict],
     decisions: dict[int, dict],
     consumed: set[int],
+    *,
+    wrap_modals: bool = True,
 ) -> tuple[list[str], list[int]]:
     """Phase D 조립 — 출력 세그먼트 리스트와 각 세그먼트의 page_idx 를 만든다.
 
@@ -198,12 +200,20 @@ def _assemble(
             continue
         if i in decisions:
             d = decisions[i]
-            title = "\n".join(blocks[j].get("text", "") for j in d["title_idxs"])
-            footnote = "\n".join(blocks[j].get("text", "") for j in d["footnote_idxs"])
-            segments.append(_wrap(
-                d["modal_id"], d["modal_type"], d["summary"], d["payload"],
-                title=title, footnote=footnote,
-            ))
+            if wrap_modals:
+                title = "\n".join(blocks[j].get("text", "") for j in d["title_idxs"])
+                footnote = "\n".join(blocks[j].get("text", "") for j in d["footnote_idxs"])
+                seg = _wrap(
+                    d["modal_id"], d["modal_type"], d["summary"], d["payload"],
+                    title=title, footnote=footnote,
+                )
+            else:
+                # 모달 비활성: 〈MODAL〉 래핑 없이 OpenDataLoader 원본 payload 를 그대로 통과.
+                # 제목/각주는 흡수 0(tc=fc=0)이라 인접 text 블록으로 남고, atomic 마커가 없으니
+                # recursive 청커가 제목·표·각주를 자연스럽게 한 청크로 묶는다(표가 제목/각주에서
+                # 떨어져 나가 청크가 깨지던 문제 해소).
+                seg = d["payload"]
+            segments.append(seg)
             seg_page_idx.append(int(blocks[i].get("page_idx", 0) or 0))
         elif blocks[i].get("type") == "text":
             text = blocks[i].get("text", "")
@@ -221,11 +231,17 @@ def _enrich_core(
     vision_llm: Callable[[str, str], str] | None,
     max_workers: int,
     timing_sink: dict | None = None,
+    enrich_modals: bool = True,
 ) -> tuple[dict[int, dict], set[int], list[str]]:
     """Phase A–C 공통 코어 — ``(decisions, consumed, modal_ids)`` 를 반환.
 
     enrich / enrich_with_spans 가 공유한다. 모달 식별·LLM 병렬 호출·충돌 해소까지 수행하고
     Phase D 조립은 호출자가 ``_assemble`` 로 한다. modal_ids 는 문서순(흡수되지 않은 모달).
+
+    ``enrich_modals=False`` 면 **모달 LLM 을 호출하지 않고**(Phase B 스킵) 각 모달을
+    요약 없음·흡수 0(``summary=""``, ``tc=fc=0``)으로 강등한다 — 즉 OpenDataLoader 원본
+    payload 를 그대로 ``〈MODAL〉…〈/MODAL〉`` 로 감싸 통과시킨다(원자성·page_spans 유지,
+    LLM 0 회). LLM 실패 폴백과 byte-동일한 경로다.
     """
     if max_workers < 1:
         raise ValueError(f"max_workers must be >= 1, got {max_workers}")
@@ -240,12 +256,14 @@ def _enrich_core(
         btype = blocks[i].get("type")
         if btype not in ("table", "image", "equation"):
             continue
-        if btype in ("table", "equation") and text_llm is None:
+        # enrich_modals=False 면 LLM 을 안 부르므로 callable 이 None 이어도 무방(원본 payload
+        # 통과). enrich_modals=True 일 때만 해당 종류의 LLM 이 필요하다.
+        if enrich_modals and btype in ("table", "equation") and text_llm is None:
             raise ValueError(
                 f"{btype} block encountered but text_llm is None; "
                 f"a text LLM callable is required to describe {btype}s."
             )
-        if btype == "image" and vision_llm is None:
+        if enrich_modals and btype == "image" and vision_llm is None:
             raise ValueError(
                 "image block encountered but vision_llm is None; "
                 "a vision LLM callable is required to describe images."
@@ -283,7 +301,12 @@ def _enrich_core(
         return res
 
     modal_wall_ms = 0.0
-    if modals:
+    if not enrich_modals:
+        # 모달 LLM 비활성(KBP_MODAL_ENRICH=0): LLM 0 회 — 각 모달을 요약 없음·흡수 0 으로
+        # 강등해 OpenDataLoader 원본 payload 를 그대로 〈MODAL〉 로 감싼다(원자성 유지).
+        for m in modals:
+            m["summary"], m["tc"], m["fc"] = "", 0, 0
+    elif modals:
         workers = min(max_workers, len(modals))  # max_workers>=1 검증됨; modals 비어있지 않음
         _b0 = time.perf_counter()
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
@@ -347,6 +370,7 @@ def enrich(
     text_llm: Callable[[str, str], str] | None,
     vision_llm: Callable[[str, str], str] | None,
     max_workers: int = 8,
+    enrich_modals: bool = True,
 ) -> tuple[str, list[str]]:
     """Enrich blocks into a single content string + ordered modal ids.
 
@@ -365,8 +389,9 @@ def enrich(
     """
     decisions, consumed, modal_ids = _enrich_core(
         blocks, text_llm=text_llm, vision_llm=vision_llm, max_workers=max_workers,
+        enrich_modals=enrich_modals,
     )
-    segments, _ = _assemble(blocks, decisions, consumed)
+    segments, _ = _assemble(blocks, decisions, consumed, wrap_modals=enrich_modals)
     return _SEGMENT_JOIN.join(segments), modal_ids
 
 
@@ -377,6 +402,7 @@ def enrich_with_spans(
     vision_llm: Callable[[str, str], str] | None,
     max_workers: int = 8,
     timing_sink: dict | None = None,
+    enrich_modals: bool = True,
 ) -> tuple[str, list[str], list[dict]]:
     """``enrich`` 와 동일하게 조립하되, page 별 char-span 도 함께 산출한다(spec 5.1.4).
 
@@ -398,9 +424,9 @@ def enrich_with_spans(
     """
     decisions, consumed, modal_ids = _enrich_core(
         blocks, text_llm=text_llm, vision_llm=vision_llm, max_workers=max_workers,
-        timing_sink=timing_sink,
+        timing_sink=timing_sink, enrich_modals=enrich_modals,
     )
-    segments, seg_page_idx = _assemble(blocks, decisions, consumed)
+    segments, seg_page_idx = _assemble(blocks, decisions, consumed, wrap_modals=enrich_modals)
     enriched = _SEGMENT_JOIN.join(segments)
 
     # 페이지별 [min char_start, max char_end) 를 running offset 으로 누적.

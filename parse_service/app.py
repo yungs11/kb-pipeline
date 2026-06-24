@@ -209,6 +209,10 @@ def run_parse(file_bytes: bytes, filename: str, *,
     # 모달 LLM 동시호출 상한. 프록시(LiteLLM/Cloudflare) 과부하로 인한 524 를 줄이려고
     # 기본 3 으로 낮춘다(KBP_MODAL_MAX_WORKERS 로 조정; 524 잦으면 2/1 로).
     max_workers = max(1, int(os.environ.get("KBP_MODAL_MAX_WORKERS", "3")))
+    # 모달 LLM(표/이미지 검색요약 + 제목/각주 흡수) 토글. 기본 off — OpenDataLoader 원본
+    # payload 를 그대로 〈MODAL〉 로 통과시켜 LLM 0 회(속도↑). 〈MODAL〉 원자성·page_spans 는
+    # 유지되므로 청킹/페이지 지표엔 무영향(검색은 표 의미요약만 손실). KBP_MODAL_ENRICH=1 로 재활성.
+    enrich_modals = os.environ.get("KBP_MODAL_ENRICH", "0") != "0"
     modal_sink: dict = {}
     try:
         _t = time.perf_counter()
@@ -224,6 +228,7 @@ def run_parse(file_bytes: bytes, filename: str, *,
         enriched, _modal_ids, page_spans = enrich_with_spans(
             blocks, text_llm=text_llm, vision_llm=vision_llm, max_workers=max_workers,
             timing_sink=modal_sink,  # 모달 LLM(표/이미지 분석) 단계 분해
+            enrich_modals=enrich_modals,  # 기본 off → 원본 payload 통과(LLM 0회)
         )
         modal_ms = (time.perf_counter() - _t) * 1000.0
     except ParseError:
