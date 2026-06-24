@@ -23,7 +23,7 @@ EQ=/Users/xxx/workspace/8.kb-pipeline/edgequake/edgequake
 # making GET /api/v1/chunks/{id} return 500 on its entity/relationship edge query.
 nohup env \
   HOST=0.0.0.0 PORT=8081 \
-  EDGEQUAKE_HOST=0.0.0.0 EDGEQUAKE_PORT=8081 EDGEQUAKE_CHUNKER=adaptive \
+  EDGEQUAKE_HOST=0.0.0.0 EDGEQUAKE_PORT=8081 EDGEQUAKE_CHUNKER=passthrough \
   ADAPTIVE_CHUNK_URL=http://localhost:18060 \
   DATABASE_URL='postgres://edgequake:edgequake_secret@localhost:5433/edgequake' \
   EDGEQUAKE_LLM_PROVIDER=openai OPENAI_BASE_URL=https://openrouter.ai/api/v1 OPENAI_API_KEY="$KEY" \
