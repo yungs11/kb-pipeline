@@ -352,21 +352,49 @@ class EdgequakeClient:
             return {"document_id": None, "chunk_count": 0, "status": "failed",
                     "detail": "passthrough submit returned no document_id"}
         deadline = time.monotonic() + poll_timeout
+        # 모니터링(P3): edgequake 내부 phase 체류시간 근사. edgequake 는 per-phase
+        # 타임스탬프를 주지 않으므로, 각 폴링 간격을 "그 구간 동안 관측된 raw_status"에
+        # 귀속해 누적한다(poll-derived approx). chunking→extracting→embedding→storing
+        # 전이로 분해돼 "적재 안에서 어디가 느린지"(주로 extracting=엔티티 LLM)를 드러낸다.
+        phase_ms: dict[str, float] = {}
+        phase_order: list[str] = []
+
+        def _accumulate(name, dt_ms):
+            if not name:
+                return
+            if name not in phase_ms:
+                phase_ms[name] = 0.0
+                phase_order.append(name)
+            phase_ms[name] += dt_ms
+
+        def _phases():
+            return [{"name": p, "ms": round(phase_ms[p], 1)} for p in phase_order]
+
+        last_t = time.monotonic()
         ph = self.document_phase(workspace_id, document_id)
+        last_phase = ph.get("raw_status") or ph.get("phase")
         while not ph.get("terminal"):
             if time.monotonic() >= deadline:
+                _accumulate(last_phase, (time.monotonic() - last_t) * 1000.0)
                 return {"document_id": document_id,
                         "chunk_count": int(ph.get("chunk_count") or 0),
                         "status": "failed",
-                        "detail": f"insert poll timeout after {poll_timeout:.0f}s"}
+                        "detail": f"insert poll timeout after {poll_timeout:.0f}s",
+                        "phases": _phases()}
             time.sleep(poll_interval)
+            now = time.monotonic()
+            _accumulate(last_phase, (now - last_t) * 1000.0)
+            last_t = now
             ph = self.document_phase(workspace_id, document_id)
+            last_phase = ph.get("raw_status") or ph.get("phase")
+        _accumulate(last_phase, (time.monotonic() - last_t) * 1000.0)
         succeeded = bool(ph.get("succeeded"))
         return {
             "document_id": document_id,
             "chunk_count": int(ph.get("chunk_count") or 0),
             "status": "indexed" if succeeded else "failed",
             "detail": None if succeeded else f"terminal status={ph.get('raw_status')}",
+            "phases": _phases(),
         }
 
     def fetch_chunks(self, workspace_id, doc_id):

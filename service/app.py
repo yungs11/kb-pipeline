@@ -190,6 +190,9 @@ def insert(workspace_id: str = Body(..., embed=True),
         "document_id": res.get("document_id"),
         "chunk_count": res.get("chunk_count"),
         "status": res.get("status"),
+        # 모니터링(P3): edgequake 내부 phase 체류시간 근사(chunking/extracting/embedding/
+        # storing). 집계자가 stage_timings.insert.detail 로 싣는다. 폴링 기반이라 근사값.
+        "phases": res.get("phases") or [],
     }
 
 
