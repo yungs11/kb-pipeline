@@ -71,10 +71,17 @@ def healthz():
 
 @app.post("/parse")
 async def parse(file: UploadFile = File(...), content_type: str | None = Form(None),
+                docs_id: str | None = Form(None),
                 pc=Depends(get_parse_client), ec=Depends(get_excel_client)):
     """Parse one upload. Excel → excel-rag-parser (parse+chunk, LLM-free); else → parse-svc.
 
     Excel returns native chunks (+ ``chunk_strategy``) so the caller skips adaptive /chunk.
+
+    ``docs_id`` (optional form) is the orchestrator's ``content_hash(file_bytes)[:16]``;
+    when present it is forwarded to parse-svc so the page-image MinIO keys agree with
+    the keys the orchestrator/UI assemble. The non-Excel response passes through the
+    additive page fields (``docs_id``/``page_count``/``pages``/``page_spans``) from
+    parse-svc unchanged. The Excel branch is owned by Feature 1 and is left untouched.
     """
     data = await file.read()
     safe_name = _safe_basename(file.filename or "upload")
@@ -88,12 +95,15 @@ async def parse(file: UploadFile = File(...), content_type: str | None = Form(No
             "chunk_strategy": "excel_rag_parser",
         }
     return pc.parse(file_bytes=data, filename=safe_name,
-                    content_type=content_type or file.content_type)
+                    content_type=content_type or file.content_type,
+                    docs_id=docs_id)
 
 
 @app.post("/chunk")
 def chunk(enriched_content: str = Body(..., embed=True),
           doc_name: str = Body("", embed=True),
+          page_spans: list | None = Body(None, embed=True),
+          pages: list | None = Body(None, embed=True),
           ac=Depends(get_adaptive_chunk)):
     """Chunk enriched content via the adaptive_chunk hub (hidden) and normalize.
 
@@ -104,9 +114,15 @@ def chunk(enriched_content: str = Body(..., embed=True),
         the facade contract (``text``/``pages``), dropping internal fields;
       * surfaces the real selection rationale (method_selected/scores/
         methods_compared) for the UI's "why this chunker" card.
+
+    ``page_spans`` (``[{page_number, char_start, char_end}]``) and the optional
+    ``pages`` (``[{page_number, markdown}]``) are additive body fields forwarded to
+    adaptive so each chunk gets a ``chunk_pages`` attribution. The R1
+    ``chunk_pages``→``pages`` normalization (below) is unchanged.
     """
     res = ac.chunk(text=enriched_content, doc_name=doc_name,
-                   atomic_markers=MODAL_ATOMIC_MARKERS)
+                   atomic_markers=MODAL_ATOMIC_MARKERS,
+                   page_spans=page_spans, pages=pages)
     chunks = [
         {
             "chunk_index": ch.get("chunk_index"),
@@ -121,6 +137,9 @@ def chunk(enriched_content: str = Body(..., embed=True),
         "method_selected": res.get("method_selected"),
         "scores": res.get("scores") or {},
         "methods_compared": res.get("methods_compared") or [],
+        # 모니터링(P4): adaptive_chunk 가 AC_TIMING 시 내려주는 청커 단계 분해 passthrough
+        # (방법별 split/score + winner 지표별 ms). 미설정이면 None(집계자가 생략).
+        "timing_details": res.get("timing_details"),
     }
 
 
