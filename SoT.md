@@ -107,6 +107,8 @@ raganything `modalprocessors`의 **구조만** 차용한다(엔진 채택 아님
 
 ### 3.4 Chunking — adaptive_chunk를 edgequake `ChunkingStrategy`로 (신규 W1)
 
+> **⚠️ v2 정정 (현행, 2026-06-24):** kb_pipeline **facade 분해(v2)** 이후 청킹은 **facade `/chunk` 가 소유**한다 — facade 가 `adaptive_chunk /chunk` 를 `atomic_markers=〈MODAL〉…〈/MODAL〉` 로 호출해 **모달 원자성까지 facade 에서 강제**한다(adaptive_chunk `service/runner.py` `_segment_atomic`/`DEFAULT_ATOMIC_MARKERS`; 아래 §3.3-2·3.4 의 "adaptive_chunk 엔드포인트가 모달 atomic 미강제" 메모는 atomic_markers 추가로 **무효화됨**). 따라서 **전용 edgequake 는 `EDGEQUAKE_CHUNKER=passthrough`** 로 띄워 facade 청크를 U+001E 경계로 **그대로 저장**한다(재청킹 금지). edgequake 를 `adaptive` 로 띄우면 facade 가 이미 청킹한 내용을 다시 adaptive_chunk 로 재청킹(이중청킹)하다 빈 구분자 조각(``)을 보내 **HTTP 422 → 적재 실패**한다. 아래 W1 `AdaptiveChunkStrategy`(edgequake 내부 adaptive)는 **v1 원본 경로**이며 facade 경로에선 passthrough 로 대체된다.
+
 edgequake는 `Chunker::with_strategy(config, Arc<dyn ChunkingStrategy>)`로 커스텀 전략을 받는다. `ChunkingStrategy::chunk(text, config)`는 **async**다.
 
 - **`AdaptiveChunkStrategy`(Rust)** 를 구현. `async chunk(content, config) -> Vec<ChunkResult>`의 책임:
@@ -229,6 +231,8 @@ edgequake `detect_communities_guarded`(Louvain, `edgequake-storage`) + 커뮤니
 **E2E 검증 통과** — kb_pipeline frontend → edgequake → 추출 → 임베딩 → 검색 전 구간 실동작.
 - 구성: LLM=OpenRouter `qwen/qwen3.5-122b-a10b`, 임베딩=`BAAI/bge-m3` 1024d(로컬 :7997 OpenAI-호환), `EDGEQUAKE_CHUNKER=adaptive`.
 - 결과(문서 1건): chunk 12, **모달 4개 전부 단일 atomic 청크**(T1→chunk-6, T2→8, T3→9, T4→11), entity 158, relationship 111, 임베딩 147행 전부 1024d, `/api/v1/query` 검색 동작. 0 실패.
+
+> **⚠️ v2 정정(2026-06-24):** 위 §11 은 **v1(edgequake=adaptive)** E2E 기록이다. **현행 kb_pipeline facade 경로는 `EDGEQUAKE_CHUNKER=passthrough`** 다 — 청킹·모달원자성은 facade `/chunk` 가 소유(§3.4 v2 정정), edgequake 는 facade 청크를 1:1 passthrough 저장한다. `adaptive` 로 띄우면 이중청킹 → adaptive_chunk HTTP 422("non-empty text required", 빈 구분자 조각) → 적재 실패. 기동 스크립트 `service/scripts/start_dedicated_edgequake.sh` 도 passthrough 로 갱신됨(8.kb-pipeline `456d52a`; 본 SoT 정정과 동반).
 
 **완료(merged)**
 - W0 blockify + W2 modal: kb-pipeline `main` (pytest 21).
