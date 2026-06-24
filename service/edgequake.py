@@ -242,16 +242,17 @@ class EdgequakeClient:
     def document_phase(self, workspace_id, document_id):
         """GET /documents/{id} → live phase snapshot for per-phase progress.
 
-        Reads the authoritative DOCUMENT ``status`` field (NOT current_stage, which
-        is None on the async path) and maps it to a coarse phase the UI ticks on.
+        Reads the authoritative DOCUMENT ``status`` field for terminal/success 판정,
+        PLUS the granular ``current_stage`` (extracting/embedding/…) that edgequake writes
+        to KV metadata during async processing — our edgequake detail handler now surfaces
+        it (vendored patch). ``live_phase`` prefers current_stage and falls back to
+        raw_status so the monitor attributes time to the true sub-stage (엔티티 추출 LLM vs
+        임베딩 vs 저장) instead of lumping it all under "chunking" (status stays "chunking"
+        while extraction/embedding run).
 
-        Returns ``{raw_status, phase, chunk_count, terminal, succeeded}`` where:
-          * ``raw_status`` — the document status string as returned by edgequake.
-          * ``phase``      — mapped coarse phase (chunking/extracting/embedding/
-                             storing/completed/failed, else "processing").
-          * ``chunk_count``— authoritative chunk count (``-chunk-`` prefix scan).
-          * ``terminal``   — status reached a terminal state (no more transitions).
-          * ``succeeded``  — terminal-OK (completed/indexed) AND chunk_count>0.
+        Returns ``{raw_status, current_stage, stage_message, live_phase, phase,
+        chunk_count, terminal, succeeded}``. terminal/succeeded stay keyed on the
+        authoritative ``status`` (never on current_stage).
         """
         d = self.http.get(
             f"{self.base}/api/v1/documents/{document_id}",
@@ -260,12 +261,19 @@ class EdgequakeClient:
         d.raise_for_status()
         dj = d.json() or {}
         raw_status = (dj.get("status") or "").lower()
+        current_stage = (dj.get("current_stage") or "").lower() or None
+        stage_message = dj.get("stage_message")
         chunk_count = int(dj.get("chunk_count") or 0)
         phase = self._PHASE_MAP.get(raw_status, "processing")
+        # 세부 sub-stage 우선(없으면 coarse status). 종료판정은 status 기준 유지.
+        live_phase = current_stage or raw_status
         terminal = raw_status in self._PHASE_TERMINAL
         succeeded = raw_status in self._PHASE_SUCCESS and chunk_count > 0
         return {
             "raw_status": raw_status,
+            "current_stage": current_stage,
+            "stage_message": stage_message,
+            "live_phase": live_phase,
             "phase": phase,
             "chunk_count": chunk_count,
             "terminal": terminal,
@@ -372,7 +380,7 @@ class EdgequakeClient:
 
         last_t = time.monotonic()
         ph = self.document_phase(workspace_id, document_id)
-        last_phase = ph.get("raw_status") or ph.get("phase")
+        last_phase = ph.get("live_phase") or ph.get("raw_status") or ph.get("phase")
         while not ph.get("terminal"):
             if time.monotonic() >= deadline:
                 _accumulate(last_phase, (time.monotonic() - last_t) * 1000.0)
@@ -386,7 +394,7 @@ class EdgequakeClient:
             _accumulate(last_phase, (now - last_t) * 1000.0)
             last_t = now
             ph = self.document_phase(workspace_id, document_id)
-            last_phase = ph.get("raw_status") or ph.get("phase")
+            last_phase = ph.get("live_phase") or ph.get("raw_status") or ph.get("phase")
         _accumulate(last_phase, (time.monotonic() - last_t) * 1000.0)
         succeeded = bool(ph.get("succeeded"))
         return {
