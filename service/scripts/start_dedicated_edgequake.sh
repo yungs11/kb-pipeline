@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 KEY=$(grep -E '^OPENAI_API_KEY=' /Users/xxx/workspace/99.projects/rag-edgequake-benchmark/docker/.env | head -1 | cut -d= -f2-)
+# litellm embedding key: never hardcode in this git-tracked file. Read from env, else
+# fall back to the gitignored adaptive_chunk/.env (LITELLM_API_KEY=...).
+LITELLM_KEY="${LITELLM_API_KEY:-$(grep -E '^LITELLM_API_KEY=' /Users/xxx/workspace/99.projects/adaptive_chunk/.env 2>/dev/null | head -1 | cut -d= -f2-)}"
+: "${LITELLM_KEY:?LITELLM_API_KEY not set and not found in adaptive_chunk/.env}"
 docker rm -f eq-pg-kbp 2>/dev/null || true
 docker run -d --name eq-pg-kbp -p 5433:5432 \
   -e POSTGRES_USER=edgequake -e POSTGRES_PASSWORD=edgequake_secret -e POSTGRES_DB=edgequake \
@@ -26,10 +30,11 @@ nohup env \
   EDGEQUAKE_HOST=0.0.0.0 EDGEQUAKE_PORT=8081 EDGEQUAKE_CHUNKER=passthrough \
   ADAPTIVE_CHUNK_URL=http://localhost:18060 \
   DATABASE_URL='postgres://edgequake:edgequake_secret@localhost:5433/edgequake' \
-  EDGEQUAKE_LLM_PROVIDER=openai OPENAI_BASE_URL=https://openrouter.ai/api/v1 OPENAI_API_KEY="$KEY" \
+  EDGEQUAKE_LLM_PROVIDER=openrouter OPENROUTER_API_KEY="$KEY" \
+  OPENAI_BASE_URL=https://openrouter.ai/api/v1 OPENAI_API_KEY="$KEY" \
   EDGEQUAKE_DEFAULT_LLM_MODEL=qwen/qwen3.5-122b-a10b EDGEQUAKE_LLM_MODEL=qwen/qwen3.5-122b-a10b \
-  EDGEQUAKE_EMBEDDING_PROVIDER=openai EDGEQUAKE_EMBEDDING_BASE_URL=http://localhost:7997/v1 \
-  EDGEQUAKE_EMBEDDING_API_KEY=dummy EDGEQUAKE_EMBEDDING_MODEL=BAAI/bge-m3 EDGEQUAKE_EMBEDDING_DIMENSION=1024 \
+  EDGEQUAKE_EMBEDDING_PROVIDER=openai EDGEQUAKE_EMBEDDING_BASE_URL=https://litellm.ax-demo.com/v1 \
+  EDGEQUAKE_EMBEDDING_API_KEY="$LITELLM_KEY" EDGEQUAKE_EMBEDDING_MODEL=bge-m3 EDGEQUAKE_EMBEDDING_DIMENSION=1024 \
   PDFIUM_AUTO_CACHE_DIR=/tmp/eqkbp-pdfium RUST_LOG=info \
   "$EQ/target/debug/edgequake" > /tmp/edgequake_kbp.log 2>&1 &
 disown
