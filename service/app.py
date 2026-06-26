@@ -190,6 +190,9 @@ def insert(workspace_id: str = Body(..., embed=True),
         "document_id": res.get("document_id"),
         "chunk_count": res.get("chunk_count"),
         "status": res.get("status"),
+        # edgequake 가 배정한 워크스페이스 uuid — orchestrator 가 KB.edgequake_workspace_id 에
+        # 영속해 "그래프 보기" 팝업의 X-Workspace-ID(직접 edgequake 호출)로 쓴다.
+        "edgequake_workspace_id": eq_ws,
         # 모니터링(P3): edgequake 내부 phase 체류시간 근사(chunking/extracting/embedding/
         # storing). 집계자가 stage_timings.insert.detail 로 싣는다. 폴링 기반이라 근사값.
         "phases": res.get("phases") or [],
@@ -255,6 +258,9 @@ async def ingest(file: UploadFile = File(...), workspace_id: str = Form(...),
         "chunk_count": ins.get("chunk_count"),
         "status": ins.get("status"),
         "chunking_selection": chunking_selection,
+        # edgequake 가 배정한 워크스페이스 uuid — orchestrator 가 KB.edgequake_workspace_id 에
+        # 영속해 "그래프 보기" 팝업의 X-Workspace-ID(직접 edgequake 호출)로 쓴다.
+        "edgequake_workspace_id": eq_ws,
     }
 
 
