@@ -215,7 +215,8 @@ class EdgequakeClient:
     #: Terminal statuses that count as a SUCCESSFUL index (given chunk_count>0).
     _PHASE_SUCCESS = {"completed", "indexed"}
 
-    def submit_document(self, content, *, workspace_id, tenant_id, filename):
+    def submit_document(self, content, *, workspace_id, tenant_id, filename,
+                        skip_graph: bool = False):
         """Submit a document ASYNC and return immediately (NO poll).
 
         Unlike ``post_document`` (which blocks polling the task to terminal), this
@@ -223,15 +224,24 @@ class EdgequakeClient:
         returns the identifiers so the caller can poll ``document_phase`` itself to
         observe the LIVE per-phase progress (chunking→extracting→…→completed).
 
+        ``skip_graph`` (default False) gates per-document graph (entity/relationship)
+        extraction in edgequake. When True a ``metadata.skip_graph_extraction`` flag
+        is attached so edgequake skips the extraction sub-step (chunking/embedding/
+        vector search are unaffected). When False the request body is byte-identical
+        to the legacy submit (content/title/async_processing only) — no metadata key.
+
         Returns ``{document_id, track_id}`` (track_id = the task/batch id for the
         async pipeline; not required for ``document_phase`` polling, which keys off
         the document_id, but surfaced for parity with the submit response).
         """
         hdr = {"X-Workspace-ID": workspace_id, "X-Tenant-ID": tenant_id}
+        body = {"content": content, "title": filename, "async_processing": True}
+        if skip_graph:
+            body["metadata"] = {"skip_graph_extraction": True}
         r = self.http.post(
             f"{self.base}/api/v1/documents",
             headers=hdr,
-            json={"content": content, "title": filename, "async_processing": True},
+            json=body,
         )
         r.raise_for_status()
         j = r.json() or {}
@@ -342,6 +352,7 @@ class EdgequakeClient:
         }
 
     def insert_chunks(self, *, workspace_id, tenant_id, title, chunk_texts,
+                      skip_graph: bool = False,
                       poll_timeout=1200.0, poll_interval=3.0):
         """Insert pre-chunked texts as ONE passthrough document and poll to terminal.
 
@@ -354,7 +365,8 @@ class EdgequakeClient:
         """
         content = PASSTHROUGH_SEP.join(chunk_texts)
         res = self.submit_document(content, workspace_id=workspace_id,
-                                   tenant_id=tenant_id, filename=title)
+                                   tenant_id=tenant_id, filename=title,
+                                   skip_graph=skip_graph)
         document_id = res.get("document_id")
         if not document_id:
             return {"document_id": None, "chunk_count": 0, "status": "failed",

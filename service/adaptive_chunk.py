@@ -49,7 +49,10 @@ class AdaptiveChunkClient:
     def chunk(self, *, text: str, doc_name: str,
               atomic_markers: list | None = None,
               page_spans: list | None = None,
-              pages: list | None = None) -> dict:
+              pages: list | None = None,
+              methods: list | None = None,
+              skip_scoring: bool = False,
+              llm_regex_pattern: str | None = None) -> dict:
         """Delegate to adaptive_chunk ASYNC job and return its R1 result dict.
 
         Submits ``POST /chunk/jobs`` (atomic_markers forwarded inside ``options``)
@@ -61,15 +64,38 @@ class AdaptiveChunkClient:
         (``[{page_number, markdown}]``) are additive: when supplied they are placed
         in the job body so adaptive can attribute a ``chunk_pages`` to every chunk
         (and join the page method). When omitted the body is unchanged (regression).
+
+        Chunk-method selection (passthrough to ``options``; adaptive_chunk owns the
+        validation/semantics):
+          * ``methods`` — restrict the chunker to these method keys
+            (``recursive_1100``/``recursive_600``/``page``/``llm_regex``/``semantic``);
+            ``None`` = auto (every method competes, then best is scored/selected).
+          * ``skip_scoring`` — when ``True`` the hub skips the scoring competition
+            and uses the single given method directly (requires exactly one method).
+          * ``llm_regex_pattern`` — a user-supplied regex; the hub uses it verbatim
+            instead of generating one via the LLM (requires ``methods==['llm_regex']``).
+
+        These three fields are placed in ``options`` ONLY when non-default
+        (``methods is not None`` / ``skip_scoring is True`` / ``llm_regex_pattern is
+        not None``). With all defaults (auto) the body is byte-identical to the
+        legacy request, so the auto path is unchanged (regression / backward compat).
         """
         if atomic_markers is None:
             atomic_markers = MODAL_ATOMIC_MARKERS
 
         # 1) submit async job — no sync size cap; slow llm_regex/semantic safe.
+        options: dict = {"atomic_markers": atomic_markers}
+        # method-selection passthrough — omit defaults so auto stays byte-identical.
+        if methods is not None:
+            options["methods"] = methods
+        if skip_scoring:
+            options["skip_scoring"] = skip_scoring
+        if llm_regex_pattern is not None:
+            options["llm_regex_pattern"] = llm_regex_pattern
         body: dict = {
             "text": text,
             "doc_name": doc_name,
-            "options": {"atomic_markers": atomic_markers},
+            "options": options,
         }
         if page_spans is not None:
             body["page_spans"] = page_spans

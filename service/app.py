@@ -104,6 +104,9 @@ def chunk(enriched_content: str = Body(..., embed=True),
           doc_name: str = Body("", embed=True),
           page_spans: list | None = Body(None, embed=True),
           pages: list | None = Body(None, embed=True),
+          methods: list | None = Body(None, embed=True),
+          skip_scoring: bool = Body(False, embed=True),
+          llm_regex_pattern: str | None = Body(None, embed=True),
           ac=Depends(get_adaptive_chunk)):
     """Chunk enriched content via the adaptive_chunk hub (hidden) and normalize.
 
@@ -119,10 +122,19 @@ def chunk(enriched_content: str = Body(..., embed=True),
     ``pages`` (``[{page_number, markdown}]``) are additive body fields forwarded to
     adaptive so each chunk gets a ``chunk_pages`` attribution. The R1
     ``chunk_pages``→``pages`` normalization (below) is unchanged.
+
+    ``methods``/``skip_scoring``/``llm_regex_pattern`` are the chunk-method
+    selection passthrough (all optional). They are forwarded to the hub's
+    ``options`` (validation/semantics owned by adaptive_chunk). When unspecified
+    (``methods=None``, ``skip_scoring=False``, ``llm_regex_pattern=None``) the hub
+    runs its default auto behavior (every method competes, then scored/selected) —
+    byte-identical to the legacy request (regression).
     """
     res = ac.chunk(text=enriched_content, doc_name=doc_name,
                    atomic_markers=MODAL_ATOMIC_MARKERS,
-                   page_spans=page_spans, pages=pages)
+                   page_spans=page_spans, pages=pages,
+                   methods=methods, skip_scoring=skip_scoring,
+                   llm_regex_pattern=llm_regex_pattern)
     chunks = [
         {
             "chunk_index": ch.get("chunk_index"),
@@ -174,6 +186,7 @@ def insert(workspace_id: str = Body(..., embed=True),
            doc_id: str = Body(..., embed=True),
            title: str = Body("", embed=True),
            chunks: list[str] = Body(..., embed=True),
+           extract_graph: bool = Body(True, embed=True),
            eq=Depends(get_edgequake)):
     """Insert pre-chunked texts into edgequake as a passthrough document.
 
@@ -185,7 +198,8 @@ def insert(workspace_id: str = Body(..., embed=True),
     """
     eq_ws = eq.ensure_workspace(workspace_id, name=workspace_id)
     res = eq.insert_chunks(workspace_id=eq_ws, tenant_id=_TENANT_ID,
-                           title=title or doc_id, chunk_texts=chunks)
+                           title=title or doc_id, chunk_texts=chunks,
+                           skip_graph=not extract_graph)
     return {
         "document_id": res.get("document_id"),
         "chunk_count": res.get("chunk_count"),

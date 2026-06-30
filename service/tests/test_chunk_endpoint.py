@@ -19,10 +19,13 @@ class FakeAdaptiveChunk:
         self.calls = []
 
     def chunk(self, *, text, doc_name, atomic_markers,
-              page_spans=None, pages=None):
+              page_spans=None, pages=None,
+              methods=None, skip_scoring=False, llm_regex_pattern=None):
         self.calls.append({"text": text, "doc_name": doc_name,
                            "atomic_markers": atomic_markers,
-                           "page_spans": page_spans, "pages": pages})
+                           "page_spans": page_spans, "pages": pages,
+                           "methods": methods, "skip_scoring": skip_scoring,
+                           "llm_regex_pattern": llm_regex_pattern})
         # adaptive_chunk R1 shape (runner.run_chunk): chunks carry chunk_text/chunk_pages.
         return {
             "method_selected": "semantic",
@@ -74,6 +77,10 @@ def test_chunk_normalizes_response_and_passes_modal_markers():
     # regression: no page_spans/pages in the body → forwarded as None (unchanged).
     assert call["page_spans"] is None
     assert call["pages"] is None
+    # regression: no method-selection fields → auto defaults forwarded (unchanged).
+    assert call["methods"] is None
+    assert call["skip_scoring"] is False
+    assert call["llm_regex_pattern"] is None
 
     app.dependency_overrides.clear()
 
@@ -130,6 +137,112 @@ def test_chunk_forwards_page_spans_without_pages():
     assert call["pages"] is None
 
     app.dependency_overrides.clear()
+
+
+def test_chunk_forwards_method_selection_fields():
+    """The facade forwards ``methods``/``skip_scoring``/``llm_regex_pattern`` body
+    fields to the adaptive hub verbatim (chunk-method selection passthrough, B2)."""
+    fake = FakeAdaptiveChunk()
+    app.dependency_overrides[get_adaptive_chunk] = lambda: fake
+    c = TestClient(app)
+    body = {
+        "enriched_content": "## H\nalpha",
+        "doc_name": "d",
+        "methods": ["recursive_600"],
+        "skip_scoring": True,
+    }
+    r = c.post("/chunk", json=body)
+    assert r.status_code == 200
+    call = fake.calls[0]
+    assert call["methods"] == ["recursive_600"]
+    assert call["skip_scoring"] is True
+    assert call["llm_regex_pattern"] is None
+    # other passthrough untouched.
+    assert call["atomic_markers"] == MODAL_ATOMIC_MARKERS
+
+    app.dependency_overrides.clear()
+
+
+def test_chunk_forwards_llm_regex_pattern():
+    """``llm_regex_pattern`` (with ``methods==['llm_regex']``) is forwarded so the
+    hub uses the user-supplied regex instead of generating one via the LLM."""
+    fake = FakeAdaptiveChunk()
+    app.dependency_overrides[get_adaptive_chunk] = lambda: fake
+    c = TestClient(app)
+    body = {
+        "enriched_content": "제1조 ...\n제2조 ...",
+        "doc_name": "d",
+        "methods": ["llm_regex"],
+        "skip_scoring": True,
+        "llm_regex_pattern": r"제\d+조",
+    }
+    r = c.post("/chunk", json=body)
+    assert r.status_code == 200
+    call = fake.calls[0]
+    assert call["methods"] == ["llm_regex"]
+    assert call["skip_scoring"] is True
+    assert call["llm_regex_pattern"] == r"제\d+조"
+
+    app.dependency_overrides.clear()
+
+
+def test_adaptive_client_includes_method_fields_in_job_body():
+    """AdaptiveChunkClient.chunk puts methods/skip_scoring/llm_regex_pattern into
+    the /chunk/jobs ``options`` only when non-default; otherwise options is
+    unchanged (byte-identical regression / backward compat)."""
+    from service.adaptive_chunk import AdaptiveChunkClient
+
+    class FakeResp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._payload
+
+    class FakeHttp:
+        def __init__(self):
+            self.posts = []
+
+        def post(self, url, *, json=None):
+            self.posts.append(json)
+            return FakeResp({"job_id": "j1"})
+
+        def get(self, url):
+            return FakeResp({"status": "succeeded", "result": {"chunks": []}})
+
+    # with method fields -> present in the submit body options.
+    client = AdaptiveChunkClient("http://adaptive:18060")
+    client.http = FakeHttp()
+    client.chunk(text="abc", doc_name="d",
+                 methods=["recursive_600"], skip_scoring=True,
+                 llm_regex_pattern=r"제\d+조")
+    opts = client.http.posts[0]["options"]
+    assert opts["methods"] == ["recursive_600"]
+    assert opts["skip_scoring"] is True
+    assert opts["llm_regex_pattern"] == r"제\d+조"
+    assert opts["atomic_markers"] == MODAL_ATOMIC_MARKERS
+
+    # defaults (auto) -> options carries ONLY atomic_markers (byte-identical to old).
+    client2 = AdaptiveChunkClient("http://adaptive:18060")
+    client2.http = FakeHttp()
+    client2.chunk(text="abc", doc_name="d")
+    opts2 = client2.http.posts[0]["options"]
+    assert set(opts2.keys()) == {"atomic_markers"}
+    assert "methods" not in opts2
+    assert "skip_scoring" not in opts2
+    assert "llm_regex_pattern" not in opts2
+
+    # methods=None but skip_scoring True alone still serialized (explicit non-default).
+    client3 = AdaptiveChunkClient("http://adaptive:18060")
+    client3.http = FakeHttp()
+    client3.chunk(text="abc", doc_name="d", methods=["page"], skip_scoring=True)
+    opts3 = client3.http.posts[0]["options"]
+    assert opts3["methods"] == ["page"]
+    assert opts3["skip_scoring"] is True
+    assert "llm_regex_pattern" not in opts3
 
 
 def test_adaptive_client_includes_page_fields_in_job_body():

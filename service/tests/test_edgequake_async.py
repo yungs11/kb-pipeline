@@ -188,6 +188,68 @@ def test_submit_document_returns_immediately_no_poll():
     assert calls["submit"] == 1 and calls["poll"] == 0
 
 
+def _capture_submit_body(filename="d.pdf", **submit_kwargs):
+    """Fire submit_document over a MockTransport and return the parsed POST json body."""
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/api/v1/documents":
+            import json
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(201, json={
+                "document_id": DOC, "status": "pending",
+                "task_id": "task-9", "track_id": "batch-9",
+            })
+        raise AssertionError(f"unexpected {request.method} {request.url.path}")
+
+    eq = _client_with(handler)
+    eq.submit_document("enriched", workspace_id=WS, tenant_id=TENANT,
+                       filename=filename, **submit_kwargs)
+    return captured["body"]
+
+
+def test_submit_document_skip_graph_attaches_metadata_flag():
+    """skip_graph=True → POST body carries metadata.skip_graph_extraction=true."""
+    body = _capture_submit_body(skip_graph=True)
+    assert body["metadata"] == {"skip_graph_extraction": True}
+    # the legacy fields are untouched.
+    assert body["content"] == "enriched"
+    assert body["async_processing"] is True
+
+
+def test_submit_document_default_omits_metadata_key():
+    """Default (skip_graph=False / unspecified) → NO metadata key (byte-identical)."""
+    assert "metadata" not in _capture_submit_body()
+    assert "metadata" not in _capture_submit_body(skip_graph=False)
+
+
+def test_insert_chunks_skip_graph_propagates_to_submit_body():
+    """insert_chunks(skip_graph=...) flows the flag into the submit POST body."""
+    bodies = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/api/v1/documents":
+            import json
+            bodies.append(json.loads(request.content))
+            return httpx.Response(201, json={
+                "document_id": DOC, "status": "pending", "task_id": "t", "track_id": "t",
+            })
+        if request.method == "GET" and request.url.path == f"/api/v1/documents/{DOC}":
+            return httpx.Response(200, json={"id": DOC, "status": "completed", "chunk_count": 2})
+        raise AssertionError(f"unexpected {request.method} {request.url.path}")
+
+    eq = _client_with(handler)
+    eq.insert_chunks(workspace_id=WS, tenant_id=TENANT, title="t",
+                     chunk_texts=["a", "b"], skip_graph=True,
+                     poll_interval=0)
+    assert bodies[0]["metadata"] == {"skip_graph_extraction": True}
+
+    bodies.clear()
+    eq.insert_chunks(workspace_id=WS, tenant_id=TENANT, title="t",
+                     chunk_texts=["a", "b"], poll_interval=0)
+    assert "metadata" not in bodies[0]
+
+
 def test_document_phase_maps_status_to_phase():
     """document_phase maps the live document status into a coarse UI phase."""
     cases = [

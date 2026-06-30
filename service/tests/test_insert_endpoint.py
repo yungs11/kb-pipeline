@@ -27,11 +27,12 @@ class FakeEq:
         self.ensured.append((kb_id, name))
         return EQ_WS
 
-    def insert_chunks(self, *, workspace_id, tenant_id, title, chunk_texts):
+    def insert_chunks(self, *, workspace_id, tenant_id, title, chunk_texts,
+                      skip_graph=False):
         # the resolved edgequake uuid (not the raw kb id) scopes the insert.
         assert workspace_id == EQ_WS
         self.inserted = {"workspace_id": workspace_id, "title": title,
-                         "chunk_texts": list(chunk_texts)}
+                         "chunk_texts": list(chunk_texts), "skip_graph": skip_graph}
         return {"document_id": "d1", "chunk_count": 3, "status": "indexed"}
 
     def document_phase(self, workspace_id, document_id):
@@ -48,7 +49,10 @@ def test_insert_joins_chunks_and_returns_success():
             "chunks": ["alpha", "beta", "gamma"]}
     r = c.post("/insert", json=body)
     assert r.status_code == 200
-    assert r.json() == {"document_id": "d1", "chunk_count": 3, "status": "indexed"}
+    rj = r.json()
+    assert rj["document_id"] == "d1"
+    assert rj["chunk_count"] == 3
+    assert rj["status"] == "indexed"
 
     # kb id was resolved to the edgequake workspace uuid.
     assert eq.ensured == [("kb1", "kb1")]
@@ -56,7 +60,35 @@ def test_insert_joins_chunks_and_returns_success():
     # client's job; the facade hands the list of chunk texts + title down).
     assert eq.inserted["chunk_texts"] == ["alpha", "beta", "gamma"]
     assert eq.inserted["title"] == "doc.pdf"
+    # extract_graph unspecified → default True → skip_graph=False (graph extraction on).
+    assert eq.inserted["skip_graph"] is False
 
+    app.dependency_overrides.clear()
+
+
+def test_insert_extract_graph_false_sets_skip_graph():
+    """``extract_graph=false`` on /insert maps to ``skip_graph=True`` at insert_chunks."""
+    eq = FakeEq()
+    app.dependency_overrides[get_edgequake] = lambda: eq
+    c = TestClient(app)
+    body = {"workspace_id": "kb1", "doc_id": "dc", "title": "sheet.xlsx",
+            "chunks": ["alpha", "beta"], "extract_graph": False}
+    r = c.post("/insert", json=body)
+    assert r.status_code == 200
+    assert eq.inserted["skip_graph"] is True
+    app.dependency_overrides.clear()
+
+
+def test_insert_extract_graph_true_keeps_skip_graph_false():
+    """Explicit ``extract_graph=true`` → skip_graph=False (graph extraction performed)."""
+    eq = FakeEq()
+    app.dependency_overrides[get_edgequake] = lambda: eq
+    c = TestClient(app)
+    body = {"workspace_id": "kb1", "doc_id": "dc", "title": "doc.pdf",
+            "chunks": ["alpha"], "extract_graph": True}
+    r = c.post("/insert", json=body)
+    assert r.status_code == 200
+    assert eq.inserted["skip_graph"] is False
     app.dependency_overrides.clear()
 
 
@@ -82,10 +114,12 @@ def test_insert_chunks_joins_with_record_separator():
         def __init__(self):
             pass  # skip httpx setup
 
-        def submit_document(self, content, *, workspace_id, tenant_id, filename):
+        def submit_document(self, content, *, workspace_id, tenant_id, filename,
+                            skip_graph=False):
             captured["content"] = content
             captured["workspace_id"] = workspace_id
             captured["filename"] = filename
+            captured["skip_graph"] = skip_graph
             return {"document_id": "d9", "track_id": "t9"}
 
         def document_phase(self, workspace_id, document_id):

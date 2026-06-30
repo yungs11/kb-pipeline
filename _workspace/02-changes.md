@@ -4,6 +4,33 @@
 
 ---
 
+## 0-A. 문서단위 그래프(관계) 추출 스킵 — UI 라디오 + metadata 게이트 (3레포, 2026-06-30)
+
+엑셀처럼 그래프 추출이 무의미·고비용(청크 2천급)인 문서를 **벡터 적재/검색만** 하고
+edgequake 엔티티/관계 추출(qwen 동기 블로킹 단계)을 **문서 단위로 건너뛴다**. provider=kb_pipeline 전용.
+계획: `docs/superpowers/plans/2026-06-30-excel-skip-graph-extraction.md` (v3 READY, ultracode 적대적검증 2회).
+
+- **신호 흐름**: UI 라디오(extractGraph) → kb `/documents/ingest`(`extract_graph`) → facade `/insert`(`extract_graph`)
+  → edgequake `metadata.skip_graph_extraction`. **엑셀(chunk_strategy=excel_rag_parser)은 UI에서 '미추출' 고정(disabled)**.
+- **edgequake(Rust)**:
+  - (선행 버그수정) async 업로드 경로가 `request.metadata` 를 버리던 것 수정 — `text_upload.rs` 에서
+    base object에 merge(보호키 document_id/title/tenant_id/workspace_id 우선, 그 외 사용자키 추가). 이 수정 없이는 skip 신호 미도달.
+  - `processing.rs` 에 `process_with_resilience_cancellable_opts(skip_extraction)` 신규 — 추출 서브블록만
+    `&& !skip_extraction` 게이트. `chunk_async`(청킹)·`finish_document_processing`(청크임베딩·lineage)는 게이트 밖이라 유지 → **벡터검색 무영향**. 기존 메서드는 false 위임이라 다른 호출자 무영향.
+  - `text_insert.rs`: `skip_graph_extraction`(bool) 읽어 opts 호출. **status 가드** — skip 시 `entity_count==0`을
+    `partial_failure` 아닌 `completed` 로(안 고치면 facade `document_phase` 가 `_PHASE_SUCCESS` 제외→/insert가 failed 반환). 진짜 LLM실패(skip=false) 0엔티티는 여전히 partial_failure.
+- **facade**: `/insert` 에 `extract_graph: bool=Body(True)` 추가 → `insert_chunks(skip_graph=not extract_graph)`
+  → **`submit_document`**(post_document 아님) 본문에 `skip_graph` True일 때만 `metadata.skip_graph_extraction=true` 첨부(기본은 byte-identical).
+- **knowledge_base**: UploadPanel 라디오(삼항 바깥 공통 위치, 엑셀 disabled+false 고정), api.ts/스키마/라우터/워커/`KbContext`/
+  `_ingest_kb_pipeline_tail`/`kb_pipeline_client` 에 `extract_graph` 배선(+`KbPipelineLike` Protocol). **provider==kb_pipeline 분기 한정**(타 provider None→미첨부, 격리).
+- **검증**: edgequake `cargo build` PASS + pipeline lib 215 tests PASS; facade pytest 52 PASS;
+  kb tsc PASS + 대상 38 tests PASS(broader 6 실패는 dify/raganything/ragflow gate 관련 **pre-existing**, 본 변경과 무관 확인). 교차계약 일관성 검증 consistent.
+- **부작용/이득**: skip 문서는 그래프·커뮤니티/글로벌검색에서 빠짐(의도), 벡터검색은 정상. qwen 추출 생략으로 엑셀 적재 시간·비용 대폭 절감. 같은 KB 혼합 안전.
+- **비범위**: 이미 그래프 생성된 문서의 사후 skip 전환(checkpoint-resume가 게이트 우회), 라이브 E2E 스모크.
+- **배포순서**: edgequake(재빌드+재기동, `EDGEQUAKE_CHUNKER=passthrough` 유지) → facade(재기동) → knowledge_base(백엔드+프론트). 하위호환(기본 추출 ON)이라 부분배포 중 회귀 0.
+
+---
+
 ## 0. Chunk method 선택 passthrough (facade B, 2026-06-29)
 
 knowledge_base plan `23_plan_chunk_method_selection.md` §B 반영. adaptive_chunk(:18060)가
