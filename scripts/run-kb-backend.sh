@@ -12,13 +12,14 @@ cd "$KB_DIR"
 [ -f .env ] || { echo "ERROR: $KB_DIR/.env missing (pydantic env_file)"; exit 1; }
 [ -x .venv/bin/uvicorn ] || { echo "ERROR: $KB_DIR/.venv/bin/uvicorn missing"; exit 1; }
 
-# restart — wait for :8088 to free.
-pkill -f "app.main:app --app-dir backend --port 8088" 2>/dev/null || true
+# restart — kill whoever actually holds :8088 (by port, robust to extra flags like
+# --host 127.0.0.1 that break a brittle pkill -f cmdline pattern), then wait for free.
+kill $(lsof -nP -iTCP:8088 -sTCP:LISTEN -t 2>/dev/null) 2>/dev/null || true
 for _ in $(seq 1 20); do
   if ! lsof -nP -iTCP:8088 -sTCP:LISTEN >/dev/null 2>&1; then break; fi
   sleep 0.5
 done
-lsof -nP -iTCP:8088 -sTCP:LISTEN >/dev/null 2>&1 && { pkill -9 -f "app.main:app --app-dir backend --port 8088" 2>/dev/null || true; sleep 1; }
+lsof -nP -iTCP:8088 -sTCP:LISTEN >/dev/null 2>&1 && { kill -9 $(lsof -nP -iTCP:8088 -sTCP:LISTEN -t 2>/dev/null) 2>/dev/null || true; sleep 1; }
 
 LOG="${KB_BACKEND_LOG:-/tmp/kb_backend.log}"
 nohup .venv/bin/uvicorn app.main:app --app-dir backend --port 8088 > "$LOG" 2>&1 &
