@@ -1,6 +1,6 @@
 ---
 name: restart-kbp-stack
-description: Use when (re)starting kb-pipeline provider services — parse-svc (:19001), facade (:19000), or kb-backend (:8088) — e.g. after editing their code, when /parse returns empty enriched_content, on "Unable to locate a Java Runtime", or on facade httpx.ReadTimeout. Each has its own launcher script that pins the right PATH/env so parsing + modal LLM calls + long multi-table parses actually work.
+description: Use when (re)starting kb-pipeline provider services — parse-svc (:19001), facade (:19000), kb-backend (:8088) — OR the excel-gate stack — doc_guard (:8000), excel-parser (:18055) — e.g. after editing their code, when a removed/old doc_guard gate still blocks uploads, when /parse returns empty enriched_content or missing gate_summary, on "Unable to locate a Java Runtime", on kordoc "*.md 를 찾을 수 없습니다", or on facade httpx.ReadTimeout. Each has its own launcher script that pins the right PATH/env (java, KBP_*, KORDOC_BIN) and kills the old process BY PORT so a code change actually takes effect. For the whole excel gate at once use scripts/restart-gate-stack.sh.
 ---
 
 # Restart the kb-pipeline provider stack
@@ -14,13 +14,44 @@ shutdown → "address already in use"), relaunches, and health-checks.
 |---|---|---|---|
 | parse-svc | 19001 | `scripts/run-parse-svc.sh` | needs **openjdk@17** on PATH (OpenDataLoader) + `KBP_OPENAI_API_KEY` (modal LLM) |
 | facade | 19000 | `scripts/run-facade.sh` | reads `os.environ` directly (no dotenv) → needs `KBP_*` from `scripts/facade.env` |
-| kb-backend | 8088 | `scripts/run-kb-backend.sh` | pydantic `env_file=".env"` auto-loads `knowledge_base/.env`; just restarts the venv |
+| kb-backend | 8088 | `scripts/run-kb-backend.sh` | pydantic `env_file=".env"` auto-loads `knowledge_base/.env`; kills :8088 holder **by port** |
+| doc_guard | 8000 | `scripts/run-doc-guard.sh` | verifies `POST /v1/check-excel` answers (new excel-gate endpoint), not just healthz |
+| excel-parser | 18055 | `scripts/run-excel-parser.sh` | pins **KORDOC_BIN + node PATH** (auto backend → kordoc); kills :18055 **by port** (module `service.main:app` is shared with adaptive_chunk :18060 — never module-pattern kill) |
 
 ```bash
 bash scripts/run-parse-svc.sh    # after editing parse_service/ or kb_pipeline/
 bash scripts/run-facade.sh       # after editing service/ (facade)
 bash scripts/run-kb-backend.sh   # after editing knowledge_base backend/config
+bash scripts/run-doc-guard.sh    # after editing doc_guard app/
+bash scripts/run-excel-parser.sh # after editing 7.excel-parser excel_parser_rag/ or service/
+bash scripts/restart-gate-stack.sh   # all 3 excel-gate services in dep order (doc_guard+excel-parser→kb-backend)
 ```
+
+## Excel gate stack (doc_guard + excel-parser + kb-backend)
+
+The parser-후단 엑셀 게이트 spans 3 services. If an edit doesn't take effect (e.g. an
+old/removed doc_guard gate still blocks an upload), it is almost always a **stale
+process**, not the code. `restart-gate-stack.sh` restarts all three in dependency order
+(doc_guard + excel-parser must be up before kb-backend calls them) and verifies each is
+running NEW code (doc_guard `/v1/check-excel`, excel-parser `/parse` returns
+`stats.gate_summary`).
+
+**Two traps that bit us (2026-06-30):**
+1. **Kill by PORT, not by cmdline pattern.** kb-backend ran as
+   `uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8088`, but the old
+   launcher's `pkill -f "app.main:app --app-dir backend --port 8088"` didn't match
+   (`--host 127.0.0.1` sits between `backend` and `--port`) → old process survived, new
+   one failed to bind and died, **old code kept serving :8088**. All launchers now
+   `kill $(lsof -nP -iTCP:<port> -sTCP:LISTEN -t)`.
+2. **excel-parser needs kordoc env.** default `EXCEL_PARSER_BACKEND=auto` routes non-전결
+   xlsx to the kordoc CLI; without `KORDOC_BIN=kordoc` + node on PATH, `/parse` 500s
+   ("*.md 를 찾을 수 없습니다") → kb gets no `gate_summary` → gate silently passes
+   everything. `run-excel-parser.sh` discovers kordoc (`command -v kordoc` / nvm glob)
+   and exports `KORDOC_BIN`/`KORDOC_MD_OUT`.
+
+**Which backend does the UI hit?** `knowledge_base/frontend/.env.local` →
+`BACKEND_ORIGIN` (currently `http://localhost:8088`). If uploads still show old behavior
+after a restart, confirm the frontend points at the backend you restarted, and hard-refresh.
 
 ## The gotchas, in detail
 
