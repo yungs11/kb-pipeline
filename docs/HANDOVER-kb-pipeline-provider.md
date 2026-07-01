@@ -96,7 +96,7 @@ docker compose ps
 | edgequake | 8081 | |
 | excel-parser | 18055 | |
 | doc_guard | **8001** → 컨테이너 8000 | kb-backend 설정에서 `DOCGUARD_BASE_URL=http://localhost:8001` |
-| adaptive_chunk | 18060 | |
+| adaptive_chunk | (내부 전용, 18060) | compose 내부 DNS만 사용(facade → http://adaptive_chunk:18060) |
 | document-parser (OCR) | 18050 → 컨테이너 8000 | |
 | postgres (eq-pg-kbp) | 5433 → 컨테이너 5432 | named volume `eq_pg_data` |
 | minio API | 19010 → 컨테이너 9000 | |
@@ -184,7 +184,7 @@ npm run dev    # 개발(:4001)  또는  npm run build && npm run start  # prod(:
 
 ```bash
 echo "edgequake   :8081  $(curl -s -m3 localhost:8081/health 2>/dev/null | head -c40)"
-echo "adaptive    :18060 $(curl -s -m3 localhost:18060/healthz 2>/dev/null)"
+echo "adaptive    :18060 $(docker compose exec adaptive_chunk curl -fsS http://localhost:18060/healthz 2>/dev/null)"
 echo "excel-parser:18055 $(curl -s -m3 localhost:18055/healthz 2>/dev/null)"
 echo "doc_guard   :8000  $(curl -s -m3 localhost:8000/healthz 2>/dev/null)"
 echo "parse-svc   :19001 $(curl -s -m3 localhost:19001/healthz 2>/dev/null)"
