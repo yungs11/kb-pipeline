@@ -368,6 +368,10 @@ class EdgequakeClient:
                                    tenant_id=tenant_id, filename=title,
                                    skip_graph=skip_graph)
         document_id = res.get("document_id")
+        # track_id(=task id) 로 최종 task 결과를 읽어 그래프 추출 카운트를 회수한다.
+        # 진실원은 edgequake text_insert 의 task 결과 json({document_id, chunk_count,
+        # entity_count, relationship_count}) — documents.entity_count 컬럼은 항상 0(신뢰불가).
+        track_id = res.get("track_id")
         if not document_id:
             return {"document_id": None, "chunk_count": 0, "status": "failed",
                     "detail": "passthrough submit returned no document_id"}
@@ -409,13 +413,53 @@ class EdgequakeClient:
             last_phase = ph.get("live_phase") or ph.get("raw_status") or ph.get("phase")
         _accumulate(last_phase, (time.monotonic() - last_t) * 1000.0)
         succeeded = bool(ph.get("succeeded"))
+        # 그래프 추출 카운트 회수(성공 시에만; best-effort). document status=completed 는
+        # task 결과 마킹보다 먼저 세팅될 수 있어(text_insert 순서) 짧은 폴링으로 정착 대기.
+        entity_count = relationship_count = None
+        if succeeded and track_id:
+            entity_count, relationship_count = self._fetch_graph_counts(
+                track_id, workspace_id
+            )
         return {
             "document_id": document_id,
             "chunk_count": int(ph.get("chunk_count") or 0),
             "status": "indexed" if succeeded else "failed",
             "detail": None if succeeded else f"terminal status={ph.get('raw_status')}",
             "phases": _phases(),
+            # 그래프(엔티티/관계) 추출 산출 — skip_graph/구 edgequake/회수실패면 None.
+            "entity_count": entity_count,
+            "relationship_count": relationship_count,
         }
+
+    def _fetch_graph_counts(self, track_id, workspace_id,
+                            poll_timeout=30.0, poll_interval=1.0):
+        """최종 task 결과에서 entity_count/relationship_count 를 회수(best-effort).
+
+        edgequake text_insert 는 처리 완료 task 결과 json 에
+        ``{document_id, chunk_count, entity_count, relationship_count}`` 를 싣는다
+        (문서 status=completed 는 그 직전 세팅 → 짧은 폴링으로 결과 정착 대기). 어떤
+        예외/부재에도 (None, None) 로 흡수 — 카운트 회수 실패가 적재 성공을 깨지 않는다.
+        """
+        try:
+            _status, _err, result = self._poll_task(
+                track_id, self._headers(workspace_id), poll_timeout, poll_interval
+            )
+        except Exception:  # noqa: BLE001 — 회수 실패는 적재 성공에 영향 없음
+            return None, None
+        if not isinstance(result, dict):
+            return None, None
+
+        def _as_int(v):
+            if v is None:
+                return None
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return None
+
+        return _as_int(result.get("entity_count")), _as_int(
+            result.get("relationship_count")
+        )
 
     def fetch_chunks(self, workspace_id, doc_id):
         # 1) document detail -> chunk_count (no chunk-list route exists).

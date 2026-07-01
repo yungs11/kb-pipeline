@@ -703,10 +703,12 @@ ROOT = pathlib.Path("/Users/xxx/workspace")
 CASES_BLOCK = [
     (ROOT/"7.excel-parser/test_doc_excel/신한자산신탁_외부테이터_필요사이트 정리.xlsx", "법령리스트"),
     (ROOT/"excel-parser-markitdown/test_doc_excel/251210_중소형그룹사_AX추진지원_WBS_v0.1_sys.xlsx", None),
+    # 파일 단위 차단(사용자 결정): NAC연계 시트가 진짜 side_by_side 라 파일 ok=False.
+    # (단 '접근제어 적용 대상' 시트 자체는 clean — Task1 의 sheet-level 테스트가 보장.)
+    (ROOT/"excel-parser-markitdown/test_doc_excel/신한자산신탁_자산목록_v20251013.xlsx", "NAC연계"),
 ]
 CASES_PASS = [
     pathlib.Path("/Users/xxx/Downloads/aws_cost_estimate.xlsx"),
-    ROOT/"excel-parser-markitdown/test_doc_excel/신한자산신탁_자산목록_v20251013.xlsx",
     ROOT/"7.excel-parser/test_doc_excel/2-1. 위임전결기준표(2026.04.17. 개정).xlsx",
 ]
 

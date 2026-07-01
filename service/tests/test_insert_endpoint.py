@@ -33,7 +33,8 @@ class FakeEq:
         assert workspace_id == EQ_WS
         self.inserted = {"workspace_id": workspace_id, "title": title,
                          "chunk_texts": list(chunk_texts), "skip_graph": skip_graph}
-        return {"document_id": "d1", "chunk_count": 3, "status": "indexed"}
+        return {"document_id": "d1", "chunk_count": 3, "status": "indexed",
+                "entity_count": 90, "relationship_count": 72}
 
     def document_phase(self, workspace_id, document_id):
         assert workspace_id == EQ_WS
@@ -62,8 +63,74 @@ def test_insert_joins_chunks_and_returns_success():
     assert eq.inserted["title"] == "doc.pdf"
     # extract_graph unspecified → default True → skip_graph=False (graph extraction on).
     assert eq.inserted["skip_graph"] is False
+    # graph extraction counts are relayed to the consumer for doc-detail display.
+    assert rj["entity_count"] == 90
+    assert rj["relationship_count"] == 72
 
     app.dependency_overrides.clear()
+
+
+def test_insert_chunks_recovers_graph_counts_from_task_result():
+    """insert_chunks polls the terminal TASK result to recover entity/relationship
+    counts (the documents.entity_count column is always 0 — unreliable)."""
+    from service.edgequake import EdgequakeClient
+
+    class StubClient(EdgequakeClient):
+        def __init__(self):
+            pass  # skip httpx setup
+
+        def submit_document(self, content, *, workspace_id, tenant_id, filename,
+                            skip_graph=False):
+            return {"document_id": "d9", "track_id": "t9"}
+
+        def document_phase(self, workspace_id, document_id):
+            return {"raw_status": "completed", "phase": "completed", "chunk_count": 7,
+                    "terminal": True, "succeeded": True}
+
+        def _headers(self, workspace_id=None):
+            return {}
+
+        def _poll_task(self, track_id, headers, poll_timeout, poll_interval):
+            assert track_id == "t9"
+            return "indexed", None, {
+                "document_id": "d9", "chunk_count": 7,
+                "entity_count": 90, "relationship_count": 72,
+            }
+
+    out = StubClient().insert_chunks(workspace_id=EQ_WS, tenant_id="t",
+                                     title="doc.pdf", chunk_texts=["a", "b"])
+    assert out["entity_count"] == 90
+    assert out["relationship_count"] == 72
+    assert out["status"] == "indexed"
+
+
+def test_insert_chunks_graph_counts_none_when_task_result_absent():
+    """Best-effort: if the task result can't be recovered, counts are None (no crash)."""
+    from service.edgequake import EdgequakeClient
+
+    class StubClient(EdgequakeClient):
+        def __init__(self):
+            pass
+
+        def submit_document(self, content, *, workspace_id, tenant_id, filename,
+                            skip_graph=False):
+            return {"document_id": "d9", "track_id": "t9"}
+
+        def document_phase(self, workspace_id, document_id):
+            return {"raw_status": "completed", "phase": "completed", "chunk_count": 7,
+                    "terminal": True, "succeeded": True}
+
+        def _headers(self, workspace_id=None):
+            return {}
+
+        def _poll_task(self, track_id, headers, poll_timeout, poll_interval):
+            raise RuntimeError("task endpoint unavailable")
+
+    out = StubClient().insert_chunks(workspace_id=EQ_WS, tenant_id="t",
+                                     title="doc.pdf", chunk_texts=["a"])
+    assert out["entity_count"] is None
+    assert out["relationship_count"] is None
+    assert out["status"] == "indexed"
 
 
 def test_insert_extract_graph_false_sets_skip_graph():

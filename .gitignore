@@ -30,3 +30,8 @@ test_doc/
 
 # host-specific port remaps (local only)
 docker-compose.override.yml
+
+# secret-bearing env backups (never commit)
+scripts/*.env.bak-*
+*.env.bak-*
+.env.bak-*

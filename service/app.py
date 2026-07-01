@@ -207,6 +207,11 @@ def insert(workspace_id: str = Body(..., embed=True),
         # edgequake 가 배정한 워크스페이스 uuid — orchestrator 가 KB.edgequake_workspace_id 에
         # 영속해 "그래프 보기" 팝업의 X-Workspace-ID(직접 edgequake 호출)로 쓴다.
         "edgequake_workspace_id": eq_ws,
+        # 그래프(엔티티/관계) 추출 산출 — orchestrator 가 chunking_selection 에 영속해
+        # 문서 상세 UI 가 "엔티티 N · 관계 M" 을 표시한다. skip_graph/구 edgequake/회수실패면
+        # None(프론트 미표시). 진실원=edgequake insert task 결과(documents 컬럼 아님).
+        "entity_count": res.get("entity_count"),
+        "relationship_count": res.get("relationship_count"),
         # 모니터링(P3): edgequake 내부 phase 체류시간 근사(chunking/extracting/embedding/
         # storing). 집계자가 stage_timings.insert.detail 로 싣는다. 폴링 기반이라 근사값.
         "phases": res.get("phases") or [],
