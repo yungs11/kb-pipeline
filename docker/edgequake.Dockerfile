@@ -1,15 +1,19 @@
 # 8.kb-pipeline/docker/edgequake.Dockerfile
-FROM rust:1-slim AS build
+# Build + runtime pinned to the SAME Debian release (trixie) so the binary's
+# glibc requirement (2.38/2.39 from trixie) is satisfied at runtime. Using a
+# bookworm runtime here fails with `GLIBC_2.39 not found`.
+FROM rust:1-slim-trixie AS build
 WORKDIR /src
 RUN apt-get update && apt-get install -y --no-install-recommends \
       pkg-config libssl-dev libpq-dev curl && rm -rf /var/lib/apt/lists/*
 COPY edgequake/edgequake /src
 RUN cargo build --release --locked --bin edgequake
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 WORKDIR /app
+# trixie renamed the OpenSSL runtime lib to libssl3t64 (time_t 64-bit transition).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl libssl3 libpq5 && rm -rf /var/lib/apt/lists/*
+      ca-certificates curl libssl3t64 libpq5 && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/edgequake /usr/local/bin/edgequake
 # migrations are embedded via sqlx::migrate!() at compile time — no runtime copy needed
 # edgequake reads HOST/PORT (not EDGEQUAKE_HOST/EDGEQUAKE_PORT)

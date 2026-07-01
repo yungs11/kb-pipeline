@@ -1,0 +1,19 @@
+# docker-compose.override.yml
+# Local host-port remaps to coexist with OTHER unrelated docker stacks already
+# running on this machine (dify, trust-backend, docker-*). These stacks hold the
+# default published ports, so the kbp stack remaps ONLY the host side. All
+# intra-stack traffic uses compose service DNS + container ports, so these remaps
+# do not affect service-to-service wiring.
+#
+#   minio            19010/19011  -> 19020/19021  (docker-minio-1 holds 19010/11)
+#   document-parser  18050        -> 18051        (trust-backend-document-parser-1 holds 18050)
+#
+# This file is auto-loaded by `docker compose` and is safe to delete on a machine
+# where those default ports are free.
+services:
+  minio:
+    # !override replaces the base list (default compose merge would APPEND, leaving
+    # the conflicting 19010/19011 bindings in place).
+    ports: !override ["19020:9000", "19021:9001"]
+  document-parser:
+    ports: !override ["18051:8000"]
