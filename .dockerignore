@@ -1,0 +1,6 @@
+.venv
+.venv-kb
+__pycache__
+*.pyc
+.git
+edgequake

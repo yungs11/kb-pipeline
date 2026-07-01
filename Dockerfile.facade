@@ -1,0 +1,16 @@
+# 8.kb-pipeline/Dockerfile.facade
+FROM python:3.12-slim AS base
+WORKDIR /app
+# JRE17: service/parsing.py → opendataloader_pdf → java subprocess (facade /ingest/submit)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl build-essential openjdk-21-jre-headless && rm -rf /var/lib/apt/lists/*
+ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+COPY pyproject.toml setup.py* requirements*.txt ./
+# service/ 와 kb_pipeline/ 은 COPY 로 배치(pyproject.toml 은 kb_pipeline* 만 등록함).
+COPY kb_pipeline ./kb_pipeline
+COPY service ./service
+RUN pip install --no-cache-dir uv && \
+    (uv pip install --system --no-cache -r requirements.txt 2>/dev/null || uv pip install --system --no-cache -e .) && \
+    uv pip install --system --no-cache gunicorn uvicorn
+EXPOSE 19000
+CMD ["gunicorn","-k","uvicorn.workers.UvicornWorker","-w","2","-b","0.0.0.0:19000","--timeout","1800","service.app:app"]
