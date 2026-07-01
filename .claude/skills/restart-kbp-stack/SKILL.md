@@ -5,10 +5,42 @@ description: Use when (re)starting kb-pipeline provider services — parse-svc (
 
 # Restart the kb-pipeline provider stack
 
-Three services, three launcher scripts in `8.kb-pipeline/scripts/`. None run with
-`--reload`, so a code change needs a restart. Each script kills the old process,
-**waits for the port to actually free** (a bare `sleep 1` races uvicorn's graceful
-shutdown → "address already in use"), relaunches, and health-checks.
+## 1순위 — Docker Compose (전체 또는 단일 서비스 재빌드/재기동)
+
+`docker-compose.yml` (project name `kbp`) 이 10개 서비스를 함께 관리한다. 코드를 바꾼 뒤 해당 서비스만 재빌드해 올릴 수 있다.
+
+```bash
+cd /Users/xxx/workspace/8.kb-pipeline
+
+# 전체 스택 재기동 (이미지 재빌드 포함)
+docker compose up -d --build
+
+# 단일 서비스만 재빌드·재기동 (가장 흔한 패턴)
+docker compose up -d --build facade
+docker compose up -d --build parse-svc
+docker compose up -d --build edgequake
+docker compose up -d --build doc_guard
+docker compose up -d --build excel-parser
+docker compose up -d --build adaptive_chunk
+docker compose up -d --build document-parser
+
+# 로그 확인
+docker compose logs -f facade
+docker compose logs -f parse-svc
+
+# 서비스 상태
+docker compose ps
+```
+
+> **전제**: `edgequake/` submodule 이 체크아웃돼 있어야 한다(`git submodule update --init --recursive edgequake`). `.env` 도 실값이 채워진 상태여야 한다(`cp -n .env.example .env` 후 편집).
+
+> **kb-backend(:8088) 와 frontend 는 compose 범위 밖** — 아래 호스트 스크립트를 쓴다.
+
+---
+
+## 2순위 — 개별 호스트 런처 스크립트 (단일 서비스 호스트 기동·디버그·fallback)
+
+compose 를 쓰지 않거나, 특정 서비스를 호스트에서 직접 띄울 때 사용한다. 각 스크립트는 **포트 기준 kill**(lsof -ti:\<PORT>) → 재기동 → health 검증 순서로 동작한다(`--reload` 없음, 코드 변경 시 반드시 재기동).
 
 | Service | Port | Script | Gotcha it handles |
 |---|---|---|---|
