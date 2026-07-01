@@ -1,0 +1,16 @@
+# 8.kb-pipeline/Dockerfile.parse-svc
+FROM python:3.12-slim
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl build-essential openjdk-21-jre-headless && rm -rf /var/lib/apt/lists/*
+ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+COPY pyproject.toml setup.py* requirements*.txt ./
+COPY kb_pipeline ./kb_pipeline
+COPY parse_service ./parse_service
+# parse_service/app.py 가 runtime에 `from service.llm import get_text_llm` 을 lazy import함
+COPY service ./service
+RUN pip install --no-cache-dir uv && \
+    (uv pip install --system --no-cache -r requirements.txt 2>/dev/null || uv pip install --system --no-cache -e .) && \
+    uv pip install --system --no-cache gunicorn uvicorn
+EXPOSE 19001
+CMD ["gunicorn","-k","uvicorn.workers.UvicornWorker","-w","4","-b","0.0.0.0:19001","--timeout","1800","parse_service.app:app"]
