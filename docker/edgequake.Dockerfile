@@ -2,6 +2,9 @@
 # Build + runtime pinned to the SAME Debian release (trixie) so the binary's
 # glibc requirement (2.38/2.39 from trixie) is satisfied at runtime. Using a
 # bookworm runtime here fails with `GLIBC_2.39 not found`.
+# NOTE: requires BuildKit (Docker default). The per-Dockerfile ignore
+# docker/edgequake.Dockerfile.dockerignore overrides the root .dockerignore
+# (which excludes edgequake/) only under BuildKit; DOCKER_BUILDKIT=0 → COPY fails.
 FROM rust:1-slim-trixie AS build
 WORKDIR /src
 RUN apt-get update && apt-get install -y --no-install-recommends \

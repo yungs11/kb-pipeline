@@ -98,7 +98,7 @@ services:
       MINIO_BUCKET: ${MINIO_BUCKET:-document-parser}   # core/config/loader.py default='document-parser'
       MODEL_API_URL: ${MODEL_API_URL}
       MODEL_API_KEY: ${MODEL_API_KEY}
-      # MAX_CONCURRENT_REQUESTS=1: gunicorn worker-count controls parallelism (not semaphore)
+      # MAX_CONCURRENT_REQUESTS=1: per-process asyncio.Semaphore(1) in main.py — total concurrency = workers(3) × 1
       MAX_CONCURRENT_REQUESTS: "1"
     depends_on:
       gotenberg: { condition: service_healthy }
