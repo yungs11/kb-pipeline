@@ -3,7 +3,7 @@
 # Secrets stay in .env (gitignored). See .env.example for the full key catalog.
 name: kbp
 networks: { kbp: {} }
-volumes: { eq_pg_data: {}, minio_data: {} }
+volumes: { eq_pg_data: {}, minio_data: {}, redis_data: {} }
 
 services:
   # ---------------------------------------------------------------------------
@@ -49,6 +49,19 @@ services:
       timeout: 5s
       retries: 12
     networks: [kbp]
+
+  redis:
+    # document-parser stores VL model config/profiles in redis (core/config/model_profiles.py);
+    # without a reachable redis its /health hangs → depends_on chain (parse-svc→facade) deadlocks.
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes: ["redis_data:/data"]
+    networks: [kbp]
+    healthcheck:
+      test: ["CMD","redis-cli","ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
   # ---------------------------------------------------------------------------
   # Knowledge-graph / vector engine
@@ -98,11 +111,16 @@ services:
       MINIO_BUCKET: ${MINIO_BUCKET:-document-parser}   # core/config/loader.py default='document-parser'
       MODEL_API_URL: ${MODEL_API_URL}
       MODEL_API_KEY: ${MODEL_API_KEY}
+      # REDIS_HOST: config_manager/model_profiles read VL model config from redis (loader.py:240 default 'localhost').
+      # Point at the compose redis service; without it /health hangs (Error 111 localhost:6379).
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
       # MAX_CONCURRENT_REQUESTS=1: per-process asyncio.Semaphore(1) in main.py — total concurrency = workers(3) × 1
       MAX_CONCURRENT_REQUESTS: "1"
     depends_on:
       gotenberg: { condition: service_healthy }
       minio: { condition: service_healthy }
+      redis: { condition: service_healthy }
     ports: ["18050:8000"]
     healthcheck:
       # /health = readiness (verifies gotenberg connectivity). document-parser image has curl.
