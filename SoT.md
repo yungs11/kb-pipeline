@@ -210,6 +210,7 @@ edgequake `detect_communities_guarded`(Louvain, `edgequake-storage`) + 커뮤니
 
 ## 9. 비범위 (Out of Scope)
 - 벡터/그래프 store를 Qdrant/Memgraph 등으로 분리(단일 Postgres 원칙 위배, RLS·ACID 상실).
+- **adaptive_chunk `ADAPTIVE_CHUNK_QDRANT_URL`(+`_QDRANT_API_KEY`) — kb_pipeline 스택에서 삭제(2026-07-01).** 사유: (1) adaptive_chunk 는 청킹/스코어링/coref 만 담당하고 **벡터 적재는 facade `/chunk`→edgequake(내부 pgvector) 소유**다(§4 저장소, "단일 Postgres" 불변식). adaptive_chunk 가 Qdrant 에 직접 붙을 경로가 kb_pipeline 에 없다. (2) 실제로 adaptive_chunk 코드에서 `qdrant_url` 은 `config.py` 에 `default=None` 필드로 **선언만** 되어 있고 소비처가 0곳(`QdrantClient` 생성·접속 코드 없음)이다 — 그 프로젝트의 다른 통합(dify-Qdrant S1 적재계약)용 placeholder 라 kb_pipeline 문맥에선 무의미. → `.env`/`.env.example`/`docker-compose.yml`(adaptive_chunk 서비스 env)에서 제거. (adaptive_chunk 레포 자체 정리는 별도.)
 - raganything/LightRAG를 런타임 엔진으로 채택(아이디어만 차용).
 - edgequake `TaskType::Reindex` 단건 재색인(workspace rebuild로 대체).
 - (가)경로(markdown만 POST)는 MVP 폴백으로만 보존.

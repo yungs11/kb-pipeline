@@ -172,7 +172,8 @@ services:
       ADAPTIVE_CHUNK_REGEX_LLM_MODEL: ${ADAPTIVE_CHUNK_REGEX_LLM_MODEL}
       # OCR backend: hard-coded to intra-stack service DNS (host localhost:18050 unreachable in container)
       ADAPTIVE_CHUNK_OCR_BASE_URL: http://document-parser:8000
-      ADAPTIVE_CHUNK_QDRANT_URL: ${ADAPTIVE_CHUNK_QDRANT_URL}
+      # ADAPTIVE_CHUNK_QDRANT_URL 제거(2026-07-01): 벡터 적재는 edgequake(pgvector) 소유,
+      # adaptive_chunk 는 Qdrant 미소비(config placeholder). SoT.md §9 참조.
       ADAPTIVE_CHUNK_EDGEQUAKE_BASE_URL: ${ADAPTIVE_CHUNK_EDGEQUAKE_BASE_URL}
       ADAPTIVE_CHUNK_JOB_TIMEOUT_S: ${ADAPTIVE_CHUNK_JOB_TIMEOUT_S}
       ADAPTIVE_CHUNK_RERANK_MODEL: ${ADAPTIVE_CHUNK_RERANK_MODEL}
