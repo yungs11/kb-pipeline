@@ -19,14 +19,18 @@ Docker Compose로 kb-pipeline 엔진 스택 전체를 빌드·기동하는 절�
 | 문서처리 | adaptive_chunk | kbp-adaptive_chunk (sibling repo) | 18060 | (내부) |
 | 앱 | parse-svc | kbp-parse-svc (Dockerfile.parse-svc) | 19001 | 19001 |
 | 앱 | facade | kbp-facade (Dockerfile.facade) | 19000 | **19000** |
+| 확인용 | **edgequake_webui** | kbp-edgequake_webui (edgequake/edgequake_webui/Dockerfile) | 3000 | 3000\*\* |
 
 > **Phase 2e**: 외부 파서 서비스 `document-parser(:18050)`·`excel-parser(:18055)`·`redis` 는 제거됐다. 모든 문서 파싱(PDF/Excel/DOCX/PPTX/이미지/스캔)은 parse-svc(:19001)가 in-process 로 수행한다(이미지에 java21 + node/kordoc + PyMuPDF 내장). office(pptx/docx)→PDF 변환용 gotenberg 만 잔존.
 
+> **edgequake_webui(그래프 적재 확인용, 선택 서비스)**: edgequake 에 적재된 지식그래프·워크스페이스·문서를 브라우저로 조회·시각화·질의하는 확인용 UI(`http://localhost:3000`, 이 머신은 리맵 후 **13000**). **운영 적재 경로가 아니다** — 문서 적재는 facade `/ingest`(parse-svc 파싱 + adaptive 청킹 + 모달원자성)로 하고, 이 UI 로 직접 업로드하면 kb-pipeline 경로를 우회하므로 "적재 결과(그래프) 확인/디버깅" 용도로만 쓴다. `EDGEQUAKE_API_URL` 은 **브라우저가** API 에 닿는 호스트 URL(기본 `http://localhost:8081`)이며 컨테이너 DNS 가 아니다.
+
 \* `docker-compose.override.yml`가 다른 무관한 스택과의 호스트 포트 충돌을 피하려고
 minio를 **19020/19021**로 재매핑한다(아래 5절 참고). (document-parser 재매핑은 서비스 제거로 삭제됨.)
+\*\* 이 머신은 호스트 3000 이 점유되어 override 가 webui 를 **13000**으로 리맵한다(5절).
 
 기동 순서(의존성): postgres → edgequake / (gotenberg,minio) / doc_guard /
-adaptive_chunk → parse-svc(depends_on gotenberg+minio) → facade.
+adaptive_chunk → parse-svc(depends_on gotenberg+minio) → facade / edgequake_webui(depends_on edgequake).
 
 ---
 
@@ -111,9 +115,11 @@ docker compose down
 
 ### 4-2. 빌드
 ```bash
-docker compose build          # edgequake(Rust, 최초 ~10분) + parse-svc(node/kordoc 설치 포함) 등
+docker compose build          # edgequake(Rust, 최초 ~10분) + parse-svc(node/kordoc) + edgequake_webui(Next.js) 등
 ```
-edgequake만 다시 빌드: `docker compose build edgequake`.
+개별 빌드: `docker compose build edgequake` / `... parse-svc` / `... edgequake_webui`.
+> edgequake_webui(그래프 적재 확인용)는 선택 서비스다. Next.js 빌드가 무거우니, 필요 없으면
+> `docker compose up -d --wait facade`(또는 서비스 나열)로 webui 를 빼고 띄워도 된다.
 
 ### 4-3. 기동
 ```bash
@@ -148,7 +154,10 @@ docker exec kbp-minio-1 sh -c \
 docker exec kbp-edgequake-1  curl -fsS http://localhost:8081/health
 curl -fsS http://localhost:19000/healthz     # facade
 curl -fsS http://localhost:19001/healthz     # parse-svc
+curl -fsS http://localhost:13000             # edgequake_webui (그래프 적재 확인용, override 리맵 13000)
 ```
+그래프 적재 확인: 브라우저로 **http://localhost:13000** 접속 → 워크스페이스 선택 →
+문서/그래프(엔티티·관계) 조회. (적재 자체는 facade `/ingest` 로 하고, 이 UI 는 결과 확인용.)
 
 ---
 
@@ -160,14 +169,36 @@ curl -fsS http://localhost:19001/healthz     # parse-svc
 | 서비스 | 기본 | 재매핑 | 점유 중인 무관 컨테이너 |
 |--------|------|--------|--------------------------|
 | minio | 19010/19011 | **19020/19021** | docker-minio-1 |
+| edgequake_webui | 3000 | **13000** | 다른 스택이 3000 점유 |
 
 > (Phase 2e: document-parser 서비스 제거로 그 18050→18051 재매핑도 삭제됨.)
+> webui 리맵은 호스트 포트만 바꾼다 — `EDGEQUAKE_API_URL` 은 여전히 API 호스트포트 `:8081` 을 가리키므로 webui 호스트포트(13000)와 무관하다.
 
 컨테이너 내부 포트와 서비스 DNS(예: `http://minio:9000`)는
 그대로라 스택 내부 통신엔 영향 없다. YAML `!override` 태그로 base의 ports 리스트를
 **치환**한다(compose 기본 merge는 append라 그냥 두면 옛 포트가 남아 충돌).
 
 기본 포트가 비어 있는 깨끗한 머신이라면 `docker-compose.override.yml`을 지워도 된다.
+
+---
+
+## 5.5 외부 MinIO 로 전환 (다른 곳에 떠 있는 MinIO 재사용)
+
+parse-svc 는 페이지 이미지를 MinIO 에 올린다. compose 내장 `minio` 대신 **이미 다른 곳에 떠 있는 MinIO** 에 붙이려면 (`docker-compose.yml` 의 해당 위치에도 같은 주석을 달아두었다):
+
+1. **삭제**
+   - `docker-compose.yml` 의 `minio:` 서비스 블록 전체.
+   - 최상단 `volumes:` 의 `minio_data` 항목.
+   - `docker-compose.override.yml` 의 `minio` 호스트포트 리맵.
+2. **수정** — `docker-compose.yml` 의 `parse-svc.environment`:
+   - `MINIO_ENDPOINT` → 외부 호스트:포트 (예: `minio.example.com:9000`)
+   - `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` → 외부 크레덴셜(`.env`)
+   - `MINIO_BUCKET` → 외부 버킷명(기본 `document-parser`)
+   - `MINIO_SECURE` → HTTPS 면 `"true"`
+   - `parse-svc.depends_on` 에서 `minio` 줄 제거.
+3. **버킷** — 외부 MinIO 에 그 버킷을 미리 생성(§4-5 와 동일, 단 대상은 외부 엔드포인트).
+
+> 내부 통신은 서비스 DNS `http://minio:9000` 을 쓰므로, 외부 전환 시 `MINIO_ENDPOINT` 만 실제 도달 가능한 주소로 바꾸면 된다. facade 는 MinIO 를 직접 쓰지 않으므로 손댈 것이 없다.
 
 ---
 
@@ -183,6 +214,8 @@ curl -fsS http://localhost:19001/healthz     # parse-svc
 | parse-svc `kordoc: not found` / docx·폴백 파싱 실패 | 이미지에 node/kordoc 미빌드 | `docker compose build parse-svc`(Dockerfile.parse-svc 가 `npm install -g kordoc`) |
 | depends_on 체인이 안 뜸 | 상위 서비스가 unhealthy | `docker compose ps`로 최초 unhealthy 서비스부터 로그 확인 |
 | `:5433` 충돌 | 런처가 띄운 `eq-pg-kbp` 잔존 | `docker rm -f eq-pg-kbp` |
+| edgequake_webui `Bind for 0.0.0.0:3000 failed` | 호스트 3000 점유 | 5절 override 리맵(이미 13000 적용) 또는 base `ports` 조정 |
+| webui 는 뜨는데 API 호출 실패(빈 그래프/네트워크 오류) | `EDGEQUAKE_API_URL` 이 브라우저가 못 닿는 값(`http://edgequake:8081` 같은 컨테이너 DNS) | 브라우저 도달 가능한 호스트 URL(`http://localhost:8081`)로. 원격 접속은 `EDGEQUAKE_WEBUI_API_URL=http://<호스트IP>:8081` |
 
 ---
 
@@ -204,6 +237,9 @@ docker compose down -v         # 볼륨까지 삭제 (postgres/minio 데이터 �
   `chunk_strategy=excel_rag_parser`) / docx(kordoc, `<table>` 보존) / png·pptx(VL OCR)
   파싱 정상 확인. 이미지에 kordoc 3.8.3 + java21 + PyMuPDF(fitz) 내장 확인.
 - **MinIO 버킷:** `document-parser` 생성 완료(4-5절). 페이지 이미지 업로드 경로 정상.
+- **edgequake_webui(그래프 적재 확인용):** compose 서비스로 배선됨(build context
+  `edgequake/`, dockerfile `edgequake_webui/Dockerfile`, host 3000→override 13000,
+  `EDGEQUAKE_API_URL=http://localhost:8081`). 선택 서비스.
 - **참고(baseline):** `.venv-kb` 전체 테스트 208 passed / 5 failed 는 기존 baseline
   (minio bucket auto-create 정책변경 1건 + 모달 4건은 `KBP_MODAL_ENRICH=1` 필요, 기본 off).
   Phase 2 로 인한 신규 실패 0.

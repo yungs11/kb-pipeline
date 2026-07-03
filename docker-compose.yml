@@ -34,6 +34,13 @@ services:
       timeout: 5s
       retries: 12
 
+  # ┌─ 외부 MinIO 로 전환하려면(다른 곳에 이미 떠 있는 MinIO 재사용) ──────────────
+  # │ ① 삭제: 아래 `minio:` 서비스 블록 전체 + 최상단 `volumes:` 의 `minio_data`
+  # │        + docker-compose.override.yml 의 `minio` 호스트포트 리맵.
+  # │ ② 수정: parse-svc 의 MINIO_ENDPOINT/ACCESS/SECRET/BUCKET/SECURE 를 외부 값으로,
+  # │        그리고 parse-svc `depends_on:` 에서 `minio` 줄 제거(§ parse-svc 참고).
+  # │ ③ 버킷: 외부 MinIO 에 `document-parser` 버킷을 미리 생성(기동매뉴얼 §4-5).
+  # └────────────────────────────────────────────────────────────────────────────
   minio:
     image: minio/minio
     command: server /data --console-address ":9001"
@@ -146,6 +153,10 @@ services:
       GOTENBERG_URL: http://gotenberg:3000
       GUIDED_JSON_MODE: response_format   # OpenRouter/OpenAI 호환 (vLLM extra_body 아님)
       KBP_VL_MAX_CONCURRENT: "3"
+      # ── MinIO 접속(페이지 이미지 저장) ─────────────────────────────────────────
+      # 외부 MinIO 로 전환 시: 아래 5개 값을 외부 엔드포인트/크레덴셜로 수정하고
+      # (예: MINIO_ENDPOINT: minio.example.com:9000, MINIO_SECURE: "true"),
+      # 위 `minio:` 서비스 블록을 삭제한 뒤 아래 depends_on 의 `minio` 줄도 제거한다.
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
@@ -153,7 +164,7 @@ services:
       MINIO_SECURE: "false"
     depends_on:
       gotenberg: { condition: service_healthy }
-      minio: { condition: service_healthy }
+      minio: { condition: service_healthy }   # 외부 MinIO 전환 시 이 줄 제거
     ports: ["19001:19001"]
     healthcheck:
       test: ["CMD","curl","-fsS","http://localhost:19001/healthz"]
@@ -183,4 +194,33 @@ services:
       interval: 10s
       timeout: 5s
       retries: 20
+    networks: [kbp]
+
+  # ---------------------------------------------------------------------------
+  # edgequake WebUI — 그래프 적재 확인용 (선택 서비스)
+  # ---------------------------------------------------------------------------
+  # edgequake 에 적재된 지식그래프(엔티티/관계)·워크스페이스·문서를 브라우저로 조회·
+  # 시각화·질의하기 위한 확인용 UI. http://localhost:3000.
+  # ※ 운영 적재 경로가 아님: 문서 적재는 facade `/ingest`(parse-svc 파싱 + adaptive
+  #    청킹 + 모달원자성)로 한다. 이 UI 로 직접 업로드하면 kb-pipeline 경로를 우회하므로
+  #    "적재 결과(그래프) 확인/디버깅" 용도로만 쓴다.
+  edgequake_webui:
+    build:
+      # 컨텍스트는 edgequake 서브모듈 루트(webui Dockerfile 이 edgequake_webui/* 를 COPY).
+      context: ./edgequake
+      dockerfile: edgequake_webui/Dockerfile
+    environment:
+      NODE_ENV: production
+      # EDGEQUAKE_API_URL 은 **브라우저**가 API 에 닿는 URL(요청시각에 window 런타임설정으로
+      # 주입) — 컨테이너 DNS(http://edgequake:8081)가 아니라 호스트 매핑 포트를 쓴다.
+      EDGEQUAKE_API_URL: ${EDGEQUAKE_WEBUI_API_URL:-http://localhost:8081}
+    depends_on:
+      edgequake: { condition: service_healthy }
+    ports: ["3000:3000"]   # 호스트 3000 충돌 시 docker-compose.override.yml 에서 리맵
+    healthcheck:
+      test: ["CMD","wget","--no-verbose","--tries=1","--spider","http://localhost:3000"]
+      interval: 20s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
     networks: [kbp]
