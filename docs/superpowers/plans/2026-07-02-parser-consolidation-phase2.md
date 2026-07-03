@@ -38,7 +38,7 @@
 - Produces: `convert_pdf_to_page_markdowns(file_bytes: bytes, filename: str) -> list[str]` — 페이지별 markdown 리스트(1-based 순서). 실패 시 `ToolError` raise.
 - Produces: `class ToolError(Exception)` — 모든 tools 공용 오류 타입 (`parse_service/tools/__init__.py` 에 정의).
 
-- [ ] **Step 1: 실패 테스트 작성**
+- [x] **Step 1: 실패 테스트 작성**
 
 `parse_service/tests/test_tools_opendataloader.py`:
 ```python
@@ -65,12 +65,12 @@ def test_no_md_raises_toolerror(monkeypatch):
         odl.convert_pdf_to_page_markdowns(b"%PDF-fake", "a.pdf")
 ```
 
-- [ ] **Step 2: 실패 확인**
+- [x] **Step 2: 실패 확인**
 
 Run: `.venv-kb/bin/python -m pytest parse_service/tests/test_tools_opendataloader.py -q`
 Expected: FAIL (`ModuleNotFoundError: parse_service.tools`)
 
-- [ ] **Step 3: 구현**
+- [x] **Step 3: 구현**
 
 `parse_service/tools/__init__.py`:
 ```python
@@ -136,12 +136,12 @@ def convert_pdf_to_page_markdowns(file_bytes: bytes, filename: str) -> list[str]
         return md_texts
 ```
 
-- [ ] **Step 4: 통과 확인**
+- [x] **Step 4: 통과 확인**
 
 Run: `.venv-kb/bin/python -m pytest parse_service/tests/test_tools_opendataloader.py -q`
 Expected: 2 passed
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add parse_service/tools/ parse_service/tests/test_tools_opendataloader.py
@@ -169,7 +169,7 @@ git commit -m "refactor(parse-svc): extract OpenDataLoader tool (Phase 2a-1)"
   ```
 - Produces: `parsers.pdf.parse(file_bytes, filename, *, ocr_url: str) -> RouteResult` — kind="pages", chunk_needed=True. 스캔 페이지 OCR 보충 포함(기존 로직 이식).
 
-- [ ] **Step 1: 실패 테스트 작성**
+- [x] **Step 1: 실패 테스트 작성**
 
 `parse_service/tests/test_parser_pdf.py`:
 ```python
@@ -214,12 +214,12 @@ def test_tool_error_becomes_parser_error(monkeypatch):
         pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
 ```
 
-- [ ] **Step 2: 실패 확인**
+- [x] **Step 2: 실패 확인**
 
 Run: `.venv-kb/bin/python -m pytest parse_service/tests/test_parser_pdf.py -q`
 Expected: FAIL (`ModuleNotFoundError: parse_service.parsers`)
 
-- [ ] **Step 3: 구현**
+- [x] **Step 3: 구현**
 
 `parse_service/parsers/__init__.py`:
 ```python
@@ -306,12 +306,12 @@ def parse(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteResult:
     return RouteResult(kind="pages", chunk_needed=True, pages=pages)
 ```
 
-- [ ] **Step 4: 통과 확인**
+- [x] **Step 4: 통과 확인**
 
 Run: `.venv-kb/bin/python -m pytest parse_service/tests/test_parser_pdf.py -q`
 Expected: 3 passed
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add parse_service/parsers/ parse_service/tests/test_parser_pdf.py
@@ -328,7 +328,7 @@ git commit -m "refactor(parse-svc): parsers/pdf domain parser (Phase 2a-2)"
 - Produces: `parsers.ocr.parse(file_bytes, filename, *, ocr_url: str) -> RouteResult` — kind="pages", chunk_needed=True. pptx/이미지 통파일을 OCR 에 보내 elements → page 별 PageDoc.
 - Produces: `parsers.ocr.IMAGE_EXTS = {"png","jpg","jpeg","gif","bmp","tif","tiff","webp"}` — router 가 사용.
 
-- [ ] **Step 1: 실패 테스트 작성**
+- [x] **Step 1: 실패 테스트 작성**
 
 `parse_service/tests/test_parser_ocr.py`:
 ```python
@@ -356,12 +356,12 @@ def test_empty_elements_raise(monkeypatch):
         ocr_parser.parse(b"\x89PNG", "img.png", ocr_url="http://ocr")
 ```
 
-- [ ] **Step 2: 실패 확인**
+- [x] **Step 2: 실패 확인**
 
 Run: `.venv-kb/bin/python -m pytest parse_service/tests/test_parser_ocr.py -q`
 Expected: FAIL (`cannot import name 'ocr'`)
 
-- [ ] **Step 3: 구현**
+- [x] **Step 3: 구현**
 
 `parse_service/parsers/ocr/__init__.py` — 기존 `parsing.py` 의 `_ocr_page`/`_elements_to_pages`(147~197행) 로직 사용:
 ```python
@@ -399,12 +399,12 @@ def parse(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteResult:
     return RouteResult(kind="pages", chunk_needed=True, pages=_elements_to_pages(elements))
 ```
 
-- [ ] **Step 4: 통과 확인**
+- [x] **Step 4: 통과 확인**
 
 Run: `.venv-kb/bin/python -m pytest parse_service/tests/test_parser_ocr.py -q`
 Expected: 2 passed
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add parse_service/parsers/ocr/ parse_service/tests/test_parser_ocr.py
@@ -423,7 +423,7 @@ git commit -m "refactor(parse-svc): parsers/ocr domain parser, HTTP delegation (
 - Produces: `parsers.excel.EXCEL_EXTS = {"xlsx","xlsm","xls"}` — router 가 사용.
 - Produces: `normalize_chunks(rag_chunks: list[dict]) -> list[dict]` — RagChunk → `{chunk_index,text,titles_context,pages}` (facade `excel_parser_client.normalize_chunks` 를 그대로 이동).
 
-- [ ] **Step 1: 실패 테스트 작성**
+- [x] **Step 1: 실패 테스트 작성**
 
 `parse_service/tests/test_parser_excel.py`:
 ```python
@@ -450,12 +450,12 @@ def test_empty_chunks_raise(monkeypatch):
         excel_parser.parse(b"PK", "a.xlsx", excel_url="http://x")
 ```
 
-- [ ] **Step 2: 실패 확인**
+- [x] **Step 2: 실패 확인**
 
 Run: `.venv-kb/bin/python -m pytest parse_service/tests/test_parser_excel.py -q`
 Expected: FAIL (`cannot import name 'excel'`)
 
-- [ ] **Step 3: 구현**
+- [x] **Step 3: 구현**
 
 `parse_service/parsers/excel/__init__.py`:
 ```python
@@ -537,12 +537,12 @@ def parse(file_bytes: bytes, filename: str, *, excel_url: str) -> RouteResult:
 ```
 **구현 주의**: `normalize_rag_chunk` 본문은 위 스켈레톤이 아니라 **`service/excel_parser_client.py` 의 실제 함수 본문을 복사**한다(필드 매핑 회귀 방지). 복사 후 위 테스트 + 기존 facade 테스트로 대조.
 
-- [ ] **Step 4: 통과 확인**
+- [x] **Step 4: 통과 확인**
 
 Run: `.venv-kb/bin/python -m pytest parse_service/tests/test_parser_excel.py -q`
 Expected: 2 passed
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add parse_service/parsers/excel/ parse_service/tests/test_parser_excel.py
@@ -560,7 +560,7 @@ git commit -m "refactor(parse-svc): parsers/excel with chunk_needed=False, HTTP 
 - Produces: `route(file_bytes, filename, *, ocr_url: str, excel_url: str) -> RouteResult`
 - **Phase 2a 라우팅(동작 보존)**: pdf→pdf / xlsx·xlsm·xls→excel / pptx·docx·이미지→ocr / **그 외→기존 markitdown 경로 유지**(`parsing._parse_markitdown` — 2d 에서 kordoc 폴백으로 교체). docx→kordoc 전환도 2d.
 
-- [ ] **Step 1: 실패 테스트 작성**
+- [x] **Step 1: 실패 테스트 작성**
 
 `parse_service/tests/test_router.py`:
 ```python
@@ -599,12 +599,12 @@ def test_unknown_ext_falls_back(monkeypatch):
     assert called["domain"] == "fallback"
 ```
 
-- [ ] **Step 2: 실패 확인**
+- [x] **Step 2: 실패 확인**
 
 Run: `.venv-kb/bin/python -m pytest parse_service/tests/test_router.py -q`
 Expected: FAIL (`No module named 'parse_service.router'`)
 
-- [ ] **Step 3: 구현**
+- [x] **Step 3: 구현**
 
 `parse_service/router.py`:
 ```python
@@ -662,12 +662,12 @@ def route(file_bytes: bytes, filename: str, *, ocr_url: str, excel_url: str) -> 
                                        ocr_url=ocr_url, excel_url=excel_url)
 ```
 
-- [ ] **Step 4: 통과 확인**
+- [x] **Step 4: 통과 확인**
 
 Run: `.venv-kb/bin/python -m pytest parse_service/tests/test_router.py -q`
 Expected: 9 passed
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add parse_service/router.py parse_service/tests/test_router.py
@@ -686,7 +686,7 @@ git commit -m "refactor(parse-svc): extension router with temporary markitdown f
   - kind="pages": 기존 응답 그대로 + `"chunk_needed": true`
   - kind="chunks": `{"enriched_content": "\n\n".join(chunk texts), "n_blocks": len(chunks), "modal_spans": [], "chunks": [...], "chunk_needed": false, "docs_id", "page_count": 0, "pages": [], "page_spans": [], "timing_metrics": {...}}` (excel 은 모달/렌더 없음)
 
-- [ ] **Step 1: 실패 테스트 작성**
+- [x] **Step 1: 실패 테스트 작성**
 
 `parse_service/tests/test_app_chunk_needed.py`:
 ```python
@@ -725,12 +725,12 @@ def test_chunks_path_sets_chunk_needed_false(monkeypatch):
     assert body["modal_spans"] == []
 ```
 
-- [ ] **Step 2: 실패 확인**
+- [x] **Step 2: 실패 확인**
 
 Run: `.venv-kb/bin/python -m pytest parse_service/tests/test_app_chunk_needed.py -q`
 Expected: FAIL (`no attribute '_route'`)
 
-- [ ] **Step 3: 구현**
+- [x] **Step 3: 구현**
 
 `parse_service/app.py` 수정:
 1. import 에 추가: `from parse_service.router import route as _route_impl` / `from parse_service.parsers import RouteResult, ParserError`
@@ -763,12 +763,12 @@ Expected: FAIL (`no attribute '_route'`)
 5. pages 경로 최종 return dict 에 `"chunk_needed": True` 추가.
 6. `/parse` 핸들러는 run_parse 반환을 그대로 JSON 으로 — 변경 불필요(필드 passthrough).
 
-- [ ] **Step 4: 통과 + 기존 스위트 회귀 확인**
+- [x] **Step 4: 통과 + 기존 스위트 회귀 확인**
 
 Run: `.venv-kb/bin/python -m pytest parse_service/tests -q`
 Expected: 전체 passed (기존 test_parse.py 포함 — run_parse 의 pages 경로 동작 불변)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add parse_service/app.py parse_service/tests/test_app_chunk_needed.py
@@ -788,7 +788,7 @@ git commit -m "feat(parse-svc): /parse chunk_needed flag via router (Phase 2a-6)
 - Produces: facade `/parse` — excel 분기 없이 전부 parse-svc 위임(응답 passthrough, `chunk_strategy` 필드는 excel 일 때 `"excel_rag_parser"` 유지 — 소비자 호환).
 - Produces: facade `/ingest` — `chunk_needed` 로 분기: true → adaptive `/chunk`, false → parsed["chunks"] 바로 insert.
 
-- [ ] **Step 1: 실패 테스트 작성**
+- [x] **Step 1: 실패 테스트 작성**
 
 `service/tests/test_ingest_chunk_needed.py`:
 ```python
@@ -865,12 +865,12 @@ def test_failed_parse_returns_immediately():
     appmod.app.dependency_overrides.clear()
 ```
 
-- [ ] **Step 2: 실패 확인**
+- [x] **Step 2: 실패 확인**
 
 Run: `.venv-kb/bin/python -m pytest service/tests/test_ingest_chunk_needed.py -q`
 Expected: FAIL (현재 `/ingest` 는 무조건 adaptive 호출 → 2번째·3번째 테스트 실패)
 
-- [ ] **Step 3: 구현**
+- [x] **Step 3: 구현**
 
 `service/app.py`:
 1. `/parse`(72~99행): `_is_excel` 분기 블록(88~96행) **삭제** — 전부 `pc.parse(...)` 위임. 단 excel 소비자 호환을 위해 응답에 `chunk_strategy` 를 재구성:
@@ -910,12 +910,12 @@ async def parse(file: UploadFile = File(...), content_type: str | None = Form(No
 3. `get_excel_client`/`ec=Depends(...)` 파라미터는 이 Task 에선 남겨둔다(참조만 제거) — 파일 삭제는 2d.
 4. `service/tests/test_parse_endpoint.py` 에서 excel 분기(`_is_excel` → ec 호출) 단언 테스트를 "chunk_needed=False passthrough + chunk_strategy 셋업" 단언으로 교체.
 
-- [ ] **Step 4: 통과 + facade 스위트 회귀**
+- [x] **Step 4: 통과 + facade 스위트 회귀**
 
 Run: `.venv-kb/bin/python -m pytest service/tests -q`
 Expected: 전체 passed
 
-- [ ] **Step 5: Phase 2a 통합 검증 (스택)**
+- [x] **Step 5: Phase 2a 통합 검증 (스택)**
 
 ```bash
 cd /Users/xxx/workspace/8.kb-pipeline
@@ -926,7 +926,7 @@ curl -sS -X POST http://localhost:19000/ingest -F "file=@<작은 md/pdf 샘플>"
 ```
 Expected: 둘 다 성공, `docker compose ps` 전부 healthy.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add service/app.py service/tests/
