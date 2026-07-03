@@ -1357,7 +1357,7 @@ git commit -m "feat(parse-svc): in-process VL OCR entry, drop :18050 HTTP depend
 - Produces: `tools.kordoc.convert_to_markdown(file_bytes: bytes, filename: str) -> str` — kordoc CLI(`kordoc <src> --output out.md --format markdown`, env `KORDOC_BIN` 기본 "kordoc") 실행, `<table>` HTML 포함 md 반환. 실패 시 `ToolError`.
 - Produces: `parsers.docx.parse(file_bytes, filename, **_) -> RouteResult` — kind="pages", chunk_needed=True, 단일 페이지 없음 → md 를 `hybrid_to_blocks(md, page_idx=1)` 로 1페이지 구성(docx 는 페이지 개념 근사).
 
-- [ ] **Step 1: 실패 테스트 작성**
+- [x] **Step 1: 실패 테스트 작성**
 
 `parse_service/tests/test_tools_kordoc.py`:
 ```python
@@ -1403,12 +1403,12 @@ def test_docx_md_to_single_page(monkeypatch):
     assert any(b.get("text") for b in res.pages[0]["blocks"])
 ```
 
-- [ ] **Step 2: 실패 확인**
+- [x] **Step 2: 실패 확인**
 
 Run: `.venv-kb/bin/python -m pytest parse_service/tests/test_tools_kordoc.py parse_service/tests/test_parser_docx.py -q`
 Expected: FAIL
 
-- [ ] **Step 3: 구현**
+- [x] **Step 3: 구현**
 
 `parse_service/tools/kordoc.py`:
 ```python
@@ -1501,7 +1501,7 @@ def _domain(filename: str) -> str:
 ```
 `test_router.py` 매핑 갱신: `("a.docx","docx")`, `("a.hwpx","fallback")` 등.
 
-- [ ] **Step 4: 통과 확인 + Commit**
+- [x] **Step 4: 통과 확인 + Commit**
 
 Run: `.venv-kb/bin/python -m pytest parse_service/tests -q` → passed
 ```bash
@@ -1518,7 +1518,7 @@ git commit -m "feat(parse-svc): docx=kordoc, fallback=kordoc, drop markitdown fa
 - Modify: `tests/test_blockify.py` — `recommended_parser`/`PARSER_ROUTING` import·테스트 제거(195행 부근).
 - Test(가드): `parse_service/tests/test_no_markitdown.py`
 
-- [ ] **Step 1: 가드 테스트 작성**
+- [x] **Step 1: 가드 테스트 작성**
 
 `parse_service/tests/test_no_markitdown.py`:
 ```python
@@ -1541,7 +1541,7 @@ def test_no_markitdown_in_requirements():
     assert "markitdown" not in txt
 ```
 
-- [ ] **Step 2: 삭제 수행 + 참조 0 확인**
+- [x] **Step 2: 삭제 수행 + 참조 0 확인**
 
 ```bash
 grep -rnE 'parse_to_markdown|parse_to_pages|_parse_markitdown|_parse_structural|recommended_parser|PARSER_ROUTING' \
@@ -1549,7 +1549,7 @@ grep -rnE 'parse_to_markdown|parse_to_pages|_parse_markitdown|_parse_structural|
 ```
 결과의 각 참조를 라우터/삭제로 정리. `service/` 쪽 참조(`service/parsing.py`, `service/ingest.py`)는 Task 14 에서 삭제하므로 이 시점엔 남아 있어도 됨 — **이 Task 의 grep 통과 기준은 `parse_service/`+`kb_pipeline/` 범위**.
 
-- [ ] **Step 3: 통과 확인 + Commit**
+- [x] **Step 3: 통과 확인 + Commit**
 
 Run: `.venv-kb/bin/python -m pytest parse_service/tests tests -q` → passed
 (주: `test_no_markitdown.py` 의 service 범위 단언은 Task 14 완료 후 green — Task 14 와 같은 phase 안에서 연속 실행)
@@ -1578,14 +1578,14 @@ def _safe_basename(name: str) -> str:
 **사전 확인(계약 안전)**: kb-backend 실코드 미사용 재확인 —
 `grep -rn "ingest/submit\|ingest/status" /Users/xxx/workspace/99.projects/shinhan_trust/knowledge_base/backend/app` → 0건이어야 진행.
 
-- [ ] **Step 1: 삭제 수행**
+- [x] **Step 1: 삭제 수행**
 
 ```bash
 git rm service/parsing.py service/excel_parser_client.py service/tests/test_parsing.py
 # app.py/ingest.py 수정은 에디터로 (위 명세)
 ```
 
-- [ ] **Step 2: import/참조 0 확인 + markitdown 가드 범위 확장**
+- [x] **Step 2: import/참조 0 확인 + markitdown 가드 범위 확장**
 
 ```bash
 grep -rnE 'service\.parsing|excel_parser_client|run_front|FrontError|ingest/submit|ingest/status|_is_excel|get_excel_client' service --include='*.py'
@@ -1598,7 +1598,7 @@ Expected: 0건 (테스트 포함)
          "parse_service", "kb_pipeline", "service"],
 ```
 
-- [ ] **Step 3: 전체 스위트 확인 + Commit**
+- [x] **Step 3: 전체 스위트 확인 + Commit**
 
 Run: `.venv-kb/bin/python -m pytest service/tests parse_service/tests tests -q` → 전체 passed
 ```bash
