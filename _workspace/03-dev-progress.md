@@ -141,7 +141,7 @@ plan: `docs/superpowers/plans/2026-07-02-parser-consolidation-phase2.md` (v3 REA
 | Phase | 내용 | 상태 |
 |---|---|---|
 | **2a** | parse-svc 재구조화(parsers/{pdf,ocr,excel}+tools+router) + `chunk_needed` flag + facade /ingest 분기 (excel/ocr 는 HTTP 위임 유지 — 동작 보존) | ✅ 완료 (Task1~7, `51692e9`..`2144f00`) — 전체 200 passed(기존 무관 실패 1: minio bucket auto-create 드리프트), 스택 스모크 green(xlsx chunk_needed=false 자체청킹 / md ingest indexed) |
-| 2b | excel_parser_rag in-process 흡수 (HTTP 제거) | 진행 예정 |
+| **2b** | excel_parser_rag in-process 흡수 (HTTP 제거) | ✅ 완료 (Task8~9, `f59a40b`+`8cfeb05`) — 패키지 vendoring(자기참조 import 0건, 상대임포트만), `_fetch_rag_chunks` in-process(get_backend(cfg.backend).parse), excel-parser 컨테이너 stop 상태에서도 /parse 성공 확인. ⚠️ 임시: compose parse-svc `EXCEL_PARSER_BACKEND=openpyxl`(이미지에 node/kordoc 없어 auto→kordoc 불가 — 2e 에서 설치 후 auto 복원) |
 | 2c | document-parser OCR(pptx+이미지) in-process 흡수 | 대기 |
 | 2d | markitdown 완전 제거 + docx/폴백=kordoc + facade 파싱코드 삭제(/ingest/submit·status 제거) | 대기 |
 | 2e | compose 정리(excel-parser·document-parser·redis 제거) + E2E | 대기 |
