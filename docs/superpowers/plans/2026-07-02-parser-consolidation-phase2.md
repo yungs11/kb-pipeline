@@ -1,5 +1,5 @@
-<!-- plan-version: v2 -->
-<!-- codex-validation: PENDING (ultracode adversarial round 1 applied) -->
+<!-- plan-version: v3 -->
+<!-- codex-validation: READY v3 at 2026-07-03T00:42:49Z (ultracode adversarial 2 rounds — round1 13건 triage→8건 반영, round2 잔존 1건 반영, 미해결 0건) -->
 
 # 파서 일원화 (Phase 2) Implementation Plan
 
@@ -851,12 +851,24 @@ def test_chunk_needed_false_skips_adaptive_and_inserts_native_chunks():
     assert ac.called is False
     assert eq.last_chunks == ["표1"]
     appmod.app.dependency_overrides.clear()
+
+
+def test_failed_parse_returns_immediately():
+    """v3(리뷰 round2): parse 실패({status:"failed"})는 adaptive 미호출·그대로 반환."""
+    ac, eq = FakeAdaptive(), FakeEq()
+    c = _override({"status": "failed", "detail": "parse error"}, ac, eq)
+    r = c.post("/ingest", data={"workspace_id": "w", "doc_id": "d"},
+               files={"file": ("a.pdf", b"%PDF")})
+    assert r.status_code == 200
+    assert r.json()["status"] == "failed"
+    assert ac.called is False
+    appmod.app.dependency_overrides.clear()
 ```
 
 - [ ] **Step 2: 실패 확인**
 
 Run: `.venv-kb/bin/python -m pytest service/tests/test_ingest_chunk_needed.py -q`
-Expected: FAIL (현재 `/ingest` 는 무조건 adaptive 호출 → 2번째 테스트 실패)
+Expected: FAIL (현재 `/ingest` 는 무조건 adaptive 호출 → 2번째·3번째 테스트 실패)
 
 - [ ] **Step 3: 구현**
 
