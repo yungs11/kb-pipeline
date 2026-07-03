@@ -133,3 +133,17 @@ timings = {
 - 청킹 4방법 경쟁의 완화/최적화(사용자 결정으로 현상 유지).
 - (가)경로(markdown 만 POST)는 MVP 폴백으로만 보존.
 - 크로스-잡 집계/대시보드(Option C)·알림(추후).
+
+## Phase 2 파서 일원화 진행 (2026-07-03)
+
+plan: `docs/superpowers/plans/2026-07-02-parser-consolidation-phase2.md` (v3 READY, ultracode 2라운드 검증) · spec: `docs/superpowers/specs/2026-07-02-parser-consolidation-phase2-design.md`
+
+| Phase | 내용 | 상태 |
+|---|---|---|
+| **2a** | parse-svc 재구조화(parsers/{pdf,ocr,excel}+tools+router) + `chunk_needed` flag + facade /ingest 분기 (excel/ocr 는 HTTP 위임 유지 — 동작 보존) | ✅ 완료 (Task1~7, `51692e9`..`2144f00`) — 전체 200 passed(기존 무관 실패 1: minio bucket auto-create 드리프트), 스택 스모크 green(xlsx chunk_needed=false 자체청킹 / md ingest indexed) |
+| 2b | excel_parser_rag in-process 흡수 (HTTP 제거) | 진행 예정 |
+| 2c | document-parser OCR(pptx+이미지) in-process 흡수 | 대기 |
+| 2d | markitdown 완전 제거 + docx/폴백=kordoc + facade 파싱코드 삭제(/ingest/submit·status 제거) | 대기 |
+| 2e | compose 정리(excel-parser·document-parser·redis 제거) + E2E | 대기 |
+
+발견 리스크: `test_minio_client.py` 1건 기존 red(bucket auto-create 제거 vs 테스트 미갱신 — 2a 무관, 별도 정리), 모달 테스트 4건은 `KBP_MODAL_ENRICH=1` 필요(기본 off 정책).
