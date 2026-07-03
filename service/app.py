@@ -71,32 +71,24 @@ def healthz():
 
 @app.post("/parse")
 async def parse(file: UploadFile = File(...), content_type: str | None = Form(None),
-                docs_id: str | None = Form(None),
-                pc=Depends(get_parse_client), ec=Depends(get_excel_client)):
-    """Parse one upload. Excel → excel-rag-parser (parse+chunk, LLM-free); else → parse-svc.
+                docs_id: str | None = Form(None), pc=Depends(get_parse_client)):
+    """Parse one upload — 전부 parse-svc 위임(Phase 2a: excel 분기는 parse-svc 로 이동).
 
-    Excel returns native chunks (+ ``chunk_strategy``) so the caller skips adaptive /chunk.
+    parse-svc 가 확장자 라우팅(pdf/excel/ocr/폴백)을 소유하고 ``chunk_needed`` 를 내린다.
+    excel(chunk_needed=false) 소비자 호환을 위해 ``chunk_strategy`` 를 재구성한다.
 
     ``docs_id`` (optional form) is the orchestrator's ``content_hash(file_bytes)[:16]``;
     when present it is forwarded to parse-svc so the page-image MinIO keys agree with
-    the keys the orchestrator/UI assemble. The non-Excel response passes through the
-    additive page fields (``docs_id``/``page_count``/``pages``/``page_spans``) from
-    parse-svc unchanged. The Excel branch is owned by Feature 1 and is left untouched.
+    the keys the orchestrator/UI assemble. The response passes through the additive
+    page fields (``docs_id``/``page_count``/``pages``/``page_spans``) unchanged.
     """
     data = await file.read()
     safe_name = _safe_basename(file.filename or "upload")
-    if _is_excel(safe_name):
-        chunks = ec.parse_chunks(file_bytes=data, filename=safe_name)
-        return {
-            "enriched_content": "\n\n".join(c.get("text", "") for c in chunks),
-            "n_blocks": len(chunks),
-            "modal_spans": [],
-            "chunks": chunks,
-            "chunk_strategy": "excel_rag_parser",
-        }
-    return pc.parse(file_bytes=data, filename=safe_name,
-                    content_type=content_type or file.content_type,
-                    docs_id=docs_id)
+    parsed = pc.parse(file_bytes=data, filename=safe_name,
+                      content_type=content_type or file.content_type, docs_id=docs_id)
+    if parsed.get("chunk_needed") is False:
+        parsed.setdefault("chunk_strategy", "excel_rag_parser")  # 소비자 호환 필드
+    return parsed
 
 
 @app.post("/chunk")
@@ -254,18 +246,27 @@ async def ingest(file: UploadFile = File(...), workspace_id: str = Form(...),
     # 1) parse-svc → enriched content (modal markers embedded).
     parsed = pc.parse(file_bytes=data, filename=safe_name,
                       content_type=content_type or file.content_type)
-    enriched = parsed.get("enriched_content", "")
+    # v2(리뷰 B10): parse-svc 파싱 실패({status:"failed"}) 는 빈 컨텐츠로 adaptive 를
+    # 태우지 않고 그대로 반환(호출자가 실패 인지).
+    if parsed.get("status") == "failed":
+        return parsed
 
-    # 2) adaptive_chunk hub → chunks + real selection rationale. Modal spans are
-    #    forwarded as atomic markers so each 〈MODAL…〈/MODAL〉 region stays one chunk.
-    chunk_res = ac.chunk(text=enriched, doc_name=doc_id,
-                         atomic_markers=MODAL_ATOMIC_MARKERS)
-    chunk_texts = [ch.get("chunk_text", "") for ch in (chunk_res.get("chunks") or [])]
-    chunking_selection = {
-        "method_selected": chunk_res.get("method_selected"),
-        "scores": chunk_res.get("scores") or {},
-        "methods_compared": chunk_res.get("methods_compared") or [],
-    }
+    # 2) 청킹 — parse-svc 의 chunk_needed 로 분기. true(기본) → adaptive_chunk hub,
+    #    false(excel 자체청킹) → parse-svc 가 내린 chunks 를 그대로 insert.
+    if parsed.get("chunk_needed", True):
+        enriched = parsed.get("enriched_content", "")
+        chunk_res = ac.chunk(text=enriched, doc_name=doc_id,
+                             atomic_markers=MODAL_ATOMIC_MARKERS)
+        chunk_texts = [ch.get("chunk_text", "") for ch in (chunk_res.get("chunks") or [])]
+        chunking_selection = {
+            "method_selected": chunk_res.get("method_selected"),
+            "scores": chunk_res.get("scores") or {},
+            "methods_compared": chunk_res.get("methods_compared") or [],
+        }
+    else:
+        chunk_texts = [c.get("text", "") for c in (parsed.get("chunks") or [])]
+        chunking_selection = {"method_selected": "excel_rag_parser",
+                              "scores": {}, "methods_compared": []}
 
     # 3) edgequake passthrough insert (kb id → workspace uuid; chunks joined with
     #    U+001E by the client; polled to terminal).

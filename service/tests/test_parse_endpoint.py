@@ -152,26 +152,36 @@ def test_is_excel():
     assert not _is_excel("a.pdf") and not _is_excel("noext")
 
 
-def test_parse_routes_excel_to_excel_client(monkeypatch):
+def test_parse_excel_goes_to_parse_svc_with_chunk_strategy(monkeypatch):
+    """Phase 2a: excel 도 parse-svc 위임 — chunk_needed=False passthrough 에
+    facade 가 소비자 호환 필드 ``chunk_strategy`` 를 셋업한다."""
     from fastapi.testclient import TestClient
     import service.app as svc
 
-    class _FakeExcel:
-        def parse_chunks(self, *, file_bytes, filename):
-            return [{"chunk_index": 0, "text": "셀A", "titles_context": ["시트1"], "pages": []}]
+    class _FakeParse:
+        def parse(self, *, file_bytes, filename, content_type=None, docs_id=None):
+            return {
+                "enriched_content": "셀A",
+                "n_blocks": 1,
+                "modal_spans": [],
+                "chunks": [{"chunk_index": 0, "text": "셀A",
+                            "titles_context": ["시트1"], "pages": []}],
+                "chunk_needed": False,
+            }
 
-    svc.app.dependency_overrides[svc.get_excel_client] = lambda: _FakeExcel()
+    svc.app.dependency_overrides[svc.get_parse_client] = lambda: _FakeParse()
     try:
         c = TestClient(svc.app)
         r = c.post("/parse", files={"file": ("book.xlsx", b"PK\x03\x04", "application/octet-stream")},
                    data={})
         assert r.status_code == 200
         j = r.json()
+        assert j["chunk_needed"] is False
         assert j["chunk_strategy"] == "excel_rag_parser"
         assert j["chunks"][0]["text"] == "셀A"
         assert j["modal_spans"] == []
     finally:
-        svc.app.dependency_overrides.pop(svc.get_excel_client, None)
+        svc.app.dependency_overrides.pop(svc.get_parse_client, None)
 
 
 def test_parse_routes_nonexcel_to_parse_svc(monkeypatch):
@@ -257,41 +267,22 @@ def test_parse_without_docs_id_forwards_none():
         app.dependency_overrides.clear()
 
 
-def test_parse_excel_branch_has_no_page_fields():
-    """The Excel branch (Feature 1) is untouched: it never returns page fields and
-    never forwards docs_id to a parse client."""
+def test_parse_chunk_needed_true_passthrough_no_chunk_strategy():
+    """Phase 2a: chunk_needed=True(일반 문서) 응답은 chunk_strategy 없이 그대로 통과."""
     import service.app as svc
 
-    class _FakeExcel:
-        def parse_chunks(self, *, file_bytes, filename):
-            return [{"chunk_index": 0, "text": "셀A", "titles_context": ["시트1"], "pages": []}]
-
-    class _SpyParse:
-        def __init__(self):
-            self.calls = []
-
+    class _FakeParse:
         def parse(self, *, file_bytes, filename, content_type=None, docs_id=None):
-            self.calls.append(docs_id)
-            return {"enriched_content": "x", "n_blocks": 0, "modal_spans": []}
+            return {"enriched_content": "본문", "n_blocks": 1, "modal_spans": [],
+                    "chunk_needed": True}
 
-    spy = _SpyParse()
-    svc.app.dependency_overrides[svc.get_excel_client] = lambda: _FakeExcel()
-    svc.app.dependency_overrides[svc.get_parse_client] = lambda: spy
+    svc.app.dependency_overrides[svc.get_parse_client] = lambda: _FakeParse()
     try:
         c = TestClient(svc.app)
-        r = c.post(
-            "/parse",
-            files={"file": ("book.xlsx", b"PK\x03\x04", "application/octet-stream")},
-            data={"docs_id": "shouldbeignored0"},
-        )
+        r = c.post("/parse", files={"file": ("doc.pdf", b"%PDF", "application/pdf")}, data={})
         assert r.status_code == 200
         j = r.json()
-        # Excel response shape is unchanged — no page fields injected.
-        assert j["chunk_strategy"] == "excel_rag_parser"
-        for key in ("docs_id", "page_count", "pages", "page_spans"):
-            assert key not in j, f"Excel branch must not emit page field {key!r}"
-        # the parse client was never invoked for the Excel upload.
-        assert spy.calls == []
+        assert j["chunk_needed"] is True
+        assert "chunk_strategy" not in j
     finally:
-        svc.app.dependency_overrides.pop(svc.get_excel_client, None)
         svc.app.dependency_overrides.pop(svc.get_parse_client, None)
