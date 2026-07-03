@@ -1,7 +1,7 @@
 """parse-svc FastAPI service (:19001).
 
 Owns the heavy parsing path (parse→blockify→modal) lifted out of the kb-pipeline
-facade so java/OpenDataLoader/markitdown/OCR dependencies are isolated here. The
+facade so java/OpenDataLoader/kordoc/VL-OCR dependencies are isolated here. The
 facade calls this service over HTTP (``service/parse_client.py``).
 
 Endpoints:
@@ -22,12 +22,7 @@ from typing import Any, Callable
 
 from fastapi import FastAPI, UploadFile, File, Form
 
-from parse_service.parsing import (
-    parse_to_markdown,
-    parse_to_pages,
-    ParseError,
-    _safe_basename,
-)
+from parse_service.tools import safe_basename as _safe_basename
 from parse_service.router import route as _route_impl
 from parse_service.parsers import RouteResult, ParserError
 from parse_service.pdf_pages import render_pdf_pages
@@ -129,8 +124,8 @@ def _modal_spans(enriched: str) -> list[dict]:
 def _strip_pua_blocks(blocks: list[dict]) -> None:
     """블록 텍스트 단계에서 PUA(깨진/미매핑 글자)를 in-place 제거한다(spec §5.1.5).
 
-    ``parse_to_markdown`` 경로는 markdown 문자열 전체에 ``_strip_pua`` 를 걸었지만, 페이지
-    보존 경로는 평탄화 전 블록 텍스트에 직접 건다(text/table/equation/image 본문 키 각각).
+    (구 parse_to_markdown 경로는 markdown 문자열 전체에 ``_strip_pua`` 를 걸었다 — 2d 삭제.)
+    페이지 보존 경로는 평탄화 전 블록 텍스트에 직접 건다(text/table/equation/image 본문 키 각각).
     """
     for b in blocks:
         if "text" in b and isinstance(b["text"], str):
@@ -207,7 +202,7 @@ def run_parse(file_bytes: bytes, filename: str, *,
     tests) inject the page parser / renderer / minio store. ``docs_id`` defaults to
     ``content_hash(file_bytes)[:16]`` when orchestrator does not supply it.
 
-    Raises ``FrontError(detail)`` on failure (``parse_failed`` for a ParseError,
+    Raises ``FrontError(detail)`` on failure (``parse_failed`` for a ParserError,
     ``internal_error`` otherwise). 이미지/PDF render+upload 는 **best-effort** — 실패해도
     enriched_content/page_spans 는 정상 반환(썸네일만 누락).
     """
@@ -265,7 +260,7 @@ def run_parse(file_bytes: bytes, filename: str, *,
             enrich_modals=enrich_modals,  # 기본 off → 원본 payload 통과(LLM 0회)
         )
         modal_ms = (time.perf_counter() - _t) * 1000.0
-    except (ParseError, ParserError):
+    except ParserError:
         log.exception("parse failed for %s", filename)
         raise FrontError("parse_failed")
     except Exception:  # noqa: BLE001

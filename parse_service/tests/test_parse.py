@@ -16,9 +16,8 @@ from kb_pipeline.modal import MODAL_OPEN_PREFIX, MODAL_CLOSE
 def _fake_pages_from_md(md: str, page_number: int = 1):
     """Inject a fake page parser yielding one PageDoc whose blocks carry page_idx.
 
-    ``run_parse`` now uses the page-preserving parser (``parse_to_pages``) instead
-    of ``parse_to_markdown``. Tests inject this via ``parse_pages=`` so no live
-    Java/OpenDataLoader/OCR is touched.
+    ``run_parse`` uses the page-preserving router path. Tests inject this via
+    ``parse_pages=`` so no live Java/OpenDataLoader/OCR is touched.
     """
     def parse_pages(file_bytes, filename, **k):
         return [{
@@ -196,7 +195,7 @@ def test_healthz():
 
 
 # ---------------------------------------------------------------------------
-# spec §7 — parse_to_pages / enrich_with_spans / render+upload / additive resp
+# spec §7 — 페이지 보존 파싱(router) / enrich_with_spans / render+upload / additive resp
 # ---------------------------------------------------------------------------
 
 
@@ -222,69 +221,6 @@ class _RP:
         self.page_number = page_number
         self.jpeg = jpeg
         self.text = text
-
-
-def test_parse_to_pages_digital_pdf_fills_page_idx_per_page(monkeypatch):
-    """디지털 PDF: OpenDataLoader 페이지별 .md(join 안 함) → 각 PageDoc 의 blocks 가
-    그 페이지의 1-based page_idx 로 채워진다(spec §5.1.3 / §7-①)."""
-    import parse_service.parsing as p
-
-    page_mds = [
-        "# Page One\n\nalpha body\n",
-        "## Page Two\n\nbeta body\n\n| a | b |\n| - | - |\n| 1 | 2 |\n",
-    ]
-
-    # OpenDataLoader convert + per-page .md glob 을 fake 로 대체(JVM/디스크 미사용).
-    # ``_parse_pdf_to_pages`` 는 함수 내부에서 ``import opendataloader_pdf`` / ``import glob``
-    # 하므로 stdlib ``glob`` 모듈과 sys.modules 의 opendataloader_pdf 를 패치한다.
-    import glob as _glob_mod
-    import io as _io
-    import sys as _sys
-    import types as _t
-
-    monkeypatch.setitem(_sys.modules, "opendataloader_pdf",
-                        _t.SimpleNamespace(convert=lambda **k: None))
-    monkeypatch.setattr(_glob_mod, "glob", lambda *a, **k: ["p1.md", "p2.md"])
-    _files = dict(zip(["p1.md", "p2.md"], page_mds))
-    real_open = open
-    monkeypatch.setattr(
-        "builtins.open",
-        lambda f, *a, **k: (
-            _io.StringIO(_files[f]) if f in _files else real_open(f, *a, **k)
-        ),
-    )
-
-    pages = p.parse_to_pages(b"%PDF-1.7 fake", "doc.pdf",
-                             ocr_url="http://x", excel_url="http://y")
-
-    assert [pd["page_number"] for pd in pages] == [1, 2]
-    # 각 PageDoc 의 모든 블록 page_idx == 그 PageDoc 의 page_number (1-based).
-    for pd in pages:
-        assert pd["blocks"], "page should produce at least one block"
-        assert all(b["page_idx"] == pd["page_number"] for b in pd["blocks"])
-    # page 2 에 표 블록이 있어야 한다.
-    p2 = next(pd for pd in pages if pd["page_number"] == 2)
-    assert any(b["type"] == "table" for b in p2["blocks"])
-
-
-def test_parse_to_pages_single_image_ocr_elements(monkeypatch):
-    """단일 이미지: OCR raw elements 보존 → elements_to_blocks(page=1) (spec §7-①)."""
-    import parse_service.parsing as p
-
-    # OCR(:18050) 를 호출하지 않고 raw elements 를 직접 주입.
-    elements = [
-        {"category": "title", "content": {"text": "Scanned Title"}},
-        {"category": "paragraph", "content": {"text": "scanned body line"}},
-    ]
-    monkeypatch.setattr(p, "_ocr_page", lambda b, f, *, ocr_url: elements)
-
-    pages = p.parse_to_pages(b"\xff\xd8img\xff\xd9", "scan.png",
-                             ocr_url="http://x", excel_url="http://y")
-
-    assert len(pages) == 1
-    assert pages[0]["page_number"] == 1
-    assert all(b["page_idx"] == 1 for b in pages[0]["blocks"])
-    assert any("scanned body line" in (b.get("text") or "") for b in pages[0]["blocks"])
 
 
 def test_run_parse_page_spans_align_to_enriched_content():

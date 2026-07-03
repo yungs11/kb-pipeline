@@ -26,7 +26,10 @@ differs sharply):
 
 The pptx/docx tables in this corpus ARE merge-critical (schedule/Gantt and
 role-authority matrices rely on spans), so route pptx + docx to a structural
-parser. See ``PARSER_ROUTING`` below.
+parser.
+
+각주: 라우팅(구 ``PARSER_ROUTING``/``recommended_parser``)은 parse_service/router.py 로
+이동(2026-07-02, 파서 일원화 Phase 2d). 위 W6 측정 기록은 역사 기록으로 유지한다.
 """
 
 from __future__ import annotations
@@ -35,30 +38,6 @@ import re
 from typing import Any
 
 from markdown_it import MarkdownIt
-
-# W6 verdict: route-to-structural for merge-bearing formats. markitdown
-# flattens colspan/rowspan at parse time; blockify cannot reconstruct them.
-# Map source extension -> preferred parser. Consumers may override per-doc.
-PARSER_ROUTING: dict[str, str] = {
-    # merge-critical office formats -> structural parser that emits <table>
-    # with colspan/rowspan (e.g. kordoc / mineru / opendataloader).
-    ".pptx": "structural",
-    ".docx": "structural",
-    # markitdown remains fine for formats without merged-cell tables.
-    ".xlsx": "markitdown",
-    ".pdf": "structural",
-}
-
-
-def recommended_parser(filename: str) -> str:
-    """Return 'structural' or 'markitdown' for a given source filename.
-
-    Defaults to 'markitdown' for unknown extensions. See PARSER_ROUTING and
-    the W6 finding in the module docstring for rationale.
-    """
-    ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-    return PARSER_ROUTING.get(ext, "markitdown")
-
 
 def _new_parser() -> MarkdownIt:
     # commonmark + raw HTML passthrough + GFM pipe tables.

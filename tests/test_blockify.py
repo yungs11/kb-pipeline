@@ -152,9 +152,7 @@ def test_real_kordoc_sample_html_tables_preserved():
     assert any(h["text_level"] == 2 for h in heading_blocks)
 
 
-# --- W6: parser routing for merge-critical formats --------------------------
-
-from kb_pipeline.blockify import recommended_parser, PARSER_ROUTING
+# --- W6: merge-critical formats — 라우팅은 parse_service/router.py 소유(2d 이동) ---
 
 
 def test_blockify_preserves_merges_from_structural_html():
@@ -190,11 +188,3 @@ def test_blockify_cannot_recover_merges_from_pipe_table():
     assert "<table>" in body
     assert "colspan" not in body.lower()
     assert "rowspan" not in body.lower()
-
-
-def test_recommended_parser_routes_office_to_structural():
-    assert recommended_parser("deck.pptx") == "structural"
-    assert recommended_parser("guide.DOCX") == "structural"
-    assert recommended_parser("sheet.xlsx") == "markitdown"
-    assert recommended_parser("notes.txt") == "markitdown"
-    assert PARSER_ROUTING[".pptx"] == "structural"
