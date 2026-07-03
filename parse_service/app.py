@@ -28,6 +28,8 @@ from parse_service.parsing import (
     ParseError,
     _safe_basename,
 )
+from parse_service.router import route as _route_impl
+from parse_service.parsers import RouteResult, ParserError
 from parse_service.pdf_pages import render_pdf_pages
 from kb_pipeline.modal import enrich_with_spans, MODAL_OPEN_PREFIX, MODAL_CLOSE
 
@@ -77,6 +79,11 @@ def _image_to_jpeg(file_bytes: bytes) -> bytes:
 
 
 app = FastAPI(title="kb-pipeline parse-svc")
+
+
+def _route(fb, fn, **kw):
+    """모듈 레벨 라우팅 훅 — 테스트가 monkeypatch 하는 대상(router.route 위임)."""
+    return _route_impl(fb, fn, **kw)
 
 
 class FrontError(Exception):
@@ -204,7 +211,6 @@ def run_parse(file_bytes: bytes, filename: str, *,
     ``internal_error`` otherwise). 이미지/PDF render+upload 는 **best-effort** — 실패해도
     enriched_content/page_spans 는 정상 반환(썸네일만 누락).
     """
-    parse_pages = parse_pages or parse_to_pages
     docs_id = docs_id or _default_docs_id(file_bytes)
     # 모달 LLM 동시호출 상한. 프록시(LiteLLM/Cloudflare) 과부하로 인한 524 를 줄이려고
     # 기본 3 으로 낮춘다(KBP_MODAL_MAX_WORKERS 로 조정; 524 잦으면 2/1 로).
@@ -216,7 +222,35 @@ def run_parse(file_bytes: bytes, filename: str, *,
     modal_sink: dict = {}
     try:
         _t = time.perf_counter()
-        pages = parse_pages(file_bytes, filename, ocr_url=ocr_url, excel_url=excel_url)
+        # 라우팅: 주입된 parse_pages(테스트/레거시)가 있으면 pages 경로로 그대로 쓰고,
+        # 없으면 확장자 router 가 도메인 파서를 고른다(excel → kind="chunks").
+        if parse_pages is not None:
+            rr = RouteResult(
+                kind="pages", chunk_needed=True,
+                pages=parse_pages(file_bytes, filename,
+                                  ocr_url=ocr_url, excel_url=excel_url),
+            )
+        else:
+            rr = _route(file_bytes, filename, ocr_url=ocr_url, excel_url=excel_url)
+        if rr.kind == "chunks":
+            # excel: 자체청킹 — 모달/blockify/렌더 스킵. additive 계약 유지.
+            return {
+                "enriched_content": "\n\n".join(c.get("text", "") for c in rr.chunks),
+                "n_blocks": len(rr.chunks),
+                "modal_spans": [],
+                "chunks": rr.chunks,
+                "chunk_needed": False,
+                "docs_id": docs_id,
+                "page_count": 0, "pages": [], "page_spans": [],
+                # v2(리뷰 B1): pages 경로와 동일 형태(modal_llm 포함) — 모니터링 집계자 호환.
+                "timing_metrics": {"parse_ms": round((time.perf_counter() - _t) * 1000.0, 1),
+                                   "modal_enrich_ms": 0.0, "render_upload_ms": 0.0,
+                                   "counters": {"page_count": 0, "n_blocks": len(rr.chunks)},
+                                   "modal_llm": {"wall_ms": None, "calls": None,
+                                                 "by_type": None, "per_call_ms": None,
+                                                 "max_workers": None}},
+            }
+        pages = rr.pages
         parse_ms = (time.perf_counter() - _t) * 1000.0  # opendataloader/OCR 단계
         # 페이지 blocks 를 문서순으로 concat(평탄화). PUA 는 블록 텍스트 단계에서 제거.
         blocks: list[dict] = []
@@ -231,7 +265,7 @@ def run_parse(file_bytes: bytes, filename: str, *,
             enrich_modals=enrich_modals,  # 기본 off → 원본 payload 통과(LLM 0회)
         )
         modal_ms = (time.perf_counter() - _t) * 1000.0
-    except ParseError:
+    except (ParseError, ParserError):
         log.exception("parse failed for %s", filename)
         raise FrontError("parse_failed")
     except Exception:  # noqa: BLE001
@@ -253,6 +287,7 @@ def run_parse(file_bytes: bytes, filename: str, *,
         "enriched_content": enriched,
         "n_blocks": len(blocks),
         "modal_spans": _modal_spans(enriched),
+        "chunk_needed": True,
         "docs_id": docs_id,
         "page_count": page_count,
         "pages": image_pages,
