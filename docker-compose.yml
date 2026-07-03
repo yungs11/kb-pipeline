@@ -204,6 +204,11 @@ services:
       # Phase 2b 임시: parse-svc 이미지에 node/kordoc 이 없어 auto(→kordoc) 백엔드 불가.
       # Phase 2e 에서 node/kordoc 설치 후 auto 로 되돌린다.
       EXCEL_PARSER_BACKEND: openpyxl
+      # Phase 2c: in-process VL OCR (pptx/이미지/스캔PDF) — document-parser HTTP 미경유
+      MODEL_API_URL: ${MODEL_API_URL}
+      MODEL_API_KEY: ${MODEL_API_KEY}
+      GOTENBERG_URL: http://gotenberg:3000
+      GUIDED_JSON_MODE: response_format   # OpenRouter/OpenAI 호환 (vLLM extra_body 아님)
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}

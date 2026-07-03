@@ -69,6 +69,7 @@ OCR_JSON_SCHEMA = {
 
 # 글로벌 비동기 HTTP 클라이언트 (재사용)
 _http_client: Optional[httpx.AsyncClient] = None
+_http_client_loop: Optional[asyncio.AbstractEventLoop] = None
 
 
 def get_http_client() -> httpx.AsyncClient:
@@ -79,9 +80,15 @@ def get_http_client() -> httpx.AsyncClient:
     - read: 서버 응답 대기 — VL 모델 추론 시간 (VL_MODEL_TIMEOUT)
     - write: 요청 전송 — base64 이미지 업로드 (120초)
     - pool: 커넥션 풀 획득 대기 (30초)
+
+    원본과 달리 parse-svc 는 호출마다 ``asyncio.run``(ocr_elements_sync) 으로 새 이벤트루프를
+    만들 수 있다 — AsyncClient 는 생성된 루프에 묶이므로, 루프가 바뀌었으면 재생성한다
+    (죽은 루프의 커넥션 재사용 시 "Event loop is closed" — Phase 2c 스택 검증에서 발견).
     """
-    global _http_client
-    if _http_client is None:
+    global _http_client, _http_client_loop
+    loop = asyncio.get_running_loop()
+    if _http_client is None or _http_client.is_closed or _http_client_loop is not loop:
+        _http_client_loop = loop
         vl_timeout = float(os.environ.get("VL_MODEL_TIMEOUT", "600"))
         _http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(

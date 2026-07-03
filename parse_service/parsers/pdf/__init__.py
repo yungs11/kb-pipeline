@@ -20,10 +20,10 @@ def _render_pages(file_bytes: bytes):
     return render_pdf_pages(file_bytes)
 
 
-def _ocr_elements_for_page(jpeg: bytes, name: str, ocr_url: str) -> list[dict]:
-    # Phase 2a: 기존 HTTP OCR 재사용(parsing._ocr_page). 2c 에서 in-process 로 대체.
-    from parse_service.parsing import _ocr_page
-    return _ocr_page(jpeg, name, ocr_url=ocr_url)
+def _ocr_elements_for_page(jpeg: bytes, name: str, ocr_url: str | None = None) -> list[dict]:
+    # Phase 2c: in-process VL OCR (HTTP 제거).
+    from parse_service.parsers.ocr import ocr_elements_sync
+    return ocr_elements_sync(jpeg, name)
 
 
 def parse(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteResult:
