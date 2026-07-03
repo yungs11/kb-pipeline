@@ -1,5 +1,5 @@
-<!-- plan-version: v1 -->
-<!-- codex-validation: PENDING -->
+<!-- plan-version: v2 -->
+<!-- codex-validation: PENDING (ultracode adversarial round 1 applied) -->
 
 # 파서 일원화 (Phase 2) Implementation Plan
 
@@ -477,14 +477,17 @@ _TERMINAL = {"succeeded", "failed", "cancelled"}
 
 
 def normalize_rag_chunk(rc: dict, index: int) -> dict | None:
-    # facade service/excel_parser_client.py:normalize_rag_chunk 를 그대로 이동(구현 시
-    # 원본 파일에서 함수 본문을 복사한다 — 동작 byte-identical 이 회귀 기준).
-    text = (rc.get("content_text") or "").strip()
+    # facade service/excel_parser_client.py:normalize_rag_chunk 를 **byte-identical 이동**
+    # (아래 본문 = 현행 원본 그대로 — v2: text 폴백은 content_text or title,
+    #  .get() 안전접근, titles_context 는 path 우선 폴백 체인. 리뷰 A1~A3 반영).
+    text = (rc.get("content_text") or rc.get("title") or "").strip()
     if not text:
         return None
-    titles = rc.get("path") or ([rc["title"]] if rc.get("title") else [])
+    title = rc.get("title")
+    path = rc.get("path") or []
+    titles_context = path or ([title] if title else None)
     return {"chunk_index": index, "text": text,
-            "titles_context": titles or None, "pages": []}
+            "titles_context": titles_context, "pages": []}
 
 
 def normalize_chunks(rag_chunks: list[dict]) -> list[dict]:
@@ -746,9 +749,13 @@ Expected: FAIL (`no attribute '_route'`)
                 "chunk_needed": False,
                 "docs_id": docs_id,
                 "page_count": 0, "pages": [], "page_spans": [],
+                # v2(리뷰 B1): pages 경로와 동일 형태(modal_llm 포함) — 모니터링 집계자 호환.
                 "timing_metrics": {"parse_ms": round((time.perf_counter() - _t) * 1000.0, 1),
                                    "modal_enrich_ms": 0.0, "render_upload_ms": 0.0,
-                                   "counters": {"page_count": 0, "n_blocks": len(rr.chunks)}},
+                                   "counters": {"page_count": 0, "n_blocks": len(rr.chunks)},
+                                   "modal_llm": {"wall_ms": None, "calls": None,
+                                                 "by_type": None, "per_call_ms": None,
+                                                 "max_workers": None}},
             }
         pages = rr.pages
 ```
@@ -871,6 +878,10 @@ async def parse(file: UploadFile = File(...), content_type: str | None = Form(No
 ```python
     parsed = pc.parse(file_bytes=data, filename=safe_name,
                       content_type=content_type or file.content_type)
+    # v2(리뷰 B10): parse-svc 파싱 실패({status:"failed"}) 는 빈 컨텐츠로 adaptive 를
+    # 태우지 않고 그대로 반환(호출자가 실패 인지).
+    if parsed.get("status") == "failed":
+        return parsed
     if parsed.get("chunk_needed", True):
         enriched = parsed.get("enriched_content", "")
         chunk_res = ac.chunk(text=enriched, doc_name=doc_id,
@@ -1261,7 +1272,17 @@ async def ocr_file_to_elements(file_bytes: bytes, filename: str) -> dict:
 
 
 def ocr_elements_sync(file_bytes: bytes, filename: str) -> list[dict]:
-    return asyncio.run(ocr_file_to_elements(file_bytes, filename))["elements"]
+    # v2(리뷰 B6): parse-svc /parse 핸들러는 async def 라 이벤트루프가 도는 스레드에서
+    # 호출된다 — 그 안에서 asyncio.run() 은 RuntimeError. 루프가 돌고 있으면 별도
+    # 스레드에서 asyncio.run 을 실행해 안전하게 블로킹한다.
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(ocr_file_to_elements(file_bytes, filename))["elements"]
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        fut = pool.submit(lambda: asyncio.run(ocr_file_to_elements(file_bytes, filename)))
+        return fut.result()["elements"]
 
 
 def _whole_file_elements(file_bytes: bytes, filename: str, ocr_url: str | None = None) -> list[dict]:
@@ -1494,9 +1515,11 @@ import subprocess
 
 
 def test_no_markitdown_imports():
+    # v2(리뷰 B8): Task 13 시점 범위 = parse_service + kb_pipeline.
+    # (service/ 는 Task 14 에서 parsing.py 삭제 후 이 리스트에 "service" 를 추가한다.)
     r = subprocess.run(
         ["grep", "-rlE", "^(from|import) markitdown|from markitdown import",
-         "service", "parse_service", "kb_pipeline"],
+         "parse_service", "kb_pipeline"],
         capture_output=True, text=True, cwd="/Users/xxx/workspace/8.kb-pipeline")
     assert r.stdout.strip() == "", f"markitdown imports remain: {r.stdout}"
 
@@ -1528,7 +1551,15 @@ git commit -m "refactor: remove markitdown package/rout — parsing owned by par
 **Files:**
 - Delete: `service/parsing.py`, `service/excel_parser_client.py`
 - Modify: `service/ingest.py` — `run_front`/`FrontError` 및 `service.parsing` import 삭제(파일 내 남는 것이 `_TENANT_ID` 뿐이면 상수를 `service/app.py` 로 이동 후 파일 삭제)
-- Modify: `service/app.py` — `/ingest/submit`(286~311행)·`/ingest/status`(314~326행) 핸들러 삭제, `from service.parsing import ...`/`from service.ingest import run_front, FrontError`/`from service.excel_parser_client import ...`/`get_excel_client` 삭제. `_safe_basename` 은 로컬 정의로 대체(6줄 함수 복사).
+- Modify: `service/app.py` — `/ingest/submit`(286~311행)·`/ingest/status`(314~326행) 핸들러 삭제, `from service.parsing import ...`/`from service.ingest import run_front, FrontError`/`from service.excel_parser_client import ...`/`get_excel_client` 삭제. `_safe_basename` 은 아래 로컬 정의로 대체(v2 리뷰 B9 — 명시 코드):
+```python
+def _safe_basename(name: str) -> str:
+    import os
+    import re
+    base = os.path.basename((name or "").replace("\\", "/")).replace("\x00", "")
+    base = re.sub(r"[^A-Za-z0-9._-]", "_", base) or "upload"
+    return "_" + base if base.startswith(".") else base
+```
 - Modify: `Dockerfile.facade` — JRE(openjdk-21) 설치 라인 삭제(파싱 제거로 java 불필요).
 - Delete/Modify tests: `service/tests/test_parsing.py` 삭제, `service/tests/test_app.py` 의 `/ingest/submit`·`/ingest/status` 테스트 삭제, `service/tests/test_ingest.py`(run_front 테스트) 삭제.
 
@@ -1542,12 +1573,18 @@ git rm service/parsing.py service/excel_parser_client.py service/tests/test_pars
 # app.py/ingest.py 수정은 에디터로 (위 명세)
 ```
 
-- [ ] **Step 2: import/참조 0 확인**
+- [ ] **Step 2: import/참조 0 확인 + markitdown 가드 범위 확장**
 
 ```bash
 grep -rnE 'service\.parsing|excel_parser_client|run_front|FrontError|ingest/submit|ingest/status|_is_excel|get_excel_client' service --include='*.py'
 ```
 Expected: 0건 (테스트 포함)
+
+`parse_service/tests/test_no_markitdown.py` 의 grep 대상 리스트에 `"service"` 를 추가
+(v2 리뷰 B8 — Task 13 에서 예고한 범위 확장):
+```python
+         "parse_service", "kb_pipeline", "service"],
+```
 
 - [ ] **Step 3: 전체 스위트 확인 + Commit**
 
@@ -1602,9 +1639,17 @@ git commit -m "build(parse-svc): node/kordoc runtime for docx+excel backends (Ph
 2. `parse-svc` env: `KBP_OCR_URL`/`KBP_EXCEL_URL` 삭제, 추가 —
    `GOTENBERG_URL: http://gotenberg:3000`, `MODEL_API_URL: ${MODEL_API_URL}`, `MODEL_API_KEY: ${MODEL_API_KEY}`, `KBP_VL_MAX_CONCURRENT: "3"`. `depends_on` 을 `{gotenberg: {condition: service_healthy}, minio: {condition: service_healthy}}` 로 교체(excel-parser/document-parser 의존 삭제).
 3. `facade` env: `KBP_EXCEL_URL`/`KBP_OCR_URL` 삭제.
-4. `adaptive_chunk` 의 `ADAPTIVE_CHUNK_OCR_BASE_URL: http://document-parser:8000` — document-parser 제거로 무효. adaptive_chunk 의 OCR 사용처 확인:
-   `grep -rn "ocr_base_url" /Users/xxx/workspace/99.projects/adaptive_chunk --include='*.py' | grep -v config` — 소비처 없으면(config 선언뿐) env 라인 삭제, 있으면 `http://parse-svc:19001` 로 교체 불가(계약 다름)이므로 **소비처 코드 확인 결과를 계획 검증자에게 보고 후 결정**.
-5. `docker compose config --quiet` 로 유효성 확인.
+4. `adaptive_chunk` 의 `ADAPTIVE_CHUNK_OCR_BASE_URL: http://document-parser:8000` —
+   **[v2 확정, 리뷰 B4]** 소비처 확인 완료: `service/dependencies.py:89` 가
+   `OcrParser(base_url=settings.ocr_base_url)` 로 실소비하나, 이는 adaptive 의
+   **file-OCR 경로(`/chunk/jobs/file`) 전용**이고 kb-pipeline facade 는 **text 경로
+   (`/chunk/jobs`)만 사용**한다(facade `service/adaptive_chunk.py` 참조). → **env 라인
+   삭제** (adaptive 의 file-OCR 는 이 compose 에서 미사용/비활성 — 수용된 축소.
+   추후 필요 시 별도 OCR 서비스 지정).
+5. **[v2, 리뷰 B7]** 위 1~4는 **한 편집·한 커밋**으로 적용(부분 적용 금지 — depends_on 이
+   삭제된 서비스를 가리키는 중간 상태 방지). 적용 후 `docker compose config --quiet` 로
+   유효성 확인, 재기동은 `docker compose down && docker compose up -d --wait` (부분
+   restart 금지).
 
 - [ ] **Step 2: 재기동 + 전 서비스 healthy**
 
