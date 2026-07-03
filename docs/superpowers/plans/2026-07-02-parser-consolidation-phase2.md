@@ -947,7 +947,7 @@ git commit -m "feat(facade): chunk_needed branch in /ingest, excel branch moved 
 **Interfaces:**
 - Produces: `from parse_service.parsers.excel.excel_parser_rag.backends import get_backend` 가 import 가능. 내부 상대임포트 유지로 무수정 동작.
 
-- [ ] **Step 1: 복사 + 자기참조 검사**
+- [x] **Step 1: 복사 + 자기참조 검사**
 
 ```bash
 cp -R /Users/xxx/workspace/7.excel-parser/excel_parser_rag \
@@ -958,7 +958,7 @@ grep -rnE '^(from|import) excel_parser_rag' parse_service/parsers/excel/excel_pa
 ```
 Expected: grep 결과의 각 라인을 `from parse_service.parsers.excel.excel_parser_rag ...` 로 치환(수 건 예상 — cli.py/__main__.py 등). **치환 후 grep 재실행 → 0건.**
 
-- [ ] **Step 2: 실패 테스트 작성**
+- [x] **Step 2: 실패 테스트 작성**
 
 `parse_service/tests/test_excel_rag_import.py`:
 ```python
@@ -969,7 +969,7 @@ def test_get_backend_importable():
     assert b is not None
 ```
 
-- [ ] **Step 3: 의존 추가 + 통과 확인**
+- [x] **Step 3: 의존 추가 + 통과 확인**
 
 `requirements.txt` 에 `openpyxl>=3.1.0` 추가 후:
 ```bash
@@ -978,7 +978,7 @@ def test_get_backend_importable():
 ```
 Expected: 1 passed. (원본 excel-parser 의 `pyproject.toml`/`requirements.txt` 의존 대비 누락 검사: `grep -E 'dependencies|install_requires' /Users/xxx/workspace/7.excel-parser/pyproject.toml` 로 추가 의존(예: pillow 등) 확인·반영.)
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add parse_service/parsers/excel/excel_parser_rag requirements.txt parse_service/tests/test_excel_rag_import.py
@@ -995,7 +995,7 @@ git commit -m "feat(parse-svc): vendor excel_parser_rag package in-process (Phas
 - Consumes: `excel_parser_rag.backends.get_backend`, `excel_parser_rag.config.ParserConfig`
 - Produces: `parse(file_bytes, filename)` — `excel_url` 파라미터 제거(하위호환: `**_` 로 무시). env `EXCEL_PARSER_BACKEND`(기본 auto), `KORDOC_BIN`(기본 kordoc), `KORDOC_MD_OUT`.
 
-- [ ] **Step 1: `_fetch_rag_chunks` 를 in-process 로 교체**
+- [x] **Step 1: `_fetch_rag_chunks` 를 in-process 로 교체**
 
 원본 `/Users/xxx/workspace/7.excel-parser/service/main.py:_run_parse`(110~135행 부근) 의 동기 파싱 본문을 이식:
 ```python
@@ -1030,7 +1030,7 @@ def _fetch_rag_chunks(file_bytes: bytes, filename: str, excel_url: str | None = 
 `kordoc_bin`/`kordoc_md_out` 키를 쓰는 것은 확인됨). chunks 원소가 dataclass 면
 원본 service/main.py 의 직렬화 방식을 그대로 복사.
 
-- [ ] **Step 2: 스모크 테스트 추가 + 전체 확인**
+- [x] **Step 2: 스모크 테스트 추가 + 전체 확인**
 
 `parse_service/tests/test_parser_excel.py` 에 추가:
 ```python
@@ -1049,7 +1049,7 @@ def test_inprocess_openpyxl_smoke(tmp_path):
 Run: `.venv-kb/bin/python -m pytest parse_service/tests/test_parser_excel.py -q`
 Expected: 전체 passed (기존 monkeypatch 테스트 + 스모크)
 
-- [ ] **Step 3: 시그니처 정리**
+- [x] **Step 3: 시그니처 정리**
 
 `parse_service/parsers/excel/__init__.py` 의 `parse` 시그니처를
 `def parse(file_bytes: bytes, filename: str, *, excel_url: str | None = None) -> RouteResult:`
@@ -1057,7 +1057,7 @@ Expected: 전체 passed (기존 monkeypatch 테스트 + 스모크)
 `parse_service/router.py` 의 `_excel_parse` 는 그대로(excel_url 전달해도 무해).
 `parse_service/app.py` 의 `KBP_EXCEL_URL` env 읽기는 이 시점부터 미사용 — 제거는 2e compose 정리와 함께.
 
-- [ ] **Step 4: 전체 스위트 + 스택 검증**
+- [x] **Step 4: 전체 스위트 + 스택 검증**
 
 ```bash
 .venv-kb/bin/python -m pytest parse_service/tests service/tests tests -q
@@ -1066,7 +1066,7 @@ curl -sS -X POST http://localhost:19000/parse -F "file=@<xlsx 샘플>" | python3
 ```
 Expected: green. 이 시점부터 excel-parser 컨테이너를 꺼도 excel 파싱 동작(확인: `docker compose stop excel-parser` 후 재시도 → 성공 → `docker compose start excel-parser` 원복).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add parse_service/parsers/excel/__init__.py parse_service/router.py parse_service/tests/test_parser_excel.py
