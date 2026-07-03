@@ -1104,7 +1104,7 @@ git commit -m "feat(parse-svc): excel parsing in-process via vendored excel_pars
 3. `infrastructure/storage`(minio) import 나오면 삭제(저장은 parse-svc 기존 `_render_and_upload` 가 담당).
 4. 각 파일 복사 후 `python -c "import parse_service.parsers.ocr.<mod>"` 로 import 오류 0 확인.
 
-- [ ] **Step 1: 실패 테스트 작성**
+- [x] **Step 1: 실패 테스트 작성**
 
 `parse_service/tests/test_ocr_modules.py`:
 ```python
@@ -1141,12 +1141,12 @@ def test_vl_payload_contains_image_and_schema(monkeypatch):
     assert "data:image/jpeg;base64,QUJD" in text and "sys-p" in text
 ```
 
-- [ ] **Step 2: 실패 확인**
+- [x] **Step 2: 실패 확인**
 
 Run: `.venv-kb/bin/python -m pytest parse_service/tests/test_ocr_modules.py -q`
 Expected: FAIL (모듈 없음)
 
-- [ ] **Step 3: 이식 수행**
+- [x] **Step 3: 이식 수행**
 
 위 "이식 규칙"대로 5개 파일 생성. 파일별 복사 원천(함수 단위):
 ```
@@ -1158,7 +1158,7 @@ prompts.py         ← core/config/prompts.py 의 build_system_prompt/build_user
 ```
 각 파일 끝에서 `python -c import` 확인.
 
-- [ ] **Step 4: 통과 확인 + Commit**
+- [x] **Step 4: 통과 확인 + Commit**
 
 Run: `.venv-kb/bin/python -m pytest parse_service/tests/test_ocr_modules.py -q` → passed
 ```bash
@@ -1177,7 +1177,7 @@ git commit -m "feat(parse-svc): vendor document-parser VL OCR modules (pptx+imag
 - Produces: `async ocr_file_to_elements(file_bytes: bytes, filename: str) -> dict` — `{"elements":[...], "metadata":{"page_cnt": int}}`. 내부: pptx→`convert_to_pdf_bytes`(gotenberg)→`pdf_bytes_to_base64_list`; 이미지→`image_file_to_base64_list`; 페이지별 `call_vl_api_with_base64`→`parse_vision_language_response_to_elements`→`normalize_all_elements`. 페이지 실패 비치명(skip).
 - Produces(동기 래퍼): `ocr_elements_sync(file_bytes, filename) -> list[dict]` — `asyncio.run` 래핑, 기존 `_ocr_page` 호출부 대체용. element 는 `page`(1-based) 필드 포함 — `elements_to_blocks` 소비 규약: `item.get("page_idx", item.get("page", 0))` 이므로 `page` 를 **0-based 로 변환**해 넘기거나 `page_idx` 를 직접 채운다. **구현: 반환 직전 각 element 에 `el["page_idx"] = el["page"] - 1` 세팅**(기존 HTTP 응답과 동일 소비 결과 보장 — 기존 `_elements_to_pages` 가 +1 하므로).
 
-- [ ] **Step 1: 실패 테스트 작성**
+- [x] **Step 1: 실패 테스트 작성**
 
 `parse_service/tests/test_ocr_entry.py`:
 ```python
@@ -1215,12 +1215,12 @@ def test_parse_uses_inprocess(monkeypatch, fake_vl):
     assert res.kind == "pages" and res.pages[0]["page_number"] == 1
 ```
 
-- [ ] **Step 2: 실패 확인**
+- [x] **Step 2: 실패 확인**
 
 Run: `.venv-kb/bin/python -m pytest parse_service/tests/test_ocr_entry.py -q`
 Expected: FAIL
 
-- [ ] **Step 3: 구현**
+- [x] **Step 3: 구현**
 
 `parse_service/parsers/ocr/__init__.py` 에 추가/교체:
 ```python
@@ -1320,7 +1320,7 @@ def _ocr_elements_for_page(jpeg: bytes, name: str, ocr_url: str | None = None) -
 ```
 `router.py` 의 `ocr_url` 전달은 유지(파서가 무시) — env 정리는 2e.
 
-- [ ] **Step 4: 통과 + 전체 회귀 + 스택 검증**
+- [x] **Step 4: 통과 + 전체 회귀 + 스택 검증**
 
 ```bash
 .venv-kb/bin/python -m pytest parse_service/tests service/tests tests -q
@@ -1333,7 +1333,7 @@ docker compose start document-parser  # 원복(제거는 2e)
 ```
 Expected: 전부 green, document-parser off 상태에서도 200.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add parse_service/parsers/ocr/__init__.py parse_service/parsers/pdf/__init__.py parse_service/tests/test_ocr_entry.py
