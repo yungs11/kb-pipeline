@@ -3,7 +3,7 @@
 # Secrets stay in .env (gitignored). See .env.example for the full key catalog.
 name: kbp
 networks: { kbp: {} }
-volumes: { eq_pg_data: {}, minio_data: {}, redis_data: {} }
+volumes: { eq_pg_data: {}, minio_data: {} }
 
 services:
   # ---------------------------------------------------------------------------
@@ -50,18 +50,8 @@ services:
       retries: 12
     networks: [kbp]
 
-  redis:
-    # document-parser stores VL model config/profiles in redis (core/config/model_profiles.py);
-    # without a reachable redis its /health hangs → depends_on chain (parse-svc→facade) deadlocks.
-    image: redis:7-alpine
-    command: redis-server --appendonly yes
-    volumes: ["redis_data:/data"]
-    networks: [kbp]
-    healthcheck:
-      test: ["CMD","redis-cli","ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
+  # Phase 2e: redis/document-parser/excel-parser 제거 — 파싱은 parse-svc in-process 소유
+  # (excel_parser_rag vendoring + VL OCR in-process). gotenberg 만 office→PDF 변환에 잔존.
 
   # ---------------------------------------------------------------------------
   # Knowledge-graph / vector engine
@@ -94,58 +84,9 @@ services:
     networks: [kbp]
 
   # ---------------------------------------------------------------------------
-  # Document processing tier
+  # Document processing tier — Phase 2e: 파싱은 parse-svc in-process 소유.
+  # (구 document-parser :18050 / excel-parser :18055 서비스 제거.)
   # ---------------------------------------------------------------------------
-  document-parser:
-    # Dockerfile.aws: correct file. The plain Dockerfile references a nonexistent path.
-    # build context: one level up from 8.kb-pipeline/ (sibling repo)
-    build:
-      context: ../99.projects/jiju_chaekmu/sourceCode/document-parser-backend-src
-      dockerfile: Dockerfile.aws
-    environment:
-      GOTENBERG_URL: http://gotenberg:3000
-      MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
-      MINIO_ENABLED: "true"   # loader.py reads MINIO_ENABLED (default False) — must be true
-      MINIO_BUCKET: ${MINIO_BUCKET:-document-parser}   # core/config/loader.py default='document-parser'
-      MODEL_API_URL: ${MODEL_API_URL}
-      MODEL_API_KEY: ${MODEL_API_KEY}
-      # REDIS_HOST: config_manager/model_profiles read VL model config from redis (loader.py:240 default 'localhost').
-      # Point at the compose redis service; without it /health hangs (Error 111 localhost:6379).
-      REDIS_HOST: redis
-      REDIS_PORT: "6379"
-      # MAX_CONCURRENT_REQUESTS=1: per-process asyncio.Semaphore(1) in main.py — total concurrency = workers(3) × 1
-      MAX_CONCURRENT_REQUESTS: "1"
-    depends_on:
-      gotenberg: { condition: service_healthy }
-      minio: { condition: service_healthy }
-      redis: { condition: service_healthy }
-    ports: ["18050:8000"]
-    healthcheck:
-      # /health = readiness (verifies gotenberg connectivity). document-parser image has curl.
-      # Compose HEALTHCHECK overrides the image's built-in HEALTHCHECK.
-      test: ["CMD","curl","-fsS","http://localhost:8000/health"]
-      interval: 10s
-      timeout: 5s
-      start_period: 30s
-      retries: 20
-    networks: [kbp]
-
-  excel-parser:
-    # build context: one level up from 8.kb-pipeline/ (sibling repo)
-    build: { context: ../7.excel-parser }
-    environment:
-      EXCEL_PARSER_BACKEND: auto
-      KORDOC_BIN: kordoc
-    ports: ["18055:18055"]   # Task 9 regression tests use host curl
-    networks: [kbp]   # parse-svc + facade route to http://excel-parser:18055
-    healthcheck:
-      test: ["CMD","curl","-fsS","http://localhost:18055/healthz"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-
   doc_guard:
     # build context: one level up from 8.kb-pipeline/ (sibling repo)
     build: { context: ../99.projects/shinhan_trust/doc_guard }
@@ -170,8 +111,9 @@ services:
       ADAPTIVE_CHUNK_SCORING_EMBEDDING_API_KEY: ${ADAPTIVE_CHUNK_SCORING_EMBEDDING_API_KEY}
       ADAPTIVE_CHUNK_SCORING_EMBEDDING_TIMEOUT_S: ${ADAPTIVE_CHUNK_SCORING_EMBEDDING_TIMEOUT_S}
       ADAPTIVE_CHUNK_REGEX_LLM_MODEL: ${ADAPTIVE_CHUNK_REGEX_LLM_MODEL}
-      # OCR backend: hard-coded to intra-stack service DNS (host localhost:18050 unreachable in container)
-      ADAPTIVE_CHUNK_OCR_BASE_URL: http://document-parser:8000
+      # ADAPTIVE_CHUNK_OCR_BASE_URL 제거(Phase 2e, 리뷰 B4): adaptive 의 file-OCR 경로
+      # (/chunk/jobs/file) 전용이었고 facade 는 text 경로(/chunk/jobs)만 사용 → document-parser
+      # 제거와 함께 삭제. file-OCR 필요 시 별도 OCR 서비스 URL 지정.
       # ADAPTIVE_CHUNK_QDRANT_URL 제거(2026-07-01): 벡터 적재는 edgequake(pgvector) 소유,
       # adaptive_chunk 는 Qdrant 미소비(config placeholder). SoT.md §9 참조.
       ADAPTIVE_CHUNK_EDGEQUAKE_BASE_URL: ${ADAPTIVE_CHUNK_EDGEQUAKE_BASE_URL}
@@ -181,8 +123,6 @@ services:
       ADAPTIVE_CHUNK_RERANK_API_KEY: ${ADAPTIVE_CHUNK_RERANK_API_KEY}
       ADAPTIVE_CHUNK_COREF_LLM_MODEL: ${ADAPTIVE_CHUNK_COREF_LLM_MODEL}
       ADAPTIVE_CHUNK_COREF_REASONING: ${ADAPTIVE_CHUNK_COREF_REASONING}
-    depends_on:
-      document-parser: { condition: service_healthy }   # ADAPTIVE_CHUNK_OCR_BASE_URL points here
     networks: [kbp]
     healthcheck:
       test: ["CMD","curl","-fsS","http://localhost:18060/healthz"]
@@ -199,24 +139,21 @@ services:
       KBP_OPENAI_API_KEY: ${KBP_OPENAI_API_KEY}
       KBP_OPENAI_BASE_URL: ${KBP_OPENAI_BASE_URL}
       KBP_LLM_MODEL: ${KBP_LLM_MODEL}
-      KBP_OCR_URL: http://document-parser:8000
-      KBP_EXCEL_URL: http://excel-parser:18055
-      # Phase 2b 임시: parse-svc 이미지에 node/kordoc 이 없어 auto(→kordoc) 백엔드 불가.
-      # Phase 2e 에서 node/kordoc 설치 후 auto 로 되돌린다.
-      EXCEL_PARSER_BACKEND: openpyxl
-      # Phase 2c: in-process VL OCR (pptx/이미지/스캔PDF) — document-parser HTTP 미경유
+      # Phase 2e: 파싱 in-process — excel_parser_rag(kordoc/openpyxl auto) + VL OCR.
+      # EXCEL_PARSER_BACKEND 는 이미지 기본값 auto(Dockerfile.parse-svc) — override 없음.
       MODEL_API_URL: ${MODEL_API_URL}
       MODEL_API_KEY: ${MODEL_API_KEY}
       GOTENBERG_URL: http://gotenberg:3000
       GUIDED_JSON_MODE: response_format   # OpenRouter/OpenAI 호환 (vLLM extra_body 아님)
+      KBP_VL_MAX_CONCURRENT: "3"
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
       MINIO_BUCKET: ${MINIO_BUCKET:-document-parser}
       MINIO_SECURE: "false"
     depends_on:
-      excel-parser: { condition: service_healthy }
-      document-parser: { condition: service_healthy }
+      gotenberg: { condition: service_healthy }
+      minio: { condition: service_healthy }
     ports: ["19001:19001"]
     healthcheck:
       test: ["CMD","curl","-fsS","http://localhost:19001/healthz"]
@@ -235,9 +172,7 @@ services:
       KBP_OPENAI_API_KEY: ${KBP_OPENAI_API_KEY}
       KBP_OPENAI_BASE_URL: ${KBP_OPENAI_BASE_URL}
       KBP_LLM_MODEL: ${KBP_LLM_MODEL}
-      # facade /ingest/submit reads KBP_EXCEL_URL + KBP_OCR_URL (default localhost → unreachable)
-      KBP_EXCEL_URL: http://excel-parser:18055
-      KBP_OCR_URL: http://document-parser:8000
+      # Phase 2e: facade 는 파싱 미수행 → KBP_EXCEL_URL/KBP_OCR_URL 제거(parse-svc 위임).
     depends_on:
       parse-svc: { condition: service_healthy }
       adaptive_chunk: { condition: service_healthy }
