@@ -77,10 +77,11 @@ true, `llm_provider_name:"openrouter"`, 스키마 v38.
 | `MODEL_API_URL`, `MODEL_API_KEY` | parse-svc(in-process VL OCR) | 이미지/PPTX/스캔 파싱 시 VL 호출 실패(빈 enriched_content) |
 | `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY` | minio, parse-svc | MinIO 인증/객체 저장 실패 |
 | `ADAPTIVE_CHUNK_OPENROUTER_API_KEY` 등 | adaptive_chunk | 청킹 LLM 실패 |
-| `ADAPTIVE_CHUNK_QDRANT_URL` | adaptive_chunk | 벡터 저장 실패 |
 | `ADAPTIVE_CHUNK_RERANK_API_KEY`, `ADAPTIVE_CHUNK_SCORING_EMBEDDING_API_KEY` | adaptive_chunk | rerank/scoring 실패 |
 
 `POSTGRES_PASSWORD`, `KBP_OPENAI_*`, `*_BASE_URL`, `*_MODEL` 등은 템플릿에 이미 값이 있다.
+
+> `ADAPTIVE_CHUNK_QDRANT_URL` 은 제거됨(2026-07-01): 벡터 적재는 edgequake(pgvector)가 소유하고 adaptive_chunk 는 Qdrant 를 소비하지 않는다(compose 에도 없음).
 
 > 값이 빈 상태에서 `up`하면 인프라 티어(postgres/minio/gotenberg/doc_guard)는
 > healthy가 되지만 **edgequake는 OPENROUTER_API_KEY 없으면 panic**하고, 그 뒤 앱 티어
@@ -127,7 +128,22 @@ docker compose ps
 docker compose logs -f edgequake        # 개별 서비스 로그
 ```
 
-### 4-5. 스모크 테스트
+### 4-5. MinIO 버킷 사전 생성 (페이지 이미지용, 최초 1회)
+parse-svc 는 페이지 이미지(썸네일)를 `MINIO_BUCKET`(기본 `document-parser`) 버킷에 올린다.
+버킷은 **자동 생성되지 않으므로**(인프라가 미리 만드는 정책) 최초 기동 후 한 번 만들어야 한다.
+없으면 파싱·검색은 정상이나 페이지 이미지 업로드만 `NoSuchBucket` 으로 skip 된다(비치명).
+
+```bash
+# 컨테이너 내부 root 크레덴셜로 alias 를 잡고 버킷 생성 (호스트 셸의 $MINIO_* 는 비어있을 수 있음)
+docker exec kbp-minio-1 sh -c \
+  'mc alias set local http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" \
+   && mc mb -p local/document-parser && mc ls local/'
+```
+> ⚠️ 호스트에서 `mc mb local/document-parser` 를 바로 치면 alias 크레덴셜이 비어 있어
+> `Access Denied` 가 난다. 반드시 위처럼 **컨테이너 내부의 `$MINIO_ROOT_USER/$MINIO_ROOT_PASSWORD`**
+> 로 alias 를 설정한다. `MINIO_BUCKET` 을 바꿨다면 `document-parser` 대신 그 값으로 만든다.
+
+### 4-6. 스모크 테스트
 ```bash
 docker exec kbp-edgequake-1  curl -fsS http://localhost:8081/health
 curl -fsS http://localhost:19000/healthz     # facade
@@ -179,10 +195,15 @@ docker compose down -v         # 볼륨까지 삭제 (postgres/minio 데이터 �
 
 ---
 
-## 부록: 현재 확인된 상태 (2026-07-01, 빈 .env 기준)
+## 부록: 현재 확인된 상태 (2026-07-03, 채워진 .env 기준)
 
-- **edgequake 이미지(Task 7): 정상.** 유효 키를 주면 compose postgres에 붙어 마이그레이션
-  후 `/health` healthy 확인 완료. GLIBC/pdfium/HOST-PORT/passthrough 모두 반영.
-- **인프라 티어 healthy:** postgres, minio, gotenberg, doc_guard.
-- **막힘:** `.env`가 빈 템플릿이라 edgequake(OPENROUTER_API_KEY), 그 하류 앱 티어가 못 뜬다.
-  → 3절대로 키를 채우면 해소. (Phase 2e: document-parser/excel-parser/redis 제거로 관련 degraded 항목 소멸; parse-svc 는 `MODEL_API_URL/KEY` 로 VL OCR.)
+- **전 서비스 healthy(8개):** postgres, minio, gotenberg, edgequake, doc_guard,
+  adaptive_chunk, parse-svc, facade. `docker compose ps` 로 확인.
+- **Phase 2 파서 일원화 완료·실증:** 외부 파서 서비스(document-parser :18050 /
+  excel-parser :18055 / redis) 제거됨. parse-svc(:19001) in-process 로 xlsx(→
+  `chunk_strategy=excel_rag_parser`) / docx(kordoc, `<table>` 보존) / png·pptx(VL OCR)
+  파싱 정상 확인. 이미지에 kordoc 3.8.3 + java21 + PyMuPDF(fitz) 내장 확인.
+- **MinIO 버킷:** `document-parser` 생성 완료(4-5절). 페이지 이미지 업로드 경로 정상.
+- **참고(baseline):** `.venv-kb` 전체 테스트 208 passed / 5 failed 는 기존 baseline
+  (minio bucket auto-create 정책변경 1건 + 모달 4건은 `KBP_MODAL_ENRICH=1` 필요, 기본 off).
+  Phase 2 로 인한 신규 실패 0.
