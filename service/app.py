@@ -2,14 +2,14 @@
 
 Endpoints:
   * ``POST   /ingest``         multipart file + form ``workspace_id, doc_id, content_type?``
-                               -> ``{document_id, chunk_count, status, detail}`` (BLOCKING).
-  * ``POST   /ingest/submit``  same multipart inputs as /ingest -> ``{document_id,
-                               status:"submitted"}`` (async; returns immediately for polling).
-  * ``GET    /ingest/status``  query ``workspace_id, doc_id`` (doc_id = edgequake document_id
-                               from submit) -> ``{phase, chunk_count, terminal, succeeded}``.
+                               -> ``{document_id, chunk_count, status, detail}`` (BLOCKING;
+                               parse-svc 위임 orchestration).
   * ``GET    /chunks``         query ``workspace_id, doc_id`` -> list of chunk rows
   * ``DELETE /doc``            query ``workspace_id, doc_id`` -> 204
   * ``GET    /healthz``        -> ``{status: "ok"}``
+
+파싱은 전부 parse-svc(:19001) 소유 — facade 는 얇은 orchestration 만 한다(Phase 2d:
+service/parsing.py·excel_parser_client.py·ingest.py 및 /ingest/submit,/ingest/status 제거).
 """
 from __future__ import annotations
 
@@ -18,16 +18,24 @@ import os
 
 from fastapi import FastAPI, UploadFile, File, Form, Depends, BackgroundTasks, Body
 
-from service.parsing import parse_to_markdown, _safe_basename
-from service.ingest import run_front, FrontError, _TENANT_ID
 from service.edgequake import EdgequakeClient
 from service.adaptive_chunk import AdaptiveChunkClient, MODAL_ATOMIC_MARKERS
 from service.parse_client import ParseSvcClient
-from service.excel_parser_client import ExcelRagParserClient
 from service.llm import get_text_llm
 from kb_pipeline.community import build_workspace_communities
 
 logger = logging.getLogger("kb_pipeline.service")
+
+#: shinhan_trust default tenant (구 service/ingest.py 에서 이동 — Phase 2d).
+_TENANT_ID = "00000000-0000-0000-0000-000000000002"
+
+
+def _safe_basename(name: str) -> str:
+    import os
+    import re
+    base = os.path.basename((name or "").replace("\\", "/")).replace("\x00", "")
+    base = re.sub(r"[^A-Za-z0-9._-]", "_", base) or "upload"
+    return "_" + base if base.startswith(".") else base
 
 app = FastAPI(title="kb-pipeline")
 
@@ -47,20 +55,6 @@ def get_parse_client():
     return ParseSvcClient(
         os.environ.get("KBP_PARSE_SVC_URL", "http://localhost:19001"),
         timeout=float(os.environ.get("KBP_PARSE_SVC_TIMEOUT", "1800")),
-    )
-
-
-_EXCEL_EXTS = {"xlsx", "xlsm", "xls"}
-
-
-def _is_excel(filename: str) -> bool:
-    return "." in filename and filename.rsplit(".", 1)[-1].lower() in _EXCEL_EXTS
-
-
-def get_excel_client():
-    return ExcelRagParserClient(
-        os.environ.get("KBP_EXCEL_URL", "http://localhost:18055"),
-        timeout=float(os.environ.get("KBP_EXCEL_TIMEOUT", "1800")),
     )
 
 
@@ -281,49 +275,6 @@ async def ingest(file: UploadFile = File(...), workspace_id: str = Form(...),
         # edgequake 가 배정한 워크스페이스 uuid — orchestrator 가 KB.edgequake_workspace_id 에
         # 영속해 "그래프 보기" 팝업의 X-Workspace-ID(직접 edgequake 호출)로 쓴다.
         "edgequake_workspace_id": eq_ws,
-    }
-
-
-@app.post("/ingest/submit")
-async def ingest_submit(file: UploadFile = File(...), workspace_id: str = Form(...),
-                        doc_id: str = Form(...), content_type: str | None = Form(None),
-                        eq=Depends(get_edgequake)):
-    """POLLABLE ingest — run the FRONT (parse→blockify→modal) then submit ASYNC to
-    edgequake and return immediately with the edgequake ``document_id``. The caller
-    then polls ``GET /ingest/status`` to observe the live per-phase progress.
-
-    Returns ``{document_id, status:"submitted"}`` on success, or
-    ``{status:"failed", detail}`` if the front fails (parse/blockify/modal).
-    """
-    data = await file.read()
-    eq_ws = eq.ensure_workspace(workspace_id, name=workspace_id)
-    try:
-        enriched = run_front(
-            data, file.filename,
-            text_llm=get_text_llm(), vision_llm=None,
-            ocr_url=os.environ.get("KBP_OCR_URL", "http://localhost:18050"),
-            excel_url=os.environ.get("KBP_EXCEL_URL", "http://localhost:18055"),
-            parse=parse_to_markdown,
-        )
-    except FrontError as exc:
-        return {"status": "failed", "detail": exc.detail}
-    res = eq.submit_document(enriched, workspace_id=eq_ws, tenant_id=_TENANT_ID,
-                             filename=file.filename)
-    return {"document_id": res.get("document_id"), "status": "submitted"}
-
-
-@app.get("/ingest/status")
-def ingest_status(workspace_id: str, doc_id: str, eq=Depends(get_edgequake)):
-    """Live phase snapshot for a submitted document. ``doc_id`` is the edgequake
-    document_id returned by ``/ingest/submit``. Returns
-    ``{phase, chunk_count, terminal, succeeded}``."""
-    eq_ws = eq.ensure_workspace(workspace_id, name=workspace_id)
-    ph = eq.document_phase(eq_ws, doc_id)
-    return {
-        "phase": ph.get("phase"),
-        "chunk_count": ph.get("chunk_count"),
-        "terminal": ph.get("terminal"),
-        "succeeded": ph.get("succeeded"),
     }
 
 

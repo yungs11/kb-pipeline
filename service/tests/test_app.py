@@ -80,51 +80,6 @@ def test_ingest_and_chunks(monkeypatch):
     app.dependency_overrides.clear()
 
 
-def test_ingest_submit_returns_document_id(monkeypatch):
-    """POST /ingest/submit runs the front then async-submits, returning immediately."""
-    monkeypatch.setattr("service.app.parse_to_markdown", lambda b, f, **k: "## H\n<table><tr><td>x</td></tr></table>")
-    monkeypatch.setattr("service.app.get_text_llm", lambda: (lambda p, payload: "요약"))
-    eq = FakeEq()
-    app.dependency_overrides[get_edgequake] = lambda: eq
-    c = TestClient(app)
-    r = c.post("/ingest/submit", data={"workspace_id": "ws", "doc_id": "dc"},
-               files={"file": ("d.pdf", b"b", "application/pdf")})
-    assert r.status_code == 200
-    assert r.json() == {"document_id": "d1", "status": "submitted"}
-    # the enriched content (modal span) was submitted async.
-    assert "〈MODAL" in eq.submitted
-    app.dependency_overrides.clear()
-
-
-def test_ingest_submit_front_failure_returns_failed(monkeypatch):
-    """If the front (parse) fails, /ingest/submit returns {status:failed, detail}."""
-    from service.parsing import ParseError
-
-    def boom(*a, **k):
-        raise ParseError("parser down")
-    monkeypatch.setattr("service.app.parse_to_markdown", boom)
-    monkeypatch.setattr("service.app.get_text_llm", lambda: (lambda p, payload: "요약"))
-    app.dependency_overrides[get_edgequake] = lambda: FakeEq()
-    c = TestClient(app)
-    r = c.post("/ingest/submit", data={"workspace_id": "ws", "doc_id": "dc"},
-               files={"file": ("d.pdf", b"b", "application/pdf")})
-    assert r.status_code == 200
-    assert r.json()["status"] == "failed"
-    assert r.json()["detail"] == "parse_failed"
-    app.dependency_overrides.clear()
-
-
-def test_ingest_status_returns_live_phase(monkeypatch):
-    """GET /ingest/status maps the edgequake document phase for the UI to tick."""
-    app.dependency_overrides[get_edgequake] = lambda: FakeEq()
-    c = TestClient(app)
-    r = c.get("/ingest/status", params={"workspace_id": "ws", "doc_id": "d1"})
-    assert r.status_code == 200
-    assert r.json() == {"phase": "chunking", "chunk_count": 0,
-                        "terminal": False, "succeeded": False}
-    app.dependency_overrides.clear()
-
-
 def test_communities_build_returns_202_and_schedules_job(monkeypatch):
     import threading
     called = threading.Event()

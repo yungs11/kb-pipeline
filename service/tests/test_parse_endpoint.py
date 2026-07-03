@@ -146,12 +146,6 @@ def test_parse_client_forwards_docs_id_form_field():
     assert out["page_spans"] == [{"page_number": 1, "char_start": 0, "char_end": 10}]
 
 
-def test_is_excel():
-    from service.app import _is_excel
-    assert _is_excel("a.xlsx") and _is_excel("A.XLSM") and _is_excel("b.xls")
-    assert not _is_excel("a.pdf") and not _is_excel("noext")
-
-
 def test_parse_excel_goes_to_parse_svc_with_chunk_strategy(monkeypatch):
     """Phase 2a: excel 도 parse-svc 위임 — chunk_needed=False passthrough 에
     facade 가 소비자 호환 필드 ``chunk_strategy`` 를 셋업한다."""

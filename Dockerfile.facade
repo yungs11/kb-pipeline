@@ -1,10 +1,9 @@
 # 8.kb-pipeline/Dockerfile.facade
 FROM python:3.12-slim AS base
 WORKDIR /app
-# JRE21: service/parsing.py → opendataloader_pdf → java subprocess (facade /ingest/submit). python:3.12-slim (Debian trixie) ships openjdk-21, not 17.
+# Phase 2d: facade 는 파싱을 안 한다(parse-svc 소유) → JRE 불필요. curl(healthcheck)+빌드도구만.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      curl build-essential openjdk-21-jre-headless && rm -rf /var/lib/apt/lists/*
-ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+      curl build-essential && rm -rf /var/lib/apt/lists/*
 COPY pyproject.toml setup.py* requirements*.txt ./
 # service/ 와 kb_pipeline/ 은 COPY 로 배치(pyproject.toml 은 kb_pipeline* 만 등록함).
 COPY kb_pipeline ./kb_pipeline
