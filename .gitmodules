@@ -1,3 +1,3 @@
 [submodule "edgequake"]
 	path = edgequake
-	url = https://github.com/yungs11/edgequake.git
+	url = http://st-devtool.duckdns.org:8084/sta-ontology/edgequake.git
