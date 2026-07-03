@@ -15,6 +15,20 @@ def test_chunks_normalized_and_flag_false(monkeypatch):
     assert "titles_context" in res.chunks[0] and "pages" in res.chunks[0]
 
 
+def test_inprocess_openpyxl_smoke(monkeypatch):
+    """실제 openpyxl 백엔드로 초소형 xlsx 를 파싱(파일시스템/kordoc 무관 백엔드)."""
+    import io
+    import openpyxl
+    monkeypatch.setenv("EXCEL_PARSER_BACKEND", "openpyxl")
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws["A1"], ws["B1"], ws["A2"], ws["B2"] = "이름", "값", "가", 1
+    buf = io.BytesIO()
+    wb.save(buf)
+    res = excel_parser.parse(buf.getvalue(), "t.xlsx")
+    assert res.chunk_needed is False and res.chunks
+
+
 def test_empty_chunks_raise(monkeypatch):
     monkeypatch.setattr(excel_parser, "_fetch_rag_chunks", lambda fb, fn, excel_url: [])
     with pytest.raises(ParserError):

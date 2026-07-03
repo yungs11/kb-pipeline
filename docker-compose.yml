@@ -201,6 +201,9 @@ services:
       KBP_LLM_MODEL: ${KBP_LLM_MODEL}
       KBP_OCR_URL: http://document-parser:8000
       KBP_EXCEL_URL: http://excel-parser:18055
+      # Phase 2b 임시: parse-svc 이미지에 node/kordoc 이 없어 auto(→kordoc) 백엔드 불가.
+      # Phase 2e 에서 node/kordoc 설치 후 auto 로 되돌린다.
+      EXCEL_PARSER_BACKEND: openpyxl
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}

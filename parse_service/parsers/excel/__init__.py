@@ -1,19 +1,17 @@
 """Excel 도메인 파서 — parse+chunk 결합(자체청킹) → chunk_needed=False.
 
-Phase 2a: excel-rag-parser(:18055) HTTP 위임(잡 제출→폴링) — facade 의
-service/excel_parser_client.py 로직을 이동. 2b 에서 excel_parser_rag in-process 로 대체.
+Phase 2b: excel_parser_rag 를 in-process 로 직접 호출(HTTP 제거).
+env: EXCEL_PARSER_BACKEND(기본 auto), KORDOC_BIN(기본 미설정), KORDOC_MD_OUT.
 """
 from __future__ import annotations
 
-import time
-
-import httpx
+import os
+import tempfile
+from pathlib import Path
 
 from parse_service.parsers import RouteResult, ParserError
 
 EXCEL_EXTS = {"xlsx", "xlsm", "xls"}
-_TERMINAL = {"succeeded", "failed", "cancelled"}
-_XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 def normalize_rag_chunk(rc: dict, index: int) -> dict | None:
@@ -39,32 +37,35 @@ def normalize_chunks(rag_chunks: list[dict]) -> list[dict]:
     return out
 
 
-def _fetch_rag_chunks(file_bytes: bytes, filename: str, excel_url: str) -> list[dict]:
-    """POST /parse/jobs/file → poll — facade ExcelRagParserClient.parse_chunks 이동."""
-    base = excel_url.rstrip("/")
-    with httpx.Client(timeout=600.0) as http:
-        r = http.post(f"{base}/parse/jobs/file",
-                      files={"file": (filename, file_bytes, _XLSX_MIME)},
-                      data={"doc_name": filename})
-        r.raise_for_status()
-        job_id = (r.json() or {}).get("job_id")
-        if not job_id:
-            raise ParserError("excel-rag-parser returned no job_id")
-        deadline = time.monotonic() + 1800.0
-        while time.monotonic() < deadline:
-            t = http.get(f"{base}/parse/jobs/{job_id}")
-            t.raise_for_status()
-            body = t.json() or {}
-            status = (body.get("status") or "").lower()
-            if status in _TERMINAL:
-                if status != "succeeded":
-                    raise ParserError(f"excel job {status}: {body.get('error')}")
-                return (body.get("result") or {}).get("chunks") or []
-            time.sleep(3.0)
-        raise ParserError("excel job poll timeout")
+def _fetch_rag_chunks(file_bytes: bytes, filename: str, excel_url: str | None = None) -> list[dict]:
+    """in-process: excel_parser_rag backend 직접 호출 (HTTP 제거).
+
+    원본 excel-parser service/main.py:_run_parse 의 동기 파싱 본문 이식
+    (임시파일 suffix, ParserConfig, get_backend(...).parse). backends 계약:
+    get_backend(name).parse(input_path, config) -> (chunks: list[dict], stats: dict).
+    excel_url 은 하위호환용 무시 파라미터(2e 에서 호출부와 함께 제거).
+    """
+    from parse_service.parsers.excel.excel_parser_rag.backends import get_backend
+    from parse_service.parsers.excel.excel_parser_rag.config import ParserConfig
+
+    suffix = Path(filename).suffix.lower() or ".xlsx"
+    cfg_kwargs: dict = {"backend": os.environ.get("EXCEL_PARSER_BACKEND", "auto")}
+    if os.environ.get("KORDOC_BIN"):
+        cfg_kwargs["kordoc_bin"] = os.environ["KORDOC_BIN"]
+    if os.environ.get("KORDOC_MD_OUT"):
+        cfg_kwargs["kordoc_md_out"] = os.environ["KORDOC_MD_OUT"]
+    config = ParserConfig(**cfg_kwargs)
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False, prefix="excel_parser_") as tmp:
+        tmp.write(file_bytes)
+        tmp_path = Path(tmp.name)
+    try:
+        chunks, _stats = get_backend(config.backend).parse(tmp_path, config)
+        return [c if isinstance(c, dict) else c.__dict__ for c in (chunks or [])]
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
-def parse(file_bytes: bytes, filename: str, *, excel_url: str) -> RouteResult:
+def parse(file_bytes: bytes, filename: str, *, excel_url: str | None = None) -> RouteResult:
     try:
         rag_chunks = _fetch_rag_chunks(file_bytes, filename, excel_url)
     except ParserError:
