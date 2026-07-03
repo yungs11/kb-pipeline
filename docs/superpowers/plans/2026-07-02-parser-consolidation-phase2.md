@@ -1615,7 +1615,7 @@ git commit -m "refactor(facade)!: remove parsing logic + /ingest/submit,/ingest/
 **Files:**
 - Modify: `Dockerfile.parse-svc`
 
-- [ ] **Step 1: Dockerfile 갱신**
+- [x] **Step 1: Dockerfile 갱신**
 
 기존 (python3.12-slim + openjdk-21-jre) 에 추가:
 ```dockerfile
@@ -1627,12 +1627,12 @@ RUN mkdir -p /tmp/kordoc_md_out
 ```
 (PyMuPDF/Pillow 는 requirements.txt 경유 — 별도 apt 불필요. markitdown 은 이미 requirements 에서 제거됨.)
 
-- [ ] **Step 2: 빌드 확인**
+- [x] **Step 2: 빌드 확인**
 
 Run: `docker compose build parse-svc 2>&1 | tail -5`
 Expected: Built. 컨테이너에서 `docker compose run --rm parse-svc sh -c "kordoc --version && java -version && python -c 'import fitz'"` 성공.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add Dockerfile.parse-svc
@@ -1645,7 +1645,7 @@ git commit -m "build(parse-svc): node/kordoc runtime for docx+excel backends (Ph
 - Modify: `docker-compose.yml`
 - Modify: `.env.example` (불필요 키 정리)
 
-- [ ] **Step 1: compose 수정**
+- [x] **Step 1: compose 수정**
 
 1. `excel-parser`, `document-parser`, `redis` 서비스 블록 삭제. `volumes:` 의 `redis_data` 삭제.
 2. `parse-svc` env: `KBP_OCR_URL`/`KBP_EXCEL_URL` 삭제, 추가 —
@@ -1663,14 +1663,14 @@ git commit -m "build(parse-svc): node/kordoc runtime for docx+excel backends (Ph
    유효성 확인, 재기동은 `docker compose down && docker compose up -d --wait` (부분
    restart 금지).
 
-- [ ] **Step 2: 재기동 + 전 서비스 healthy**
+- [x] **Step 2: 재기동 + 전 서비스 healthy**
 
 ```bash
 docker compose down && docker compose build && docker compose up -d --wait
 docker compose ps   # excel-parser/document-parser/redis 부재 + 나머지 전부 healthy
 ```
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add docker-compose.yml .env.example
@@ -1679,7 +1679,7 @@ git commit -m "build(compose): remove excel-parser/document-parser/redis — par
 
 ### Task 17: E2E 회귀 (전 확장자) + 문서 반영
 
-- [ ] **Step 1: E2E 스모크 — 확장자별 /ingest → /search**
+- [~] **Step 1: E2E 스모크 — 확장자별 /ingest → /search** (부분: 확장자별 단독 indexed 검증됨 — xlsx=excel_rag_parser·webp=recursive_1100·pdf=9청크·docx=kordoc `<table>`. 다형식 동시적재+검색 완주는 OpenRouter LLM 처리량 지연으로 미완 → 크레딧 여유 시 재확인)
 
 테스트 파일: `/Users/xxx/workspace/excel-parser-markitdown/test_doc/` 의
 `3-3. 휴가규정(...).pdf`(표+본문), `AI활용을 위한_문서 표준 가이드_....docx`(kordoc 병합표),
@@ -1696,7 +1696,7 @@ curl -sS -X POST http://localhost:19000/search -H 'Content-Type: application/jso
 Expected: 5건 모두 `status: indexed`(xlsx 는 chunking_selection.method_selected="excel_rag_parser"), 검색 응답에 휴가규정 내용.
 회귀 포인트: PDF 별표1 `<table>`+`rowspan` 보존(적재 청크에 포함), docx 병합표 `<table>` 존재.
 
-- [ ] **Step 2: 문서 반영**
+- [x] **Step 2: 문서 반영**
 
 - `_workspace/01-architecture.md`: §3 파서 라우팅 표를 새 라우팅(pdf=ODL/xlsx=excel_rag/docx=kordoc/pptx·이미지=OCR/폴백=kordoc, markitdown 제거)으로 갱신, facade §의 excel lane 서술을 chunk_needed flag 로 갱신.
 - `_workspace/02-changes.md`: Phase 2 파서 일원화 항목 추가(결정·실측 근거 링크).
@@ -1704,7 +1704,7 @@ Expected: 5건 모두 `status: indexed`(xlsx 는 chunking_selection.method_selec
 - `docs/kb-pipeline-process-definition.md`: §4.1 파싱 라우팅/§계약(`chunk_needed`)/`/ingest/submit` 제거 반영.
 - `docs/kbp-docker-startup.md`: 서비스 표에서 excel-parser/document-parser/redis 제거.
 
-- [ ] **Step 3: 최종 Commit**
+- [x] **Step 3: 최종 Commit**
 
 ```bash
 git add _workspace docs

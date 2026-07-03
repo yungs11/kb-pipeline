@@ -18,7 +18,7 @@
 본 정의서는 kb-pipeline 문서 적재 파이프라인의 오케스트레이션 원칙과 단계별 책임을 확정한다. 하나의 업로드 문서를 Parse → Blockify → Modal Enrich → Chunking → Insert → Community → Search 의 단계로 흘려 단일 Postgres(pgvector+AGE)에 적재·검색 가능 상태로 만드는 과정을 기술한다. 단계 경계·소유권·데이터 계약을 명문화하여 이중처리(이중청킹/이중그래프생성)를 제거하고, 단계별 추적·격리·정합성을 보장하는 것이 목적이다.
 
 ### 1.2 적용 범위
-- facade(:19000)가 외부 소비자(knowledge_base 백엔드)에게 노출하는 capability(`/parse`, `/chunk`, `/insert`, `/search`, `/ingest`, `/ingest/submit`, `/communities/build`, 상태 폴링)와 그 뒤의 다운스트림 서비스 오케스트레이션 전 구간.
+- facade(:19000)가 외부 소비자(knowledge_base 백엔드)에게 노출하는 capability(`/parse`, `/chunk`, `/insert`(+`/insert/status`), `/search`, `/ingest`, `/communities/build`)와 그 뒤의 다운스트림 서비스 오케스트레이션 전 구간. (Phase 2d 로 facade 파싱 로직 및 `/ingest/submit`·`/ingest/status` 제거 — 파싱은 전부 parse-svc 소유.)
 - 비범위: 청킹 4방법 경쟁의 완화/최적화(사용자 결정으로 현상 유지), edgequake Rust 엔진 내부 알고리즘 변경, 벡터/그래프 store 분리(단일 Postgres 원칙 위배).
 
 ### 1.3 기본 원칙
@@ -36,13 +36,14 @@
 | 구성요소 | 포트 | 한 줄 정의 |
 |----------|------|-----------|
 | facade (kb-pipeline) | 19000 | 오케스트레이터. parse→chunk→insert→search capability 를 노출하고 청킹·모달원자성을 소유하며 다운스트림을 숨긴다(`service/app.py`). |
-| parse-svc | 19001 | 비-Excel 문서를 "markdown + inline HTML"로 파싱하고 표/그림을 modal LLM 으로 서술해 enriched_content + 모달 마커를 반환한다. |
+| parse-svc | 19001 | **모든 문서 파싱을 in-process 로 수행**(PDF=OpenDataLoader / Excel=vendored excel_parser_rag / DOCX·폴백=kordoc / PPTX·이미지·스캔=in-process VL OCR)하고 표/그림을 modal LLM 으로 서술해 enriched_content + 모달 마커를 반환한다. 이미지에 java21 + node/kordoc + PyMuPDF 내장(Phase 2). |
 | adaptive_chunk | 18060 | 청킹 허브. atomic_markers 를 받아 모달 스팬을 원자 보존하고, 텍스트 갭만 4방법 경쟁으로 청킹해 선택 근거(method_selected/scores)를 반환한다. |
 | edgequake | 8081 | 베이스 엔진. passthrough 로 facade 청크를 받아 엔티티/관계 추출 → 임베딩 → AGE 그래프 → 단일 Postgres 적재(RLS)와 검색을 수행한다. |
 | postgres (eq-pg-kbp) | 5433 | 단일 저장소. pgvector + Apache AGE 를 한 DB에. docker, POSTGRES_PASSWORD=edgequake_secret. |
 | 임베딩(bge-m3) | — | OpenAI-호환 임베딩 엔드포인트. 현행 운영 배선은 원격 litellm(`https://litellm.ax-demo.com/v1`, model `bge-m3`, 1024d). 환경별 가변(로컬 OpenAI-호환 서버 `:7997` 도 대체 구성으로 가능).¹ |
-| ocr | 18050 | 이미지/스캔 PDF 의 VLM/OCR 경로. content + elements[] 구조배열을 제공한다. |
-| excel-parser | 18055 | Excel(xlsx/xlsm/xls) 전용. parse+chunk 를 LLM 없이 수행해 native chunks(chunk_strategy=excel_rag_parser)를 반환한다. |
+| gotenberg | 3000 | office(pptx/docx)→PDF 변환. parse-svc 의 VL OCR 전처리(pptx→PDF→페이지 이미지)에만 소비된다. |
+| ~~ocr (18050)~~ | — | **Phase 2c/2e 제거**. 이미지/스캔 PDF VLM/OCR 은 parse-svc `parsers/ocr` 로 in-process 흡수(구 document-parser :18050 HTTP 미경유). |
+| ~~excel-parser (18055)~~ | — | **Phase 2b/2e 제거**. Excel parse+chunk 는 parse-svc 가 vendored excel_parser_rag 로 in-process 수행(native chunks, chunk_strategy=excel_rag_parser). |
 | kb-backend (knowledge_base) | 8088 | 소비자/집계자. facade(:19000)를 호출하고 IngestionJob stage 를 추적·영속한다(kb_pipeline_base_url=http://localhost:19000). |
 
 > ¹ 현행 기동 런처(`service/scripts/start_dedicated_edgequake.sh`)는 임베딩을 원격 litellm 으로 라우팅한다(`EDGEQUAKE_EMBEDDING_PROVIDER=openai`, `EDGEQUAKE_EMBEDDING_BASE_URL=https://litellm.ax-demo.com/v1`, `EDGEQUAKE_EMBEDDING_MODEL=bge-m3`, `EDGEQUAKE_EMBEDDING_DIMENSION=1024`). 로컬 `:7997` 은 과거 스모크 기록(`service/tests/test_e2e_smoke.md`)에만 등장하는 대체/과거 구성이며 운영 배선에는 없다. 채팅/추출 LLM(OpenRouter qwen)과 임베딩 BASE_URL 은 분리되어 있다. (SoT.md §3.5/§5.4 의 `:7997` 표기는 현행 런처보다 오래된 드리프트로, 함께 갱신 권고.)
@@ -58,7 +59,7 @@ Parse → Blockify → Modal Enrich → Chunking → Insert → Community → Se
 ```
 
 ### 3.2 흐름 설명
-- **Parse / Blockify / Modal Enrich** 는 parse-svc(:19001)가 한 번의 `POST /parse` 안에서 연속 수행하는 FRONT 단계다. 비-Excel 문서를 "markdown + inline HTML"로 파싱하고(Parse), 구조 단위로 블록화한 뒤(Blockify), 표/그림/수식을 검색 가능한 의미로 보강하고 모달 원자 마커로 봉인(Modal Enrich)하여 enriched_content + 모달 스팬 + 페이지 스팬을 산출한다. Excel(xlsx/xlsm/xls)은 parse-svc 가 아니라 excel-parser(:18055)가 LLM 없이 parse+chunk 를 수행한다.
+- **Parse / Blockify / Modal Enrich** 는 parse-svc(:19001)가 한 번의 `POST /parse` 안에서 연속 수행하는 FRONT 단계다. 문서를 "markdown + inline HTML"로 파싱하고(Parse), 구조 단위로 블록화한 뒤(Blockify), 표/그림/수식을 검색 가능한 의미로 보강하고 모달 원자 마커로 봉인(Modal Enrich)하여 enriched_content + 모달 스팬 + 페이지 스팬을 산출한다. Excel(xlsx/xlsm/xls)은 parse-svc 가 vendored excel_parser_rag 로 in-process parse+chunk 를 LLM 없이 수행해 `chunk_needed=False` native chunks 를 반환한다(Blockify/Modal 스킵).
 - **Chunking** 은 facade `/chunk`(:19000)가 소유한다. facade 가 청킹 허브(:18060)에 모달 마커를 넘겨 모달 스팬을 단일 원자 청크로 강제하고, 텍스트 갭만 4방법 경쟁으로 청킹한 뒤 선택 근거를 노출한다.
 - **Insert** 는 facade 가 청크 텍스트를 단일 passthrough 문서로 묶어 edgequake(:8081)에 제출하면, edgequake 가 엔티티/관계 추출 → 임베딩 → 그래프 적재를 수행해 단일 Postgres 에 upsert 한다.
 - **Community** 는 검색과 분리된 오프라인 배치다. AGE 그래프를 Louvain 으로 커뮤니티로 나누고 커뮤니티별 GraphRAG 리포트를 생성·저장한다. 온디맨드 트리거(`POST /communities/build`)와 검색 시 build-if-missing 두 경로로 기동된다.
@@ -67,7 +68,7 @@ Parse → Blockify → Modal Enrich → Chunking → Insert → Community → Se
 ### 3.3 오케스트레이션 경로 / 반려·회귀 규칙
 - **표준 단계별 경로**: 소비자(kb-backend)가 facade `/parse` → `/chunk` → `/insert`(+poll `/insert/status`)를 직접 순차 호출한다. 이 단계별 경로가 표준 데이터 경로다(one-shot `/ingest` 아님).
 - **블로킹 변형 `/ingest`**: parse→chunk→insert 를 한 호출로 순차 구동해 `{document_id, chunk_count, status, chunking_selection, edgequake_workspace_id}` 를 반환한다.
-- **비동기 변형 `/ingest/submit`**: FRONT(parse→blockify→modal_enrich)를 동기 수행한 뒤 edgequake 에 async 제출하고 즉시 `{document_id, status:"submitted"}` 를 반환한다. 소비자는 `GET /ingest/status?workspace_id&doc_id` 를 폴링한다.
+- **~~비동기 변형 `/ingest/submit`~~ 제거(Phase 2d)**: facade 파싱 로직 제거와 함께 `/ingest/submit`·`/ingest/status` 를 삭제했다(파싱은 전부 parse-svc 소유). 진행 폴링이 필요하면 `/insert`(+`/insert/status`) 단계별 경로를 사용한다.
 - **반려/회귀**: 파싱 실패는 parse-svc 가 `{"status":"failed","detail":...}` 로 반환하며, 단계 회귀(재시도)는 호출측(facade/orchestrator)이 결정한다. render/upload 실패와 modal LLM 실패는 best-effort/비치명으로 본문은 살린다(아래 4·5장).
 
 ---
@@ -78,21 +79,23 @@ Parse → Blockify → Modal Enrich → Chunking → Insert → Community → Se
 
 | 항목 | 내용 |
 |------|------|
-| 수행 주체 | parse-svc(`:19001`)가 업로드된 문서를 내려받아 외부 파서로 위임해 파싱한다. |
+| 수행 주체 | parse-svc(`:19001`)가 업로드된 문서를 내려받아 **in-process 도메인 파서**로 파싱한다(외부 파서 서비스 미경유). |
 | 입력 | 업로드 파일과 파일명(선택적으로 문서 ID·콘텐츠 타입). 문서 ID 가 없으면 파일 내용 해시로 자동 부여하고, 파일명은 안전한 형태로 정규화한다(경로 탈출 차단). |
-| 처리 | 문서 종류(확장자)에 따라 적절한 파서로 보낸다. 일반 PDF 는 구조 파서로 페이지별로 파싱하고, 글자가 거의 없는 스캔 페이지는 그 페이지만 이미지로 렌더해 OCR 로 보충한다(혼합 PDF 대응). 이미지·PPTX·DOCX·스캔 문서는 OCR·VLM 경로로 보낸다. 파싱 결과의 비표시 특수문자는 정리한다. |
-| 산출물 | 페이지 경계가 보존된 페이지별 블록 묶음(페이지 번호 1-based 부여). |
+| 처리 | 문서 종류(확장자)에 따라 `parse_service/router.py` 가 도메인 파서를 고른다. 일반 PDF 는 OpenDataLoader 로 페이지별 파싱하고, 글자가 거의 없는 스캔 페이지는 그 페이지만 이미지로 렌더해 in-process VL OCR 로 보충한다(혼합 PDF 대응). 이미지·PPTX·스캔 문서는 in-process VL OCR, DOCX·미지 확장자는 kordoc CLI 로 보낸다. 파싱 결과의 비표시 특수문자는 정리한다. |
+| 산출물 | 페이지 경계가 보존된 페이지별 블록 묶음(페이지 번호 1-based 부여). Excel 은 `chunk_needed=False` native chunks. |
 
-> 코드 레퍼런스(§5.7): `POST /parse` → `run_parse()` → `parse_to_pages()`. 파서 위임 대상은 OpenDataLoader / OCR·VLM(`:18050`) / markitdown. 문서 ID 폴백 = `sha256(file_bytes).hexdigest()[:16]`(orchestrator 동일 식 → MinIO 키 일치), 파일명 정규화 = `_safe_basename`(`[A-Za-z0-9._-]` 외 `_`). 산출 타입 `list[PageDoc]`, `PageDoc = {"page_number": int(1-based), "blocks": list[dict]}`, 각 블록 `page_idx` 1-based. 비표시 문자 제거 = PUA(U+E000–U+F8FF, `_PUA_RE`).
+> 코드 레퍼런스(§5.7): `POST /parse` → `run_parse()` → `parse_service/router.py:route()` → 도메인 파서(`parsers/{pdf,excel,docx,ocr}`). (구 `parse_to_pages()`/`parse_to_markdown()`·markitdown 은 Phase 2d 삭제.) 문서 ID 폴백 = `sha256(file_bytes).hexdigest()[:16]`(orchestrator 동일 식 → MinIO 키 일치), 파일명 정규화 = `parse_service/tools.safe_basename`(`[A-Za-z0-9._-]` 외 `_`, 구 `parsing._safe_basename` 이동). 산출 타입 `list[PageDoc]`, `PageDoc = {"page_number": int(1-based), "blocks": list[dict]}`, 각 블록 `page_idx` 1-based. 비표시 문자 제거 = PUA(U+E000–U+F8FF, `_PUA_RE`).
 
-#### 4.1.1 입력 포맷별 파서 라우팅 (`PARSER_ROUTING`, 기본 `markitdown`)
-- **PDF** → `structural`: OpenDataLoader(`opendataloader_pdf.convert`, `markdown_with_html=True`, `markdown_page_separator`). 문서당 .md 1개, 페이지 앞에 sentinel `<<<ODL_PAGE_BREAK>>>`(`_PAGE_SEP`) 삽입 → SEP로 split해 페이지 복원. JVM 호출 1회.
-- **PPTX / DOCX** → `structural`: OCR·VLM(`:18050`)로 라우팅. (markitdown은 표의 colspan/rowspan을 parse 단계에서 평탄화하므로 병합셀이 중요한 office 포맷은 structural로 보낸다.)
-- **XLSX(Excel)** → `markitdown`: `MarkItDown().convert_stream`. 페이지 개념 없음. (Excel 전용 백엔드 excel-parser `:18055`는 `KBP_EXCEL_URL`로 주입 가능.)
-- **단일 이미지(`_IMAGE_EXTS`={png,jpg,jpeg,gif,bmp,tif,tiff,webp})** → 페이지 보존 경로에서 OCR·VLM(`:18050`)로 강제 라우팅.
-- **스캔 PDF / 스캔 페이지** → 해당 페이지를 렌더해 OCR(`:18050`)로 보충(best-effort, 비치명).
+#### 4.1.1 입력 포맷별 파서 라우팅 (`parse_service/router.py`, 폴백=kordoc)
+라우팅 소유는 `parse_service/router.py`(구 `kb_pipeline.blockify.PARSER_ROUTING`/`recommended_parser` 는 Phase 2d 삭제). markitdown 은 코드·requirements 에서 완전 제거(재유입 가드 `parse_service/tests/test_no_markitdown.py`).
+- **PDF** → `pdf`: OpenDataLoader(`opendataloader_pdf.convert`, `markdown_with_html=True`, `markdown_page_separator`). 문서당 .md 1개, 페이지 앞에 sentinel `<<<ODL_PAGE_BREAK>>>`(`_PAGE_SEP`) 삽입 → SEP로 split해 페이지 복원. JVM 호출 1회.
+- **XLSX/XLSM/XLS(Excel)** → `excel`: vendored **excel_parser_rag**(in-process). `EXCEL_PARSER_BACKEND=auto`(전결 문서 → openpyxl, 그 외 → kordoc .md). LLM 없이 parse+chunk 결합 → `chunk_needed=False`, `chunk_strategy=excel_rag_parser`. 표 `<table>` HTML 보존.
+- **DOCX** → `docx`: **kordoc** CLI(`tools/kordoc.py`, `KORDOC_BIN`, `kordoc <src> --output out.md --format markdown`). 병합표 `<table>` 보존. md → `hybrid_to_blocks(page_idx=1)`(페이지 개념 근사).
+- **PPTX / 단일 이미지(`IMAGE_EXTS`={png,jpg,jpeg,gif,bmp,tif,tiff,webp})** → `ocr`: **in-process VL OCR**(`parsers/ocr`). 이미지→base64 / pptx→gotenberg(:3000)→PDF→페이지 base64 → 페이지별 VL 호출.
+- **그 외(폴백, 예: hwpx)** → `fallback`: **kordoc** CLI(구 markitdown 폴백 제거).
+- **스캔 PDF / 스캔 페이지** → 해당 페이지를 렌더해 in-process VL OCR 로 보충(best-effort, 비치명).
 
-OCR·VLM 계약: `POST {ocr_url}/api/v1/ocr`, multipart `file` + form `strategy=hybrid`, timeout 600s. 응답에서 `content.{markdown|text}` 우선, 없으면 `elements[*].content` 로 재구성. 페이지 보존 경로는 raw `elements[]` 를 `elements_to_blocks` 로 넘긴다.
+VL OCR 계약(in-process, `parsers/ocr/vl_api.py`): OpenAI-호환 chat/completions(`MODEL_API_URL`/`MODEL_API_KEY`/`MODEL_NAME`), guided-json(`GUIDED_JSON_MODE=response_format` OpenRouter 호환), 응답 스키마 `elements[].{category(table|figure), content{html,markdown,text}}`. 동시성 `KBP_VL_MAX_CONCURRENT`(기본 3), 페이지 실패 비치명. 순수 텍스트 figure 는 text 블록으로 재분류(markdown 유실 방지). 페이지 보존 경로는 `elements[]` 를 `elements_to_blocks` 로 넘긴다.
 
 ### 4.2 Blockify(블록화)
 
@@ -234,11 +237,10 @@ OCR·VLM 계약: `POST {ocr_url}/api/v1/ocr`, multipart `file` + form `strategy=
 - **W4 RLS FORCE 미적용(superuser 우회)**: RLS 정책은 documents/entities/relationships/chunks/graph 를 모두 덮지만, 앱이 Postgres superuser 롤(`edgequake`, rolbypassrls=t)로 접속해 FORCE RLS 도 무조건 우회된다(롤백 tx 로 실증). 앱레벨 격리는 검증되었으나 DB레벨 RLS 는 현재 무력. 활성화는 (비-superuser 롤+GRANT)+FORCE RLS+요청당 tx GUC+NULL-tenant 폴백 정리의 all-or-nothing 하드닝 과제.
 
 ### 6.2 파서 / 입력 포맷
-- **W6 파서 라우팅 colspan 손실**: markitdown 은 pptx/DOCX 의 병합(colspan/rowspan)을 파싱 시점에 소실한다(blockify 복구 불가). 병합이 중요한 pptx/DOCX 는 kordoc/MinerU 로 라우팅 권고. HWP 계열은 kordoc 신뢰(수용된 리스크).
-- OCR·VLM(`:18050`) `strategy=hybrid` 외 전략, timeout 600s 적정성.
-- markitdown 경로(xlsx)의 페이지 개념 부재 → 단일 페이지(page=1) 강등 정책 확정.
+- **W6 파서 라우팅 colspan 손실 — Phase 2 로 해소**: markitdown 이 pptx/DOCX 의 병합(colspan/rowspan)을 파싱 시점에 소실하던 문제(측정: 05 PPTX colspan 68/rowspan 43 vs markitdown 0/0)는, markitdown 을 완전 제거하고 DOCX=kordoc·PPTX=in-process VL OCR 로 라우팅해 해소했다(병합표 `<table>` 보존). 이 W6 측정은 라우팅 근거의 역사 기록으로 유지한다. HWP 계열(폴백)은 kordoc 신뢰(수용된 리스크).
+- **Excel 백엔드 자동 기동·라우팅 정식화 — Phase 2b/2e 로 완료**: 구 excel-parser(:18055) 서비스 대신 vendored excel_parser_rag 를 parse-svc in-process(`EXCEL_PARSER_BACKEND=auto`)로 흡수. 별도 기동/HTTP 배선 불필요.
+- **VL OCR 은 in-process(Phase 2c)**: 구 OCR·VLM(:18050) `/api/v1/ocr` HTTP 제거. guided-json 전략(`GUIDED_JSON_MODE`)·VL timeout(`VL_MODEL_TIMEOUT` 기본 600s)·동시성(`KBP_VL_MAX_CONCURRENT`) 적정성은 잔여 튜닝 항목.
 - `_DIGITAL_MIN_CHARS=1`(스캔/디지털 판정 임계) 보수값 적정성.
-- Excel 백엔드(excel-parser, `:18055`) 자동 기동·라우팅 정식화(현재 markitdown 사용).
 
 ### 6.3 Modal Enrich
 - 그림(image) 모달의 vision LLM 연결: 현재 `/parse`는 `vision_llm=None`이라 그림은 보강되지 않고 원본 통과 — vision 백엔드 확정 필요.

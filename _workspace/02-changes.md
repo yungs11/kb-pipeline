@@ -164,3 +164,23 @@ knowledge_base plan `23_plan_chunk_method_selection.md` §B 반영. adaptive_chu
 - **컴포넌트**: excel-parser `/parse` `stats.gate_summary` 산출(신규 `excel_parser_rag/gate/excel_gate.py`) → doc_guard `POST /v1/check-excel`(CheckReport 재사용, gate_error 합성) → knowledge_base `docguard.check_excel` + `ExcelParseResult.gate_summary`. 프론트 JobList 단계 `파싱→게이트검증→청킹→적재`, UploadPanel 문서가드규칙 패널 제거.
 - **구현 브랜치(미머지)**: 7.excel-parser `feat/excel-gate`, doc_guard `feat/excel-gate`(이 세션에 git init), knowledge_base `feat/kb-pipeline-provider`.
 - **비범위/후속**: 위임전결 ○매트릭스 고도화, compute_gate_summary canvas 재사용(perf), 라이브 스모크.
+
+---
+
+## 7. 파서 일원화 Phase 2 — 파싱 fleet in-process 통합 (2026-07-02~03)
+
+> plan `docs/superpowers/plans/2026-07-02-parser-consolidation-phase2.md`(v3 READY) · spec `...-design.md`. 상세 진행표는 03-dev-progress §Phase 2.
+
+**결정**: 외부 파서 서비스(excel-parser :18055, document-parser :18050, redis)를 전부 제거하고 parse-svc 단일 이미지 in-process 로 흡수. markitdown 완전 제거. 라우팅 소유를 blockify → `parse_service/router.py` 로 이전.
+
+- **2a**: parse-svc 재구조화(`parsers/{pdf,ocr,excel,docx}` + `tools/` + `router.py`) + `chunk_needed` flag. facade `/ingest` 가 flag 로 분기(excel 자체청킹 false → 청크 그대로 insert).
+- **2b**: `excel_parser_rag` 패키지 vendoring(상대임포트만, 자기참조 0) → `_fetch_rag_chunks` in-process(`get_backend(cfg.backend).parse`). 외부 excel-parser HTTP 제거.
+- **2c**: document-parser VL OCR(pptx/이미지/스캔) in-process 이식(vl_api/elements_parser/image_utils/pdf_converter/prompts, config→env, gotenberg=httpx 직접, PDF 렌더=PyMuPDF). 발견·수정: ① AsyncClient 이벤트루프 재바인드(asyncio.run per-call → "Event loop is closed") ② 순수텍스트 figure→text 재분류(blockify figure→image 매핑이 markdown 유실 — 구 HTTP 경로에도 있던 잠재 결함).
+- **2d**: markitdown 완전 제거(코드+requirements, 가드 `test_no_markitdown`). docx=kordoc(`tools/kordoc.py`, 병합표 `<table>` 보존), 폴백=kordoc. facade `service/parsing.py`·`excel_parser_client.py`·`ingest.py` 삭제, `/ingest/submit`·`/ingest/status` 제거(kb-backend 참조 0 확인), Dockerfile.facade JRE 제거. blockify `PARSER_ROUTING`/`recommended_parser` 삭제(W6 측정은 역사 기록 유지).
+- **2e**: Dockerfile.parse-svc 에 node/kordoc 런타임(`npm install -g kordoc`, 이미지 검증 kordoc 3.8.3/java21/fitz). compose 에서 excel-parser·document-parser·redis 서비스 + redis_data 볼륨 + adaptive_chunk OCR base_url 제거, parse-svc depends_on=gotenberg+minio. 스택 down/build/up 전 서비스 healthy, xlsx(excel_rag_parser)·png(VL OCR)·docx(kordoc `<table>`) /parse·/ingest 정상 확인.
+
+**불변식 유지**: 표 `<table>` HTML 보존 / 모달 U+3008·U+3009 byte-identical / BGE-M3 1024d / 청크 KB당 단일우주 / 단일 Postgres+RLS.
+
+**커밋**: 2a `51692e9`..`2144f00` · 2b `f59a40b`+`8cfeb05` · 2c `7a0f980`+`ee39a66` · 2d `13c8dc0`+`a8f9818`+`f3e73f3` · 2e `fddbd2a`+`ee840dd`.
+
+**미결(범위 밖)**: E2E 다형식 동시적재 완주는 OpenRouter LLM 처리량 지연으로 미완(확장자별 단독 indexed 는 검증됨). LLM 크레딧 여유 시 재확인.

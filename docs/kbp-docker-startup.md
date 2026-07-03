@@ -15,18 +15,18 @@ Docker Compose로 kb-pipeline 엔진 스택 전체를 빌드·기동하는 절�
 | 인프라 | minio | minio/minio | 9000/9001 | 19010/19011* |
 | 인프라 | gotenberg | gotenberg/gotenberg:8 | 3000 | (내부) |
 | 엔진 | **edgequake** | **kbp-edgequake (docker/edgequake.Dockerfile)** | 8081 | **8081** |
-| 문서처리 | document-parser | kbp-document-parser (sibling repo) | 8000 | 18050* |
-| 문서처리 | excel-parser | kbp-excel-parser (sibling repo) | 18055 | 18055 |
 | 문서처리 | doc_guard | kbp-doc_guard (sibling repo) | 8000 | 8001 |
 | 문서처리 | adaptive_chunk | kbp-adaptive_chunk (sibling repo) | 18060 | (내부) |
 | 앱 | parse-svc | kbp-parse-svc (Dockerfile.parse-svc) | 19001 | 19001 |
 | 앱 | facade | kbp-facade (Dockerfile.facade) | 19000 | **19000** |
 
-\* `docker-compose.override.yml`가 다른 무관한 스택과의 호스트 포트 충돌을 피하려고
-minio를 **19020/19021**, document-parser를 **18051**로 재매핑한다(아래 5절 참고).
+> **Phase 2e**: 외부 파서 서비스 `document-parser(:18050)`·`excel-parser(:18055)`·`redis` 는 제거됐다. 모든 문서 파싱(PDF/Excel/DOCX/PPTX/이미지/스캔)은 parse-svc(:19001)가 in-process 로 수행한다(이미지에 java21 + node/kordoc + PyMuPDF 내장). office(pptx/docx)→PDF 변환용 gotenberg 만 잔존.
 
-기동 순서(의존성): postgres → edgequake / (gotenberg,minio → document-parser →
-adaptive_chunk) / excel-parser → parse-svc → facade.
+\* `docker-compose.override.yml`가 다른 무관한 스택과의 호스트 포트 충돌을 피하려고
+minio를 **19020/19021**로 재매핑한다(아래 5절 참고). (document-parser 재매핑은 서비스 제거로 삭제됨.)
+
+기동 순서(의존성): postgres → edgequake / (gotenberg,minio) / doc_guard /
+adaptive_chunk → parse-svc(depends_on gotenberg+minio) → facade.
 
 ---
 
@@ -74,15 +74,15 @@ true, `llm_provider_name:"openrouter"`, 스키마 v38.
 |----|---------------|-------------------|
 | `OPENROUTER_API_KEY` | edgequake | 부팅 시 panic `OPENROUTER_API_KEY is empty` (exit 101) |
 | `LITELLM_EMBEDDING_API_KEY` | edgequake 임베딩(bge-m3) | 적재/검색 임베딩 실패 |
-| `MODEL_API_URL`, `MODEL_API_KEY` | document-parser(비전 OCR) | `/health` degraded (`vl_api unhealthy`) |
-| `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY` | minio, parse-svc, document-parser | MinIO 인증/객체 저장 실패 |
+| `MODEL_API_URL`, `MODEL_API_KEY` | parse-svc(in-process VL OCR) | 이미지/PPTX/스캔 파싱 시 VL 호출 실패(빈 enriched_content) |
+| `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY` | minio, parse-svc | MinIO 인증/객체 저장 실패 |
 | `ADAPTIVE_CHUNK_OPENROUTER_API_KEY` 등 | adaptive_chunk | 청킹 LLM 실패 |
 | `ADAPTIVE_CHUNK_QDRANT_URL` | adaptive_chunk | 벡터 저장 실패 |
 | `ADAPTIVE_CHUNK_RERANK_API_KEY`, `ADAPTIVE_CHUNK_SCORING_EMBEDDING_API_KEY` | adaptive_chunk | rerank/scoring 실패 |
 
 `POSTGRES_PASSWORD`, `KBP_OPENAI_*`, `*_BASE_URL`, `*_MODEL` 등은 템플릿에 이미 값이 있다.
 
-> 값이 빈 상태에서 `up`하면 인프라 티어(postgres/minio/gotenberg/excel-parser/doc_guard)는
+> 값이 빈 상태에서 `up`하면 인프라 티어(postgres/minio/gotenberg/doc_guard)는
 > healthy가 되지만 **edgequake는 OPENROUTER_API_KEY 없으면 panic**하고, 그 뒤 앱 티어
 > (parse-svc/facade)는 depends_on 때문에 못 뜬다.
 
@@ -95,8 +95,8 @@ true, `llm_provider_name:"openrouter"`, 스키마 v38.
 ```bash
 cd /Users/xxx/workspace/8.kb-pipeline
 
-# (a) 런처로 띄운 로컬 개발 프로세스 종료 (facade/parse-svc/edgequake/excel-parser)
-for p in 19000 19001 8081 18055; do
+# (a) 런처로 띄운 로컬 개발 프로세스 종료 (facade/parse-svc/edgequake)
+for p in 19000 19001 8081; do
   pid=$(lsof -tiTCP:$p -sTCP:LISTEN -P -n 2>/dev/null | head -1)
   [ -n "$pid" ] && kill "$pid"
 done
@@ -110,7 +110,7 @@ docker compose down
 
 ### 4-2. 빌드
 ```bash
-docker compose build          # 7개 이미지 (edgequake는 Rust라 최초 ~10분)
+docker compose build          # edgequake(Rust, 최초 ~10분) + parse-svc(node/kordoc 설치 포함) 등
 ```
 edgequake만 다시 빌드: `docker compose build edgequake`.
 
@@ -144,9 +144,10 @@ curl -fsS http://localhost:19001/healthz     # parse-svc
 | 서비스 | 기본 | 재매핑 | 점유 중인 무관 컨테이너 |
 |--------|------|--------|--------------------------|
 | minio | 19010/19011 | **19020/19021** | docker-minio-1 |
-| document-parser | 18050 | **18051** | trust-backend-document-parser-1 |
 
-컨테이너 내부 포트와 서비스 DNS(예: `http://minio:9000`, `http://document-parser:8000`)는
+> (Phase 2e: document-parser 서비스 제거로 그 18050→18051 재매핑도 삭제됨.)
+
+컨테이너 내부 포트와 서비스 DNS(예: `http://minio:9000`)는
 그대로라 스택 내부 통신엔 영향 없다. YAML `!override` 태그로 base의 ports 리스트를
 **치환**한다(compose 기본 merge는 append라 그냥 두면 옛 포트가 남아 충돌).
 
@@ -162,7 +163,8 @@ curl -fsS http://localhost:19001/healthz     # parse-svc
 | edgequake `OPENROUTER_API_KEY is empty` exit 101 | `.env` 빈 값 | 3절대로 키 채우기 |
 | edgequake `GLIBC_2.39 not found` | 런타임 베이스가 빌드와 glibc 불일치 | Dockerfile trixie 고정(이미 수정됨). 옛 이미지면 `docker compose build edgequake` |
 | edgequake 빌드가 `pdfium-auto[bundled]: curl unavailable` | 빌드 스테이지에 curl 없음 | Dockerfile 빌드 스테이지 curl 포함(이미 반영). 옛 캐시면 `--no-cache` |
-| document-parser `degraded` / unhealthy | redis(:6379) 부재 + `MODEL_API_URL` 미설정 | compose엔 redis 없음. `MODEL_API_URL/KEY` 채우고, 필요 시 redis 서비스 추가 |
+| 이미지/PPTX 파싱 시 빈 enriched_content | parse-svc `MODEL_API_URL/KEY` 미설정 (in-process VL OCR 미호출) | 3절대로 `MODEL_API_URL/KEY` 채우기 |
+| parse-svc `kordoc: not found` / docx·폴백 파싱 실패 | 이미지에 node/kordoc 미빌드 | `docker compose build parse-svc`(Dockerfile.parse-svc 가 `npm install -g kordoc`) |
 | depends_on 체인이 안 뜸 | 상위 서비스가 unhealthy | `docker compose ps`로 최초 unhealthy 서비스부터 로그 확인 |
 | `:5433` 충돌 | 런처가 띄운 `eq-pg-kbp` 잔존 | `docker rm -f eq-pg-kbp` |
 
@@ -181,6 +183,6 @@ docker compose down -v         # 볼륨까지 삭제 (postgres/minio 데이터 �
 
 - **edgequake 이미지(Task 7): 정상.** 유효 키를 주면 compose postgres에 붙어 마이그레이션
   후 `/health` healthy 확인 완료. GLIBC/pdfium/HOST-PORT/passthrough 모두 반영.
-- **인프라 티어 healthy:** postgres, minio, gotenberg, excel-parser, doc_guard.
-- **막힘:** `.env`가 빈 템플릿이라 edgequake(OPENROUTER_API_KEY), 그 하류 앱 티어가 못 뜨고,
-  document-parser는 redis+MODEL_API_URL 부재로 degraded. → 3절대로 키를 채우면 해소.
+- **인프라 티어 healthy:** postgres, minio, gotenberg, doc_guard.
+- **막힘:** `.env`가 빈 템플릿이라 edgequake(OPENROUTER_API_KEY), 그 하류 앱 티어가 못 뜬다.
+  → 3절대로 키를 채우면 해소. (Phase 2e: document-parser/excel-parser/redis 제거로 관련 degraded 항목 소멸; parse-svc 는 `MODEL_API_URL/KEY` 로 VL OCR.)
