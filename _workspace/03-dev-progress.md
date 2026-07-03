@@ -142,7 +142,7 @@ plan: `docs/superpowers/plans/2026-07-02-parser-consolidation-phase2.md` (v3 REA
 |---|---|---|
 | **2a** | parse-svc 재구조화(parsers/{pdf,ocr,excel}+tools+router) + `chunk_needed` flag + facade /ingest 분기 (excel/ocr 는 HTTP 위임 유지 — 동작 보존) | ✅ 완료 (Task1~7, `51692e9`..`2144f00`) — 전체 200 passed(기존 무관 실패 1: minio bucket auto-create 드리프트), 스택 스모크 green(xlsx chunk_needed=false 자체청킹 / md ingest indexed) |
 | **2b** | excel_parser_rag in-process 흡수 (HTTP 제거) | ✅ 완료 (Task8~9, `f59a40b`+`8cfeb05`) — 패키지 vendoring(자기참조 import 0건, 상대임포트만), `_fetch_rag_chunks` in-process(get_backend(cfg.backend).parse), excel-parser 컨테이너 stop 상태에서도 /parse 성공 확인. ⚠️ 임시: compose parse-svc `EXCEL_PARSER_BACKEND=openpyxl`(이미지에 node/kordoc 없어 auto→kordoc 불가 — 2e 에서 설치 후 auto 복원) |
-| 2c | document-parser OCR(pptx+이미지) in-process 흡수 | 대기 |
+| **2c** | document-parser OCR(pptx+이미지) in-process 흡수 | ✅ 완료 (Task10~11, `7a0f980`+`ee39a66`) — vl_api/elements_parser/image_utils/pdf_converter/prompts 이식(config→env, gotenberg 는 httpx 직접, PDF 렌더는 PyMuPDF 직접), `ocr_file_to_elements`+`ocr_elements_sync` 진입, pdf 스캔페이지 OCR 도 in-process. document-parser stop 상태에서 png/pptx /parse 200+enriched 정상. 스택검증 발견 수정 2건: ① AsyncClient 루프 재바인드(asyncio.run per-call → "Event loop is closed") ② 순수텍스트 figure→text 재분류(blockify figure→image 매핑이 markdown 을 버려 enriched 빈 문자열 — 구 HTTP 경로에도 있던 잠재 결함). compose parse-svc 에 MODEL_API_URL/KEY·GOTENBERG_URL·GUIDED_JSON_MODE=response_format 추가 |
 | 2d | markitdown 완전 제거 + docx/폴백=kordoc + facade 파싱코드 삭제(/ingest/submit·status 제거) | 대기 |
 | 2e | compose 정리(excel-parser·document-parser·redis 제거) + E2E | 대기 |
 
