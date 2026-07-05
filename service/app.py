@@ -16,7 +16,8 @@ from __future__ import annotations
 import logging
 import os
 
-from fastapi import FastAPI, UploadFile, File, Form, Depends, BackgroundTasks, Body
+from fastapi import (FastAPI, UploadFile, File, Form, Depends, BackgroundTasks,
+                     Body, Header, HTTPException)
 
 from service.edgequake import EdgequakeClient
 from service.adaptive_chunk import AdaptiveChunkClient, MODAL_ATOMIC_MARKERS
@@ -36,6 +37,32 @@ def _safe_basename(name: str) -> str:
     base = os.path.basename((name or "").replace("\\", "/")).replace("\x00", "")
     base = re.sub(r"[^A-Za-z0-9._-]", "_", base) or "upload"
     return "_" + base if base.startswith(".") else base
+
+#: Shared-secret gate. Read at module scope so ``importlib.reload`` picks up a
+#: monkeypatched env in tests. When unset the gate is disabled (dev) — a startup
+#: warning is emitted below so a prod deploy without the key is visible in logs.
+_FACADE_KEY = os.environ.get("KBP_FACADE_KEY")
+
+if _FACADE_KEY is None:
+    logger.warning(
+        "KBP_FACADE_KEY is unset — the facade X-Facade-Key gate is DISABLED "
+        "(dev mode). Set KBP_FACADE_KEY in production to lock down stateful "
+        "endpoints (/search, /insert, /insert/status, /ingest, /chunks, /doc, "
+        "/communities/build)."
+    )
+
+
+def require_facade_key(x_facade_key: str | None = Header(default=None)):
+    """Reject requests lacking a valid ``X-Facade-Key`` header (vs env key).
+
+    When ``KBP_FACADE_KEY`` is unset the gate is a no-op (dev). ``/parse`` and
+    ``/chunk`` are stateless (no workspace) and stay ungated.
+    """
+    if _FACADE_KEY is None:
+        return  # gate disabled (dev)
+    if x_facade_key != _FACADE_KEY:
+        raise HTTPException(status_code=401, detail="invalid or missing X-Facade-Key")
+
 
 app = FastAPI(title="kb-pipeline")
 
@@ -141,7 +168,7 @@ def chunk(enriched_content: str = Body(..., embed=True),
     }
 
 
-@app.post("/search")
+@app.post("/search", dependencies=[Depends(require_facade_key)])
 def search(workspace_id: str = Body(..., embed=True),
            query: str = Body(..., embed=True),
            top_k: int = Body(10, embed=True),
@@ -167,7 +194,7 @@ def search(workspace_id: str = Body(..., embed=True),
     return {"answer": res.get("answer"), "results": results}
 
 
-@app.post("/insert")
+@app.post("/insert", dependencies=[Depends(require_facade_key)])
 def insert(workspace_id: str = Body(..., embed=True),
            doc_id: str = Body(..., embed=True),
            title: str = Body("", embed=True),
@@ -204,7 +231,7 @@ def insert(workspace_id: str = Body(..., embed=True),
     }
 
 
-@app.get("/insert/status")
+@app.get("/insert/status", dependencies=[Depends(require_facade_key)])
 def insert_status(workspace_id: str, doc_id: str, eq=Depends(get_edgequake)):
     """Relay the live edgequake phase for a passthrough insert (edgequake hidden).
 
@@ -222,7 +249,7 @@ def insert_status(workspace_id: str, doc_id: str, eq=Depends(get_edgequake)):
     }
 
 
-@app.post("/ingest")
+@app.post("/ingest", dependencies=[Depends(require_facade_key)])
 async def ingest(file: UploadFile = File(...), workspace_id: str = Form(...),
                  doc_id: str = Form(...), content_type: str | None = Form(None),
                  pc=Depends(get_parse_client), ac=Depends(get_adaptive_chunk),
@@ -278,13 +305,13 @@ async def ingest(file: UploadFile = File(...), workspace_id: str = Form(...),
     }
 
 
-@app.get("/chunks")
+@app.get("/chunks", dependencies=[Depends(require_facade_key)])
 def chunks(workspace_id: str, doc_id: str, eq=Depends(get_edgequake)):
     eq_ws = eq.ensure_workspace(workspace_id, name=workspace_id)
     return eq.fetch_chunks(eq_ws, doc_id)
 
 
-@app.delete("/doc", status_code=204)
+@app.delete("/doc", status_code=204, dependencies=[Depends(require_facade_key)])
 def delete(workspace_id: str, doc_id: str, eq=Depends(get_edgequake)):
     eq_ws = eq.ensure_workspace(workspace_id, name=workspace_id)
     eq.delete_doc(eq_ws, doc_id)
@@ -300,7 +327,8 @@ def _build_communities_job(workspace_id: str) -> None:
         logger.exception("community build failed for workspace_id=%s", workspace_id)
 
 
-@app.post("/communities/build", status_code=202)
+@app.post("/communities/build", status_code=202,
+          dependencies=[Depends(require_facade_key)])
 def communities_build(workspace_id: str, background_tasks: BackgroundTasks,
                       eq=Depends(get_edgequake)):
     # Community graph rows are scoped by the edgequake workspace UUID (stored in node
