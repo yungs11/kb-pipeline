@@ -1,13 +1,11 @@
 """parsers/excel — 자체청킹 결과를 facade 청크 스키마로, chunk_needed=False."""
-import pytest
-from parse_service.parsers import RouteResult, ParserError
 from parse_service.parsers import excel as excel_parser
 
 
 def test_chunks_normalized_and_flag_false(monkeypatch):
     rag = [{"content_text": "표1 내용", "title": "시트1", "path": ["시트1"]},
            {"content_text": "표2 내용", "title": "시트2", "path": ["시트2"]}]
-    monkeypatch.setattr(excel_parser, "_fetch_rag_chunks", lambda fb, fn, excel_url: rag)
+    monkeypatch.setattr(excel_parser, "_fetch_rag_chunks", lambda fb, fn, excel_url: (rag, {"sheets": []}))
     res = excel_parser.parse(b"PK", "a.xlsx", excel_url="http://x")
     assert res.kind == "chunks" and res.chunk_needed is False
     assert res.chunks[0]["chunk_index"] == 0
@@ -29,7 +27,9 @@ def test_inprocess_openpyxl_smoke(monkeypatch):
     assert res.chunk_needed is False and res.chunks
 
 
-def test_empty_chunks_raise(monkeypatch):
-    monkeypatch.setattr(excel_parser, "_fetch_rag_chunks", lambda fb, fn, excel_url: [])
-    with pytest.raises(ParserError):
-        excel_parser.parse(b"PK", "a.xlsx", excel_url="http://x")
+def test_empty_chunks_returns_gate_summary(monkeypatch):
+    """빈 청크는 더 이상 raise 하지 않는다 — gate_summary 를 실은 RouteResult 를 반환
+    (깨진 엑셀은 크래시가 아니라 다운스트림 게이트에서 reject)."""
+    monkeypatch.setattr(excel_parser, "_fetch_rag_chunks", lambda fb, fn, excel_url: ([], {"sheets": []}))
+    res = excel_parser.parse(b"PK", "a.xlsx", excel_url="http://x")
+    assert res.kind == "chunks" and res.chunks == [] and res.gate_summary is not None

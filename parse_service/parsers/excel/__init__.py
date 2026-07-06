@@ -37,16 +37,21 @@ def normalize_chunks(rag_chunks: list[dict]) -> list[dict]:
     return out
 
 
-def _fetch_rag_chunks(file_bytes: bytes, filename: str, excel_url: str | None = None) -> list[dict]:
+def _fetch_rag_chunks(file_bytes: bytes, filename: str, excel_url: str | None = None) -> tuple[list[dict], dict]:
     """in-process: excel_parser_rag backend 직접 호출 (HTTP 제거).
 
     원본 excel-parser service/main.py:_run_parse 의 동기 파싱 본문 이식
     (임시파일 suffix, ParserConfig, get_backend(...).parse). backends 계약:
     get_backend(name).parse(input_path, config) -> (chunks: list[dict], stats: dict).
     excel_url 은 하위호환용 무시 파라미터(2e 에서 호출부와 함께 제거).
+
+    반환: (raw_chunks, gate_summary) 튜플. gate_summary 는 raw 청크 + tmp_path 로
+    in-process compute_gate_summary 로 계산(unlink 전). 계산 실패는 보수적 차단
+    (spec §8 "추출 불가 = 적재 불가") 로 {"ok": False, "sheets": [], "error": ...}.
     """
     from parse_service.parsers.excel.excel_parser_rag.backends import get_backend
     from parse_service.parsers.excel.excel_parser_rag.config import ParserConfig
+    from parse_service.parsers.excel.excel_parser_rag.gate import compute_gate_summary
 
     suffix = Path(filename).suffix.lower() or ".xlsx"
     cfg_kwargs: dict = {"backend": os.environ.get("EXCEL_PARSER_BACKEND", "auto")}
@@ -60,19 +65,25 @@ def _fetch_rag_chunks(file_bytes: bytes, filename: str, excel_url: str | None = 
         tmp_path = Path(tmp.name)
     try:
         chunks, _stats = get_backend(config.backend).parse(tmp_path, config)
-        return [c if isinstance(c, dict) else c.__dict__ for c in (chunks or [])]
+        raw = [c if isinstance(c, dict) else c.__dict__ for c in (chunks or [])]
+        try:
+            gate_summary = compute_gate_summary(tmp_path, raw)
+        except Exception as exc:  # noqa: BLE001 — gate 계산 실패는 보수적 차단(ok=False)
+            gate_summary = {"ok": False, "sheets": [], "error": str(exc)}
+        return raw, gate_summary
     finally:
         tmp_path.unlink(missing_ok=True)
 
 
 def parse(file_bytes: bytes, filename: str, *, excel_url: str | None = None) -> RouteResult:
     try:
-        rag_chunks = _fetch_rag_chunks(file_bytes, filename, excel_url)
+        rag_chunks, gate_summary = _fetch_rag_chunks(file_bytes, filename, excel_url)
     except ParserError:
         raise
     except Exception as e:  # noqa: BLE001
         raise ParserError(f"excel parse failed for {filename}: {e}") from e
     chunks = normalize_chunks(rag_chunks)
-    if not chunks:
-        raise ParserError(f"excel produced no chunks for {filename}")
-    return RouteResult(kind="chunks", chunk_needed=False, chunks=chunks)
+    # 빈 청크 + 계산된 gate_summary 는 유효한 "깨진 엑셀 → 게이트가 reject" 결과다.
+    # (예전엔 여기서 ParserError 를 던져 gate_summary 를 폐기했으나, 그러면 게이트가
+    #  깨끗하게 reject 할 수 없다. raise 제거 — 다운스트림 게이트가 판정.)
+    return RouteResult(kind="chunks", chunk_needed=False, chunks=chunks, gate_summary=gate_summary)
