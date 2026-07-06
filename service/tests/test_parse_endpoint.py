@@ -178,6 +178,43 @@ def test_parse_excel_goes_to_parse_svc_with_chunk_strategy(monkeypatch):
         svc.app.dependency_overrides.pop(svc.get_parse_client, None)
 
 
+def test_parse_passes_gate_summary_through(monkeypatch):
+    """Phase 2b: parse-svc 가 excel 응답에 ``gate_summary`` 를 실으면 facade 는
+    passthrough(``return parsed``) 이므로 top-level 로 그대로 통과시킨다 —
+    kb-backend 의 excel gate 가 이 값을 소비한다."""
+    from fastapi.testclient import TestClient
+    import service.app as svc
+
+    gate_summary = {"sheets": [{"name": "시트1", "rows": 3, "cols": 2}], "ok": True}
+
+    class _FakeParse:
+        def parse(self, *, file_bytes, filename, content_type=None, docs_id=None):
+            return {
+                "enriched_content": "셀A",
+                "n_blocks": 1,
+                "modal_spans": [],
+                "chunks": [{"chunk_index": 0, "text": "셀A",
+                            "titles_context": ["시트1"], "pages": []}],
+                "chunk_needed": False,
+                "gate_summary": gate_summary,
+            }
+
+    svc.app.dependency_overrides[svc.get_parse_client] = lambda: _FakeParse()
+    try:
+        c = TestClient(svc.app)
+        r = c.post("/parse",
+                   files={"file": ("book.xlsx", b"PK\x03\x04", "application/octet-stream")},
+                   data={})
+        assert r.status_code == 200
+        j = r.json()
+        # gate_summary surfaced verbatim at the TOP LEVEL (not nested).
+        assert j["gate_summary"] == gate_summary
+        # facade still sets the excel consumer-compat field.
+        assert j["chunk_strategy"] == "excel_rag_parser"
+    finally:
+        svc.app.dependency_overrides.pop(svc.get_parse_client, None)
+
+
 def test_parse_routes_nonexcel_to_parse_svc(monkeypatch):
     from fastapi.testclient import TestClient
     import service.app as svc
