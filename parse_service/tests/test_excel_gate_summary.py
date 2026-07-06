@@ -20,3 +20,26 @@ def test_excel_parse_returns_gate_summary(monkeypatch):
     rr = parse(_tiny_xlsx_bytes(), "tiny.xlsx")
     assert rr.gate_summary is not None
     assert isinstance(rr.gate_summary, dict)
+
+
+def test_parse_endpoint_surfaces_gate_summary(monkeypatch):
+    """POST /parse on an xlsx (chunks route) carries top-level gate_summary."""
+    from fastapi.testclient import TestClient
+    import parse_service.app as appmod
+    from parse_service.parsers import RouteResult
+
+    gate = {"sheets": [], "ok": True}
+    monkeypatch.setattr(
+        appmod, "_route",
+        lambda fb, fn, **kw: RouteResult(
+            kind="chunks", chunk_needed=False,
+            chunks=[{"chunk_index": 0, "text": "표1", "titles_context": [], "pages": []}],
+            gate_summary=gate,
+        ),
+    )
+    r = TestClient(appmod.app).post(
+        "/parse", files={"file": ("a.xlsx", b"PK")}, data={"filename": "a.xlsx"})
+    assert r.status_code == 200
+    body = r.json()
+    assert "gate_summary" in body
+    assert body["gate_summary"] == gate
