@@ -267,7 +267,11 @@ def _looks_multiheader(group_ne, detail_ne) -> bool:
         return False
     if _is_marker_row(detail_ne):                    # 다음 행이 마커(○ 등) 데이터면 헤더 아님
         return False
-    if len(detail_ne) <= len(group_ne):              # 상세 헤더는 더 잘게 나뉜다
+    # 상세행은 '세분화되는 스팬(colspan≥2) 그룹' 수보다 많아야 한다.
+    # rowspan≥2 leaf열(WBSID 등, 아래로 뻗어 detail에 안 나타남)은 세분화 대상이 아니라 제외 —
+    # len(detail)==len(group) 여도(rowspan leaf + 스팬 혼합) 다단헤더를 놓치지 않게 한다.
+    spanning = sum(1 for (_c, _t, cs, _rs, _tag) in group_ne if cs >= 2)
+    if len(detail_ne) <= spanning:                   # 상세 헤더는 스팬을 더 잘게 나눈다
         return False
     single = sum(1 for (_c, _t, cs, _rs, _tag) in detail_ne if cs == 1)
     if single / max(1, len(detail_ne)) < 0.7:        # 상세행은 대부분 1칸
@@ -441,12 +445,15 @@ def _segment(anchors, covered, nrows, ncols):
             hidx, gidx = _pick_header(window)
             if hidx is not None:
                 hcells = seq[hidx][1]
-                cur["header_band"] = _header_band(hcells)
                 if gidx is not None:
+                    # 다단헤더: band 는 그룹행(rowspan leaf열 포함) + 상세행 합집합으로.
+                    # 상세행만 보면 rowspan leaf열(WBSID 등)이 band 밖으로 밀려 drop됨.
+                    cur["header_band"] = _header_band(seq[gidx][1] + hcells)
                     leaf, gmap = _multiheader_maps(seq[gidx][1], hcells)
                     cur["header"] = leaf
                     cur["header_group"] = gmap
                 else:
+                    cur["header_band"] = _header_band(hcells)
                     cur["header"] = {c: t.replace("\n", "").strip() for (c, t, cs, rs, tag) in hcells}
                 i = hidx + 1                          # 헤더 위 메타/제목/범례 행은 drop
                 continue
@@ -642,9 +649,10 @@ class KordocBackend:
                                      embed_cap=config.row_embedding_max_chars))
             sheets_done += 1
 
-        # 십진번호(WBS) 계층 병합 — self-gating(번호 필드 없으면 무변화)
-        from ..chunking.wbs_merger import merge_wbs_rows
-        all_chunks = merge_wbs_rows(all_chunks, max_chars=config.numbering_merge_max_chars)
+        # CGH 계층 병합 — self-gating(번호 spine 없으면 무변화). 모든 내부노드가
+        # 직속 자식 아웃라인을 품는 hierarchy_node 요약청크를 발행한다.
+        from ..chunking.hierarchy_tree import merge_hierarchy_rows
+        all_chunks = merge_hierarchy_rows(all_chunks, max_chars=config.numbering_merge_max_chars)
 
         ct = Counter(c["chunk_type"] for c in all_chunks)
         rt = Counter(c["region_type"] for c in all_chunks)

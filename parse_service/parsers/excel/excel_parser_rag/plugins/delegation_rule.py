@@ -12,6 +12,8 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
+from openpyxl.utils import range_boundaries
+
 from ..chunking.chunk_schema import RagChunk
 from ..markerutil import is_ambiguous_marker_cell, is_marker_cell
 from ..parsers.base import ParseContext
@@ -185,6 +187,25 @@ class DelegationRulePlugin(ParserPlugin):
                 return logical, col, True
         return "", None, False
 
+    def _is_section_banner_row(self, region: "Region", canvas: "SheetCanvas", row: int) -> bool:
+        """전폭(≥80%) 병합 배너 행인가.
+
+        '1. 경영 관리'(A5:H5) 같은 섹션 제목이 병합으로 모든 열에 퍼져 비고/역할 열에
+        echo 되면 '비고=배너텍스트' delegation 청크가 잘못 발행된다. 이런 행은 섹션
+        제목이므로 규칙 행으로 발행하지 않는다.
+        """
+        width = region.max_col - region.min_col + 1
+        if width < 3:
+            return False
+        for mr in canvas.merged_ranges:
+            try:
+                c0, r0, c1, r1 = range_boundaries(mr)
+            except Exception:
+                continue
+            if r0 <= row <= r1 and (c1 - c0 + 1) >= 0.8 * width:
+                return True
+        return False
+
     # -------------------------------------------------- delegation_rule 생성
     def _build_delegation_rows(
         self,
@@ -228,6 +249,8 @@ class DelegationRulePlugin(ParserPlugin):
 
             if row in note_rows or row_is_note:
                 continue  # note 행은 note chunk 가 담당
+            if self._is_section_banner_row(region, canvas, row):
+                continue  # 전폭 병합 섹션배너 — 규칙 행 아님(비고 echo 차단). stack 은 위에서 갱신됨
 
             approvers: List[str] = []
             ambiguous = False
