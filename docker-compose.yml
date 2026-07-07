@@ -140,6 +140,11 @@ services:
   # ---------------------------------------------------------------------------
   # KB-pipeline application tier
   # ---------------------------------------------------------------------------
+  # ⚠️ DEV-SHADOW 주의(2026-07-07): dev 는 parse-svc/facade 를 **호스트 프로세스**로 돌린다
+  # (scripts/run-parse-svc.sh · run-facade.sh — 라이브 소스 반영). `docker compose up -d` 로
+  # 이 컨테이너를 띄우면 **옛 이미지 코드**가 호스트 프로세스를 가려(facade→`parse-svc:19001`
+  # 컨테이너 DNS) 소스 수정이 무시된다("옛날 파싱"). dev 에선 이 두 서비스를 docker 로 올리지
+  # 말 것. 컨테이너로 갈 때만 `docker compose build parse-svc facade` 로 이미지 재빌드.
   parse-svc:
     build: { context: ., dockerfile: Dockerfile.parse-svc }
     environment:
@@ -173,6 +178,8 @@ services:
       retries: 20
     networks: [kbp]
 
+  # ⚠️ DEV-SHADOW 주의: parse-svc 와 동일 — dev 는 scripts/run-facade.sh(호스트) 사용.
+  # `docker compose up` 로 이 컨테이너를 띄우면 옛 이미지가 호스트 facade 를 가린다(위 parse-svc 주석 참조).
   facade:
     build: { context: ., dockerfile: Dockerfile.facade }
     environment:

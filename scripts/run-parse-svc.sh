@@ -1,17 +1,34 @@
 #!/usr/bin/env bash
 # parse-svc (:19001) launcher / restarter.
 #
-# Two gotchas this script exists to prevent:
+# Three gotchas this script exists to prevent:
 #   1) OpenDataLoader (PDF parsing) shells out to `java`. macOS ships a /usr/bin/java
 #      STUB that errors "Unable to locate a Java Runtime" → CLI exit 1 → parse fails →
 #      empty enriched_content. So we pin openjdk@17 onto PATH.
 #   2) service/llm.py reads os.environ["KBP_OPENAI_API_KEY"] (no default). Missing it →
 #      KeyError the moment a modal block is described. So we load scripts/parse-svc.env.
+#   3) DOCKER-SHADOW (2026-07-07): parse-svc + facade are HOST dev processes here — the
+#      docker-compose stack is BACKING services only (postgres/minio:9000/edgequake/
+#      adaptive/doc_guard/gotenberg). If you `docker compose up -d` the WHOLE stack, it
+#      also starts the parse-svc/facade CONTAINERS (stale baked-in image code). facade
+#      calls parse-svc via compose DNS `parse-svc:19001`, so the CONTAINER serves and
+#      your host source edits are IGNORED → "옛날 파싱"/old behavior. This script stops
+#      that shadow container so the host source actually serves. Do NOT `docker compose
+#      up` facade/parse-svc for dev; use run-facade.sh / run-parse-svc.sh (or rebuild the
+#      image with `docker compose build parse-svc facade` if you truly want containers).
 #
 # Usage:  bash scripts/run-parse-svc.sh         # kills any running parse-svc, relaunches
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+
+# 0) Guard against the docker-shadow gotcha (#3): stop any compose parse-svc container.
+#    It holds :19001 via docker-proxy AND facade calls it via `parse-svc:19001` DNS, so
+#    the CONTAINER's stale image code would serve instead of this host process.
+for _cid in $(docker ps -q --filter "label=com.docker.compose.service=parse-svc" 2>/dev/null); do
+  echo "guard: stopping shadow docker parse-svc container ($_cid) — host source must serve"
+  docker stop "$_cid" >/dev/null 2>&1 || true
+done
 
 # 1) openjdk@17 → PATH (OpenDataLoader CLI needs a real JRE).
 for j in /usr/local/opt/openjdk@17/bin /opt/homebrew/opt/openjdk@17/bin; do
