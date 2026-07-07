@@ -4,6 +4,26 @@
 
 ---
 
+## 0-B. 그룹 기반 KB 접근제어 + Postgres 통합 (설계 확정·계획, 2026-07-04)
+
+**요구**: KB 생성 시 **그룹 하나**를 지정하고, 그 그룹 멤버만 해당 KB 를 읽기/검색. 그룹엔 유저 N명(계속 추가 가능),
+모든 유저가 빠진 그룹은 삭제되며 그러면 그 KB 는 검색 불가여야 함. 계획: `docs/superpowers/plans/2026-07-04-group-based-kb-access-control.md`
+(v4 READY — codex 백엔드 hang 으로 adversarial 대체검증 3라운드: v1 13건→v2 3건→v3 1건, 전부 해소).
+
+- **핵심 결정: 접근제어는 파이프라인이 아니라 kb-backend 인가계층.** facade/parse/chunk/edgequake **코드 무변경**(예외: 런처 + facade 시크릿게이트).
+  - **`tenant_id` 에 그룹 매핑 금지** — edgequake 는 이미 workspace-per-KB(`kb-<kbid>`)로 물리격리하므로, **KB↔group 이 1:1 이면 workspace 가 곧 그룹격리**. tenant_id 를 그룹으로 재정의하면 중복·경직(그룹 이관 시 청크·그래프 재태깅)·의미충돌.
+  - **데이터모델(kb-backend)**: `groups`, `group_members`(user↔group **M:N**), `knowledge_bases.group_id` FK(KB↔group **1:1**). 유저는 여러 그룹 소속 가능.
+  - **판정**: `acl.can_read_kb` = KB group 멤버십 **만**(owner 라는 사실만으로는 read 권한 없음 = "대체"; owner 는 관리권한만). 개별 `kb_shares`(user↔user 공유) **은퇴**(410 Gone, 테이블은 dormant 유지).
+  - **그룹 삭제→검색불가**: `knowledge_bases.group_id` FK `ON DELETE SET NULL` + `can_read_kb` 의 `group_id IS NULL→False`. 그룹 지우면 KB 가 orphan(검색불가), edgequake 행 재태깅 0. (RESTRICT 는 삭제를 막아버려 요구와 모순 → 기각.)
+  - **KB 생성 시 기존 그룹 필수 매핑(2026-07-07 확정)**: `POST /kb` 의 `group_id` 는 **필수**. **그룹을 먼저 만든 뒤** 그 group_id 로 KB 를 생성한다(존재검증 → 없으면 422, 미지정 → 422). 초기 구현의 "선택 입력 + 미지정 시 소유자 개인 기본그룹 자동생성" 은 **폐기**(자동 기본그룹·미매핑 NULL 생성 모두 금지). 생성 후 그룹 이동/해제는 `/admin/groups/[groupId]` GroupKbsPanel(`PUT/DELETE /groups/{id}/kbs/{kbId}` = `SqlKbRepo.set_group`)에서 수행하며, 그룹 삭제 시엔 FK `SET NULL` 로 미매핑 orphan 이 될 수 있다(검색 불가). ※ 기존 KB 를 기본그룹으로 넣은 **마이그레이션 백필은 유지**. 필수화로 group_id 없이 POST /kb 하던 테스트들은 conftest `_make_autogrant_client`(그룹 auto-provision + owner grant)로 전제를 제공한다. 대응 plan `2026-07-04-group-based-kb-access-control.md` 상단 CLARIFIED 배너 참조.
+  - **경계 강화**: "검색 파라미터는 보안경계가 아님" — facade(:19000)는 인증없이 workspace_id 를 클라가 넘김. 그룹판정은 인증주체 **kb-backend** 가 자기 DB 조회로 수행하고, **facade 를 `X-Facade-Key` 공유시크릿으로 잠가** 우회(직접호출) 차단. kb-backend 만 facade 호출.
+  - **해석 흐름**: 프론트→(JWT)→kb-backend 가 user.groups 도출→허용 KB(workspace_id) 집합 계산(`group_ids_for_user`→`list_by_group_ids`)→그 workspace 만 facade 로 질의(기존 스코핑 재사용).
+- **Postgres 통합(운영 목적)**: 두 서버(edgequake :5433/`edgequake` vs kb-backend :5432/`kb_orchestrator`)를 **한 인스턴스·두 database** 로. 확장(pgvector·AGE)은 DB단위라 edgequake DB 에만. ⚠️ 런처 `start_dedicated_edgequake.sh` 가 매 기동 `docker rm -f`(볼륨없음)로 **PG 소거** → 통합 전제조건으로 **영속 named volume + 멱등 기동 + kb 롤/kb_orchestrator DB 부트스트랩** 으로 개조. kb-backend DSN(config 기본값 포함) → `:5433/kb_orchestrator`.
+- **강제수준**: 앱레벨 ACL + facade 잠금. **RLS 하드닝(edgequake non-superuser 롤 + FORCE RLS)은 후순위 W4 로 분리**(그룹기능과 직교, 본 계획 비범위).
+- **상태**: 계획 v4 READY, **구현 미착수**. 착수 시 phase 진행마다 `03-dev-progress.md` 중간반영.
+
+---
+
 ## 0-A. 문서단위 그래프(관계) 추출 스킵 — UI 라디오 + metadata 게이트 (3레포, 2026-06-30)
 
 엑셀처럼 그래프 추출이 무의미·고비용(청크 2천급)인 문서를 **벡터 적재/검색만** 하고

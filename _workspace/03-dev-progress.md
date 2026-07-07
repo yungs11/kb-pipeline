@@ -5,6 +5,19 @@
 
 ---
 
+## 0. 그룹 기반 KB 접근제어 (구현 완료·미머지, 2026-07-04)
+
+설계·결정: 02-changes §0-B, 01-architecture §6. 계획: `docs/superpowers/plans/2026-07-04-group-based-kb-access-control.md`
+(v4 READY, adversarial 3라운드). 구현: ultracode 서브에이전트 워크플로(12태스크 TDD+대립리뷰, 전부 통과) → 브랜치 `feat/group-access-control`(kb-backend), commits 12+1.
+
+- **완료(kb-backend)**: `Group`/`GroupMember`(user↔group M:N) + `knowledge_bases.group_id` FK(`ON DELETE SET NULL`, KB↔group 1:1) + Alembic 마이그레이션(백필 포함, **저작만·미apply**). `acl.can_read_kb`=그룹 멤버십만(owner=관리권한만), 개별 `kb_shares` **410 은퇴**(테이블 dormant). deps + agents/comparison/jobs 호출부 `SqlGroupMembersRepo` 로 이관(grep 증명). `/groups` CRUD+멤버십(developer 게이트). `POST /kb` `group_id`(**필수**, 2026-07-07 확정: 그룹을 먼저 만든 뒤 그 group_id 로 KB 생성 — 자동 기본그룹 생성·미매핑(NULL) 생성 **모두 금지**. 미지정→422, 존재하지 않는 group_id→422), `GET /kb` 멤버십 필터. **프론트 UI(2026-07-07)**: `/kb` 생성 폼에서 "지점 코드(1~5)" 필드를 **"할당 그룹" 드롭다운(필수, `listGroups()`)** 으로 교체(branch_code 는 기본 1 전송, dify 적재용). 목록 배지도 "지점 N" → **그룹명** 표시(`KbSummary` 에 `group_code`/`group_name` 추가). ProviderBadge 는 **kb_pipeline 케이스 추가 + 미상 provider 를 dify 로 오표기하지 않도록** 수정(provider 별 정확 배지). `GET /groups` 는 일반 사용자도 조회 허용(생성/삭제/멤버는 developer 유지). ※ 필수화로 group_id 없이 POST /kb 하던 기존 테스트들은 conftest `_make_autogrant_client`(그룹 auto-provision + owner grant)로 전제 제공; 필수성 계약은 `test_create_kb_requires_group_id`(raw client, 422)로 검증.
+- **완료(facade, kb-pipeline)**: `X-Facade-Key` 공유시크릿 게이트(stateful 엔드포인트) — kb-backend 만 호출, 우회 차단. facade pytest 45/45 green.
+- **검증**: kb-backend `577 passed, 11 failed` — 11개는 **전부 pre-existing docguard 게이트/파이프라인 실패**(baseline 동일: test_job_status 5 + test_pipeline 4 + raganything 1 + ragflow 1). 그룹기능 전용·연관 테스트는 100% green. `SqlSharesRepo`→acl dangling 0(grep).
+- **Phase 0 Postgres 통합 ✅ 완료(2026-07-06)**: 실제 배포가 **compose(`kbp-postgres-1`, 볼륨 이미 영속)** 임을 확인 → 플랜의 standalone 런처 볼륨화(Task 0.1)는 불필요로 스킵. 실상은 "두 PG 서버 통합"이 아니라 **kb-backend 를 sqlite(dev.db 18MB) → 같은 인스턴스의 `kb_orchestrator` DB 로 이전**. 절차: `kb` 롤+DB 생성(비파괴) → `alembic upgrade head`(신스키마) → **스냅샷 기반 데이터 복사**(11테이블 카운트 전부 일치: KB 23/docs 145/chunks 10,747/jobs 176/…) + **KB별 기본그룹 백필**(group_id NULL 0) + **기존 kb_shares 2건을 그룹 멤버십으로 보존** → config/.env pg 전환(백업+롤백주석) → **kb-backend 재기동(feature 코드+pg)**. 검증: 앱이 kb_orchestrator 연결(pg_stat_activity), `/groups` 401 게이트 라이브, compose 스택 8개 healthy 무손상. 이관 스냅샷 `_workspace/dev.db.migrate-snapshot-20260706` 보존(롤백 자산).
+- **미완/후속**: ☐ 브랜치 `feat/group-access-control` **머지**(코드는 재기동으로 dev 라이브 배포됨, 정식 머지·PR 미완). ☐ 프론트(그룹 생성/지정 UI). ◐ W4 RLS 하드닝(별도, 그룹기능과 직교). ☐ pre-existing 게이트 11실패는 본 작업 무관(별도 조사). ☐ facade 시크릿게이트 활성화(`KBP_FACADE_KEY` 미설정=현재 게이트 dormant, facade 컨테이너도 구이미지 — 활성화 시 facade 재배포+양쪽 키 설정 필요).
+
+---
+
 ## 1. 차용 vs 신규 작업항목 (W0~W6)
 
 **차용(reuse)**: kordoc/OpenDataLoader/markitdown/VLM(파서) · raganything `modalprocessors` 구조 · `adaptive_chunk` 서비스(329 테스트) · edgequake(`migrations/*.sql` + `edgequake-pipeline`/`-storage`/`-api`).
