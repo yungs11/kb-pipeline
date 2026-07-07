@@ -77,6 +77,16 @@ def expand_codes(value: str, code_map: Dict[str, str]) -> List[Dict[str, str]]:
     return result
 
 
+def _row_key(chunk: RagChunk) -> int:
+    """청크의 원본 엑셀 행(정렬용). source.start_row 우선, 없으면 metadata.excel_row, 그래도 없으면 0."""
+    src = chunk.source or {}
+    r = src.get("start_row")
+    if isinstance(r, int):
+        return r
+    r = (chunk.metadata or {}).get("excel_row")
+    return r if isinstance(r, int) else 0
+
+
 class DelegationRulePlugin(ParserPlugin):
     name = "delegation_rule"
     priority = 10
@@ -127,7 +137,13 @@ class DelegationRulePlugin(ParserPlugin):
 
         config = getattr(ctx, "config", None)
         max_chars = getattr(config, "delegation_merge_max_chars", 1100) if config is not None else 1100
-        return merge_sibling_rules(out, max_chars=max_chars)
+        merged = merge_sibling_rules(out, max_chars=max_chars)
+        # 엑셀 위→아래 행 순서로 안정정렬. 기존엔 base_chunks(note 등) 뒤에 delegation_rows 를 append 해
+        # [note 블록][delegation 블록]으로 뒤섞였음. table_summary=맨앞, section_summary=맨뒤,
+        # 그 외 body(note/delegation_rule/matrix_fact/table_row/hierarchy_node/total_row)는 start_row 행순.
+        # 병합은 정렬 전 완료 → 형제-run 로직 무영향. 병합 그룹 내부 note 는 그룹 뒤로(블록단위 인터리브).
+        _cls = {"table_summary": 0, "section_summary": 2}
+        return sorted(merged, key=lambda c: (_cls.get(c.chunk_type, 1), _row_key(c)))
 
     # ------------------------------------------------------- matrix_fact 보강
     def _annotate_matrix_fact(self, chunk: RagChunk) -> None:

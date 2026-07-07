@@ -16,10 +16,23 @@ from openpyxl.utils import get_column_letter
 
 from ..config import ParserConfig
 from ..pipeline import build_canvases, detect_and_classify
+from ..parsers.hierarchy_table import item_numbering_level
+from ..parsers.flat_table import cell_text, body_rows_of
 
 ERROR_RE = re.compile(r"#(REF|VALUE|DIV/0|N/A|NAME\?|NULL|NUM)!?")
 # 인덱스열 라벨(나란히 놓인 독립 표 각각의 행번호 열) — 중복 시 side_by_side 강신호
 _INDEX_RE = re.compile(r"^(순번|연번|번호|no\.?|#|seq|id)$", re.IGNORECASE)
+
+
+def _numbering_restart(col_min_ordered):
+    """계층열 왼쪽→오른쪽 순서의 [(col, min_level), ...] 에서, 깊은 열의 최소 번호레벨이
+    얕은 열 이하(<=)로 되돌아가는(번호 재시작) 첫 쌍 (cs, cd) 을 반환. 없으면 None.
+    각 열의 최소레벨이 strictly 증가해야 정상 계층(2-1 위임전결형); 되돌아가면 상하위 모호."""
+    for i in range(1, len(col_min_ordered)):
+        (cs, ms), (cd, md) = col_min_ordered[i - 1], col_min_ordered[i]
+        if md <= ms:
+            return (cs, cd)
+    return None
 
 
 def _detect_side_by_side(labels: Dict[int, str]):
@@ -158,6 +171,44 @@ def compute_gate_summary(input_path, chunks: List[Dict[str, Any]]) -> Dict[str, 
             if empty_cols and empty_ratio > 0.5 and len(labels) < 2:
                 findings.append({"code": "empty_header", "cells": empty_cols[:20],
                                  "detail": f"헤더 컬럼명이 비어있음: {', '.join(empty_cols[:5])}"})
+
+        # 3b) ambiguous_hierarchy — 계층열의 최소 번호레벨이 strictly 증가하지 않으면
+        #     (깊은 열이 얕은 열과 같은 단계로 번호를 재시작) 상하위 관계가 모호 (SoT §계층).
+        #     region_type=='hierarchical_matrix' 한정(precision 우선). cells 는 실제 번호 body 셀.
+        #     [알려진 한계 — false-negative] 이 신호는 열 레벨을 item_numbering_level 로만 근사한다.
+        #     대분류가 '미인식 마커'(①/i/a 등, item_numbering_level=None)인 경우, 파서는
+        #     컬럼위치 fallback 으로 그 열에 level(예 0)을 부여해 하위의 인식마커('1.', level0)와
+        #     충돌·붕괴하지만, 이 스캔은 그 열을 못 봐서 놓친다. 대분류가 인식 마커(1./가./I.)인
+        #     흔한 케이스(예: 직무전결)는 정확히 커버. 근본 커버는 증상기반 신호(고아율 등, 후속).
+        for region, canvas in by_sheet.get(ws.title, []):
+            if region.region_type != "hierarchical_matrix":
+                continue
+            hcols = sorted(region.hierarchy_cols or [])
+            if len(hcols) < 2:
+                continue
+            col_min_cell = {}  # c -> (row, min_level): 그 열의 최소 번호레벨을 달성한 첫 body 셀
+            for r in body_rows_of(region, canvas):
+                for c in hcols:
+                    t = cell_text(canvas.get_cell(r, c))
+                    if not t:
+                        continue
+                    lv = item_numbering_level(t)
+                    if lv is None:
+                        continue
+                    prev = col_min_cell.get(c)
+                    if prev is None or lv < prev[1]:
+                        col_min_cell[c] = (r, lv)
+            ordered = [(c, col_min_cell[c][1]) for c in hcols if c in col_min_cell]
+            bad = _numbering_restart(ordered)
+            if bad:
+                cs, cd = bad
+                findings.append({
+                    "code": "ambiguous_hierarchy",
+                    "cells": [f"{get_column_letter(cs)}{col_min_cell[cs][0]}",
+                              f"{get_column_letter(cd)}{col_min_cell[cd][0]}"],
+                    "detail": (f"깊은 계층 열({get_column_letter(cd)})의 번호가 얕은 열"
+                               f"({get_column_letter(cs)})과 같은 단계로 재시작되어 상·하위 관계가 모호함"),
+                })
 
         # 4) header_leak — chunk 의 field[k]==k (헤더행이 데이터로 추출됨)
         for c in chunks:
