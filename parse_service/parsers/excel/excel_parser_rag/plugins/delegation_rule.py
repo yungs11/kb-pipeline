@@ -269,14 +269,19 @@ class DelegationRulePlugin(ParserPlugin):
                 continue  # 전폭 병합 섹션배너 — 규칙 행 아님(비고 echo 차단). stack 은 위에서 갱신됨
 
             approvers: List[str] = []
+            relations: Dict[str, List[str]] = {}  # 비-○ 마커값 → [열 라벨] (보고/위원회/금액 등 원문)
             ambiguous = False
             for col, label in matrix_cols:
                 cell = canvas.get_cell(row, col)
                 value = _cell_text(cell)
-                if value and is_marker_cell(cell, value):
+                if not value:
+                    continue
+                if is_marker_cell(cell, value):
                     approvers.append(one_line(label))
                     if is_ambiguous_marker_cell(cell, value):
                         ambiguous = True
+                else:
+                    relations.setdefault(one_line(value), []).append(one_line(label))
 
             specials: Dict[str, str] = {}
             for col, label in metadata_cols:
@@ -289,14 +294,14 @@ class DelegationRulePlugin(ParserPlugin):
                     continue
                 specials[one_line(label)] = value
 
-            if not approvers and not specials:
+            if not approvers and not specials and not relations:
                 continue
             if not path:
                 path = [f"행 {row}"]
 
             chunks.append(
                 self._make_rule_chunk(
-                    region, canvas, ctx, row, path, approvers, specials,
+                    region, canvas, ctx, row, path, approvers, specials, relations,
                     title=title, ambiguous=ambiguous, came_from_merge=came_from_merge,
                 )
             )
@@ -311,6 +316,7 @@ class DelegationRulePlugin(ParserPlugin):
         path: List[str],
         approvers: List[str],
         specials: Dict[str, str],
+        relations: Dict[str, List[str]],
         *,
         title: Optional[str],
         ambiguous: bool,
@@ -336,13 +342,24 @@ class DelegationRulePlugin(ParserPlugin):
             display = value + (f" [{', '.join(names)}]" if names else "")
             extras.append(f"{label}: {display}")
 
+        if relations:
+            rel_str = ", ".join(
+                f"{marker} {', '.join(cols)}" for marker, cols in relations.items()
+            )
+            fields["관계"] = rel_str  # 알려진 키 — sibling_merger._line 이 병합 시 읽는다
+            for marker, cols in relations.items():
+                facts.append({"predicate": marker, "value": ", ".join(cols)})
+            extras.append(rel_str)
+
         base = f"{ctx.document_title}의 {canvas.sheet_name} 시트에서 '{path_text}' 항목"
         if approvers:
             content = f"{base}의 전결권자는 {', '.join(approvers)}이다."
-        else:
+        elif specials:
             content = f"{base}의 " + ", ".join(
                 f"{label}는 {value}이다" for label, value in specials.items()
             ) + "."
+        else:
+            content = f"{base}."  # relations-only(금액행) 또는 빈 케이스 — extras 가 뒤에 붙음
         if extras:
             content += " (" + ", ".join(extras) + ")"
 
