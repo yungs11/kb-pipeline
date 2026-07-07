@@ -97,6 +97,56 @@ class HierarchyTracker:
         return self._items[-1][1] if self._items else ""
 
 
+class ColHierarchyTracker:
+    """계층열마다 독립 번호 sub-stack 을 유지하고 path 를 열순 concat 으로 만든다.
+
+    HierarchyTracker(단일 전역 스택)와 달리, 깊은 열의 항목이 얕은 열 항목을 pop 하지 못한다
+    → 세로 병합된 좌측 계층열 셀이 그 span 의 부모로 유지된다(SoT §13.4 보강). 열 내부에서만
+    item_numbering_level 로 sibling 정리. 얕은 열이 갱신되면 그보다 깊은 열 체인은 무효화한다.
+
+    가정: 무번호 카테고리는 번호 항목보다 얕은(왼쪽) 열에 있다(무번호 push 는 그 열 체인을
+    리셋한다). 한 열에 '번호들 뒤 무번호 항목'이 섞이면 그 열의 번호 조상이 소실될 수 있다.
+    """
+
+    def __init__(self, hierarchy_cols: Sequence[int]):
+        self.cols = sorted(hierarchy_cols)
+        self.chains: Dict[int, List[Tuple[int, str]]] = {c: [] for c in self.cols}
+
+    def push(self, col: int, text: str) -> List[str]:
+        if col not in self.chains:
+            return self.path
+        lv = item_numbering_level(text)
+        ch = self.chains[col]
+        if lv is not None:
+            while ch and ch[-1][0] >= lv:
+                ch.pop()
+            ch.append((lv, text))
+        else:
+            ch.clear()
+            ch.append((0, text))  # 무번호(카테고리) = 그 열의 대표값(교체)
+        for c in self.cols:
+            if c > col:
+                self.chains[c].clear()  # 얕은 열 갱신 → 깊은 열 컨텍스트 무효화
+        return self.path
+
+    @property
+    def path(self) -> List[str]:
+        out: List[str] = []
+        for c in self.cols:
+            out.extend(text for _, text in self.chains[c])
+        return out
+
+    @property
+    def top(self) -> str:
+        p = self.path
+        return p[0] if p else ""
+
+    @property
+    def last_item(self) -> str:
+        p = self.path
+        return p[-1] if p else ""
+
+
 def detect_item_text(
     canvas: "SheetCanvas", row: int, hier_cols: Sequence[int], tracker: HierarchyTracker
 ) -> Tuple[str, Optional[int], bool]:

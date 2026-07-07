@@ -31,7 +31,7 @@ from ..textutil import (
 )
 from .base import BaseRegionParser, ParseContext
 from .flat_table import body_rows_of, cell_text, flatten_headers, merged_text, region_row_text
-from .hierarchy_table import HierarchyTracker, SectionCollector, detect_item_text
+from .hierarchy_table import ColHierarchyTracker, HierarchyTracker, SectionCollector, detect_item_text
 
 if TYPE_CHECKING:
     from ..canvas.sheet_canvas import SheetCanvas
@@ -83,7 +83,7 @@ class MatrixTableParser(BaseRegionParser):
     # ------------------------------------------------------------------ parse
     def parse(self, region: "Region", canvas: "SheetCanvas", ctx: ParseContext) -> List[RagChunk]:
         hier_cols, matrix_cols, meta_cols = self._resolve_axes(region, canvas)
-        tracker = HierarchyTracker(hier_cols)
+        tracker = ColHierarchyTracker(hier_cols)
         sections = SectionCollector()
         body_chunks: List[RagChunk] = []
         stats = {"fact_rows": 0, "facts": 0, "nodes": 0, "notes": 0, "totals": 0, "ambiguous": 0}
@@ -115,9 +115,13 @@ class MatrixTableParser(BaseRegionParser):
                 stats["totals"] += 1
                 continue
 
+            # 다중열: 이 행의 모든 계층열 raw 값을 얕은→깊은(sorted) 순서로 각 열 체인에 push.
+            # 병합 continuation(빈 raw)·note·total 은 push 안 함(체인 오염/부모 붕괴 방지).
+            for c in sorted(hier_cols):
+                t = cell_text(canvas.get_cell(r, c))
+                if t and not is_note_text(t) and not is_total_text(t):
+                    tracker.push(c, t)
             path = tracker.path
-            if item_text:
-                path = tracker.push(item_text, item_col if item_col is not None else hier_cols[0])
 
             if values or meta_values:
                 meta_fields = self._meta_fields(meta_values, ctx)
