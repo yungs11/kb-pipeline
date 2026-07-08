@@ -62,3 +62,46 @@ def test_mixed_content_llm():
 def test_form_widgets_llm():
     s = classify(_sig(char_count=80, has_native_text=True, has_forms=True, image_coverage=0.0))
     assert s.bucket is Bucket.LLM_NEEDED
+
+
+def test_triage_document_digital_text_page():
+    import pymupdf
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "This is a digital text page with enough words to classify.")
+    data = doc.tobytes()
+    doc.close()
+
+    from parse_service.parsers.pdf.triage import triage_document, Bucket
+    sigs = triage_document(data)
+    assert len(sigs) == 1
+    assert sigs[0].page_number == 1          # 1-based(page.number+1)
+    assert sigs[0].has_native_text is True
+    assert sigs[0].bucket is Bucket.TEXT_ONLY
+
+
+def test_triage_document_bad_bytes_returns_empty():
+    from parse_service.parsers.pdf.triage import triage_document
+    assert triage_document(b"not a pdf at all") == []
+
+
+def test_triage_document_real_form_widget_llm():
+    """실제 form widget PDF → has_forms=True(widgets() 경로) → LLM_NEEDED.
+
+    annots() 는 위젯을 못 잡으므로 이 테스트가 없으면 has_forms 는 dead code 로 남는다.
+    """
+    import pymupdf
+    doc = pymupdf.open()
+    page = doc.new_page()
+    w = pymupdf.Widget()
+    w.field_name = "f1"
+    w.field_type = pymupdf.PDF_WIDGET_TYPE_TEXT
+    w.rect = pymupdf.Rect(72, 72, 220, 96)
+    page.add_widget(w)
+    data = doc.tobytes()
+    doc.close()
+
+    from parse_service.parsers.pdf.triage import triage_document, Bucket
+    sigs = triage_document(data)
+    assert sigs[0].has_forms is True
+    assert sigs[0].bucket is Bucket.LLM_NEEDED
