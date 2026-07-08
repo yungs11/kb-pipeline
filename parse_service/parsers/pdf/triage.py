@@ -58,36 +58,33 @@ def classify(
     blank_char: int = 10,
     ocr_image_cov: float = 0.25,
     ocr_text_max: int = 30,
-    simple_table_max: int = 5,
     vector_min: int = 40,
     mixed_image_cov: float = 0.25,
 ) -> PageSignals:
-    """우선순위 SKIP → LLM_NEEDED → OCR_NEEDED → TEXT_ONLY. 첫 매치에서 확정."""
+    """우선순위 SKIP → LLM_NEEDED → OCR_NEEDED → TEXT_ONLY. 첫 매치에서 확정.
+
+    LLM 은 **순서도/차트(벡터) + 혼합(이미지+텍스트)** 만 트리거한다(2026-07-08 결정:
+    표 개수·양식은 LLM 트리거에서 제외 — 표는 텍스트가 있어 ODL/OCR 로 충분, 양식은
+    스캔 코퍼스에서 거의 안 켜짐). `has_forms` 는 SKIP 방지용으로만 남긴다.
+    """
     chars = sig.char_count
     imgcov = sig.image_coverage
 
     # 1) SKIP — 진짜 빈 페이지(텍스트/이미지/벡터/양식 모두 없음).
-    #    ⚠️ 아래 3개 배제조건 필수(v2/v3): 이 조건들이 없으면 SKIP 이 너무 공격적이라
-    #    - 순수 벡터 순서도(image_count 0 이지만 drawing_count↑) → 벡터 LLM 트리거를 못 탐
-    #    - 이미지(스캔) 페이지(char 0 이지만 image_count>0) → OCR 못 타고 드롭(콘텐츠 유실)
-    #    - 양식 페이지(char 0 이지만 has_forms) → 양식 LLM 트리거를 못 탐(드롭)
-    #    ⇒ 이런 페이지는 SKIP 하지 않고 아래 규칙으로 넘긴다.
+    #    ⚠️ 배제조건 필수: 순수 벡터 순서도(image 0·drawing↑)·이미지/스캔 페이지(image>0)·
+    #    양식 페이지(has_forms)가 SKIP 으로 오검돼 드롭되는 것을 막는다.
     if (chars < blank_char and sig.image_count == 0
             and sig.drawing_count < vector_min and not sig.has_forms):
         sig.bucket = Bucket.SKIP
         sig.reason = f"빈 페이지 (글자={chars}, 이미지={sig.image_count}, 벡터={sig.drawing_count})"
         return sig
 
-    # 2) LLM_NEEDED — 하드 트리거(하나라도 참이면 즉시 VL)
+    # 2) LLM_NEEDED — 순서도/차트(벡터) + 혼합만.
     llm: list[str] = []
-    if sig.table_count > simple_table_max:
-        llm.append(f"표 {sig.table_count}개(>{simple_table_max})")
     # 벡터 다수 + native 텍스트 적음 = 순서도/차트(디지털 표의 경계선 오탐 방지: 표는 native
-    # 텍스트가 많아 has_native_text=True → 여기 안 걸리고 ODL/표>5 규칙으로 처리).
+    # 텍스트가 많아 has_native_text=True → 여기 안 걸리고 ODL/OCR 로 처리).
     if sig.drawing_count >= vector_min and not sig.has_native_text:
         llm.append(f"벡터드로잉 {sig.drawing_count}(순서도/차트 근사)")
-    if sig.has_forms:
-        llm.append("양식(Form) 위젯")
     if sig.image_count > 0 and sig.has_native_text and imgcov >= mixed_image_cov:
         llm.append(f"혼합 콘텐츠(이미지={imgcov:.2f}+텍스트)")
     if llm:
@@ -96,10 +93,10 @@ def classify(
         return sig
 
     # 3) OCR_NEEDED — 스캔/이미지 중심 + 단순. `or image_count>0` 로 near-textless 페이지가
-    #    작은 figure(이미지 비율 0.02~0.25)를 달고 TEXT_ONLY(빈 ODL)로 새는 gap-band 방지(v3).
+    #    작은 figure(이미지 비율 0.02~0.25)를 달고 TEXT_ONLY(빈 ODL)로 새는 gap-band 방지.
     if (imgcov >= ocr_image_cov or sig.image_count > 0) and chars < ocr_text_max:
         sig.bucket = Bucket.OCR_NEEDED
-        sig.reason = f"스캔/이미지 중심 단순 (이미지={imgcov:.2f}, 글자={chars}, 표={sig.table_count})"
+        sig.reason = f"스캔/이미지 중심 단순 (이미지={imgcov:.2f}, 글자={chars})"
         return sig
 
     # 4) TEXT_ONLY — 디지털 본문
@@ -141,8 +138,8 @@ def extract_signals(page: "pymupdf.Page", *, heavy_scan: bool = True) -> PageSig
     )
     sig.image_coverage = min(img_area / page_area, 1.0)
 
-    # 양식 위젯: PyMuPDF 1.27 에서 form widget 은 page.annots() 로는 안 잡히고
-    # page.widgets() 로만 접근된다(annots 사용은 dead code — v2 수정).
+    # 양식 위젯: PyMuPDF 1.27 에서 form widget 은 page.annots() 가 아니라 page.widgets() 로만
+    # 잡힌다. LLM 트리거는 아니지만 SKIP 방지용으로 계산(cheap).
     try:
         for _w in (page.widgets() or []):
             sig.has_forms = True
@@ -150,18 +147,17 @@ def extract_signals(page: "pymupdf.Page", *, heavy_scan: bool = True) -> PageSig
     except Exception:  # noqa: BLE001
         pass
 
-    if heavy_scan:
-        try:
-            tabs = page.find_tables()
-            sig.table_count = len(tabs.tables)
-        except Exception:  # noqa: BLE001
-            sig.table_count = 0
+    # 벡터 드로잉(순서도/차트 근사). ⚡지연 최적화(2026-07-08): get_drawings 는 벡터 path 많은
+    # 페이지에서 무겁다. 벡터 LLM 트리거는 `not has_native_text` 에서만, SKIP 도 char<10(⊂ 텍스트
+    # 없음)에서만 벡터를 보므로 **native 텍스트가 있는 페이지에선 아예 계산하지 않는다**(디지털
+    # 본문=대다수 → 큰 지연 절감). find_tables 는 표를 라우팅에 안 쓰므로 호출 자체를 제거.
+    if heavy_scan and not sig.has_native_text:
         try:
             sig.drawing_count = len(page.get_drawings())
         except Exception:  # noqa: BLE001
             sig.drawing_count = 0
-    sig.has_tables = sig.table_count > 0
     sig.vector_drawing = sig.drawing_count > 0
+    # table_count/has_tables 는 라우팅 미사용 → 미계산(기본 0/False).
 
     return sig
 

@@ -25,11 +25,11 @@ def test_scanned_simple_ocr():
     assert s.bucket is Bucket.OCR_NEEDED
 
 
-def test_many_tables_llm():
-    # 표 >5 → LLM (디지털이어도)
+def test_many_tables_stays_text():
+    # 표 개수는 라우팅 트리거 아님(2026-07-08) — 디지털 표 페이지는 TEXT_ONLY(ODL).
     s = classify(_sig(char_count=1000, has_native_text=True, has_tables=True,
                       table_count=8, image_coverage=0.0))
-    assert s.bucket is Bucket.LLM_NEEDED
+    assert s.bucket is Bucket.TEXT_ONLY
 
 
 def test_flowchart_vectors_llm():
@@ -59,9 +59,13 @@ def test_mixed_content_llm():
     assert s.bucket is Bucket.LLM_NEEDED
 
 
-def test_form_widgets_llm():
+def test_form_not_llm_but_not_skipped():
+    # 양식은 LLM 트리거 아님(2026-07-08). 단 SKIP 방지용으로 has_forms 유지 → 드롭 안 됨.
     s = classify(_sig(char_count=80, has_native_text=True, has_forms=True, image_coverage=0.0))
-    assert s.bucket is Bucket.LLM_NEEDED
+    assert s.bucket is Bucket.TEXT_ONLY
+    # 텍스트 없는 양식 페이지도 SKIP 되지 않음(has_forms 배제조건)
+    s2 = classify(_sig(char_count=0, has_forms=True, image_coverage=0.0))
+    assert s2.bucket is not Bucket.SKIP
 
 
 def test_triage_document_digital_text_page():
@@ -85,10 +89,11 @@ def test_triage_document_bad_bytes_returns_empty():
     assert triage_document(b"not a pdf at all") == []
 
 
-def test_triage_document_real_form_widget_llm():
-    """실제 form widget PDF → has_forms=True(widgets() 경로) → LLM_NEEDED.
+def test_triage_document_real_form_widget_not_skipped():
+    """실제 form widget PDF → has_forms=True(widgets() 경로)로 검출되고, SKIP 되지 않는다.
 
-    annots() 는 위젯을 못 잡으므로 이 테스트가 없으면 has_forms 는 dead code 로 남는다.
+    (annots() 는 위젯을 못 잡으므로 widgets() 사용 검증. 양식은 LLM 트리거가 아니지만
+    has_forms 배제조건 덕에 빈-텍스트 양식 페이지도 드롭되지 않는다.)
     """
     import pymupdf
     doc = pymupdf.open()
@@ -104,4 +109,4 @@ def test_triage_document_real_form_widget_llm():
     from parse_service.parsers.pdf.triage import triage_document, Bucket
     sigs = triage_document(data)
     assert sigs[0].has_forms is True
-    assert sigs[0].bucket is Bucket.LLM_NEEDED
+    assert sigs[0].bucket is not Bucket.SKIP
