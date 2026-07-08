@@ -1,6 +1,6 @@
 # PDF Triage (PyMuPDF 기반 페이지 분류) 설계
 
-**목표**: parse-svc 의 PDF 파싱에서, OCR/VL 같은 비싼 처리를 쓰기 전에 **PyMuPDF 로 저비용 페이지 시그널을 뽑아 페이지별로 처리 경로를 결정(triage)** 한다. 디지털 텍스트 페이지는 무료 추출(ODL), 스캔+단순 페이지는 OCR, 복잡/혼합/차트 페이지는 VL 로 보내 **비용·품질을 동시에 최적화**한다.
+**목표**: parse-svc 의 PDF 파싱에서, VL 같은 비싼 처리를 쓰기 전에 **PyMuPDF 로 저비용 페이지 시그널을 뽑아 페이지별로 처리 경로를 결정(triage)** 한다. 디지털 텍스트 페이지는 무료 추출(ODL), 스캔+단순 페이지는 OCR, 복잡/혼합/차트 페이지는 VL 로 라우팅해 **페이지에 맞는 처리로 품질을 올린다**. ⚠️ **현 단계 비용**: TEXT_ONLY 는 VL 미호출(절감)이지만 OCR/LLM 은 둘 다 VL(로컬 OCR 엔진 후속) — 순수 비용절감은 로컬 OCR 연결 후에 실현된다.
 
 참고: PyTorchKR "PyMuPDF 기반 초가성비 문서 분류(Triage)" 아이디어 및 사용자 제공 레퍼런스 `triage.py`.
 
@@ -33,7 +33,7 @@
 | `text_coverage` | text block 면적합 / page 면적 (`get_text("blocks")`, block_type==0) | 텍스트 밀도 |
 | `image_count`, `image_coverage` | `get_image_info()` bbox 면적합 / page 면적 | 이미지 지배도 |
 | `has_tables`, `table_count` | `len(page.find_tables().tables)` | 표 유무/개수 |
-| `has_forms` | widget annotation 존재(`page.annots()`, `PDF_ANNOT_WIDGET`) | 양식 |
+| `has_forms` | form widget 존재(`page.widgets()` — PyMuPDF 1.27 은 `annots()` 로 위젯 미검출) | 양식 |
 | `block_count` | `len(get_text("blocks"))` | 레이아웃 밀집도 |
 | `vector_drawing`, `drawing_count` | `len(page.get_drawings())` | 순서도/차트/도형 근사 |
 
@@ -41,23 +41,20 @@
 
 ## 분류 규칙 (`classify(sig, **thresholds)`)
 
-우선순위 순서로 판정하고 `sig.bucket` + `sig.reason` 기입. 임계값은 **키워드 인자(모듈 상수 기본값)** 로 튜닝 가능.
+**우선순위 순서**(위에서부터 첫 매치에서 확정): **SKIP → LLM_NEEDED → OCR_NEEDED → TEXT_ONLY**. `sig.bucket` + `sig.reason` 기입. 임계값은 **키워드 인자(모듈 상수 기본값)** 로 튜닝 가능. LLM 은 **하드 트리거(아래 조건 하나라도 참이면 즉시 LLM)** — 복잡도 점수 합산식 아님(모호성 제거).
 
-기본 임계: `blank_char=10`, `blank_image_cov=0.02`, `ocr_image_cov=0.25`, `ocr_text_max=30`, `simple_table_max=5`, `dense_block=30`, `vector_min=40`(순서도/차트 근사 — 표 경계선 수준을 넘는 벡터 드로잉 개수), `llm_complexity_score=2`.
+기본 임계: `blank_char=10`, `ocr_image_cov=0.25`, `ocr_text_max=30`, `simple_table_max=5`, `vector_min=40`(순서도/차트 근사 — 표 경계선 수준을 넘는 벡터 드로잉 개수), `mixed_image_cov=0.25`.
 
-1. **SKIP** — `char_count < blank_char AND image_coverage < blank_image_cov` → 빈 페이지(출력 제외).
-2. **OCR_NEEDED** — 스캔형(`image_coverage >= ocr_image_cov AND char_count < ocr_text_max`) **이면서 단순**: `table_count <= simple_table_max` AND **not** 복잡신호(아래 LLM 신호 없음). 스캔+텍스트+간단한 표(≤5).
-3. **LLM_NEEDED** — 복잡/구조/혼합. 다음 중 하나라도:
-   - `table_count > simple_table_max` (표 많음)
-   - `has_forms`
-   - `image_count > 0 AND has_native_text` (혼합 콘텐츠)
-   - `drawing_count >= vector_min` (표 경계선 수준 초과 벡터 드로잉) → **순서도/차트 근사**
-   - `block_count > dense_block` (밀집 레이아웃)
-   - `text_coverage < 0.10 AND char_count > 50` (양식형 성긴 배치)
-   - 복잡도 점수 `>= llm_complexity_score(기본 2)` 로 종합.
+1. **SKIP** — `char_count < blank_char AND image_count == 0 AND drawing_count < vector_min AND NOT has_forms` → 진짜 빈 페이지(출력 제외). ⚠️ 배제조건 필수: 이 조건들이 없으면 순수 벡터 순서도(image_count 0·drawing↑)·이미지/스캔 페이지(image_count>0)·양식 페이지(has_forms)가 SKIP 으로 오검돼 각자의 라우팅(LLM/OCR)을 못 타고 드롭된다.
+2. **LLM_NEEDED** — 아래 **하드 트리거 중 하나라도** 참 → VL:
+   - `table_count > simple_table_max` (표 >5)
+   - `drawing_count >= vector_min AND NOT has_native_text` (벡터 다수 + native 텍스트 적음 → 순서도/차트. 디지털 표 경계선은 native 텍스트가 많아 제외)
+   - `has_forms` (양식 위젯 — `page.widgets()` 로 검출)
+   - `image_count > 0 AND has_native_text AND image_coverage >= mixed_image_cov` (**실질 혼합** — 이미지 비중 있는 텍스트+이미지 혼재)
+3. **OCR_NEEDED** — `(image_coverage >= ocr_image_cov OR image_count > 0) AND char_count < ocr_text_max` (스캔/이미지 중심 + 단순 — LLM 하드 트리거에 안 걸린 경우. `image_count>0` 로 작은 figure 를 단 near-textless 페이지도 포함).
 4. **TEXT_ONLY** — 그 외(native 텍스트 추출 가능한 일반 본문) → 기존 확장자별 parser(ODL).
 
-**OCR↔LLM 경계 요지**(사용자 기준): 스캔이어도 *단순(텍스트+간단한 표 ≤5)*이면 OCR, *순서도·차트·혼합·표>5·고복잡도*면 LLM(VL). ※ 순서도/차트 정밀판별은 어려워 **벡터 드로잉 밀도** 휴리스틱으로 근사하며, 실문서로 임계 튜닝 전제.
+**OCR↔LLM 경계 요지**(사용자 기준): LLM 하드 트리거(순서도·차트·혼합·표>5·양식)에 걸리면 VL, 안 걸리고 스캔형이면 OCR(단순), native 텍스트면 TEXT_ONLY. `block_count`/`text_coverage` 기반 트리거는 **사용 안 함**(정상 텍스트도 bbox 면적이 작아 오라우팅). ※ 순서도/차트 정밀판별은 어려워 **벡터 드로잉 밀도** 휴리스틱으로 근사하며, 실문서로 임계 튜닝 전제.
 
 ## 라우팅 / 핸들러 (`parse()` 통합)
 
@@ -73,7 +70,7 @@
 4. 각 페이지 dict 에 `route`, `triage_reason`, 주요 signals 를 메타로 태깅(관측/비용추적, 소비자 비파괴 additive).
 5. `RouteResult(kind="pages", chunk_needed=True, pages=pages)` (기존과 동일 계약).
 
-기존 `_digital_text_len`/`_DIGITAL_MIN_CHARS` 는 triage 로 대체·제거.
+기존 `_digital_text_len`/`_DIGITAL_MIN_CHARS` 는 triage 로 대체하되 **삭제하지 않고 폴백 헬퍼로 유지**한다(fitz open 실패/비-PDF 로 `triage_document`=[] 일 때 `_route_for` 가 사용).
 
 ## 데이터 흐름
 
@@ -104,7 +101,8 @@ file_bytes ─┬─ triage_document(fitz)  → [PageSignals(bucket, reason, sig
   - 순서도(벡터 드로잉 다수, 표 0, 텍스트 소) → LLM_NEEDED
   - 혼합(이미지+native 텍스트) → LLM_NEEDED
   - 빈 페이지(char<10, image_cov<0.02) → SKIP
-- **통합** `test_parser_pdf.py`(확장): 실제 신탁 PDF(3p) → 표 페이지 LLM_NEEDED → VL 로 내용 채워짐(회귀). 기존 `_digital_text_len` 테스트는 triage 로 치환.
+- **통합** `test_parser_pdf.py`(확장): 합성 monkeypatch 로 라우팅(text/ocr/llm/skip)+폴백을 자동 검증. 기존 `_digital_text_len` 테스트는 폴백 경로로 그대로 통과(치환 아님).
+- **실문서 회귀는 수동**(라이브 VL 의존 → CI 부적합): Task4 에서 실제 신탁 PDF(3p) triage 리포트 + 재파싱으로 확인(스캔 표 페이지 → OCR_NEEDED(VL) 로 채워짐).
 - extract_signals 는 fitz 실호출이라 소형 합성 PDF(테스트 픽스처)로 스모크.
 
 ## 비범위 / 향후
