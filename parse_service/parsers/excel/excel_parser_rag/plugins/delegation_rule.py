@@ -268,41 +268,27 @@ class DelegationRulePlugin(ParserPlugin):
             if self._is_section_banner_row(region, canvas, row):
                 continue  # 전폭 병합 섹션배너 — 규칙 행 아님(비고 echo 차단). stack 은 위에서 갱신됨
 
-            approvers: List[str] = []
-            relations: Dict[str, List[str]] = {}  # 비-○ 마커값 → [열 라벨] (보고/위원회/금액 등 원문)
-            ambiguous = False
-            for col, label in matrix_cols:
-                cell = canvas.get_cell(row, col)
-                value = _cell_text(cell)
+            # 마커 해석 없이 모든 비계층 열(matrix+metadata)을 header:원문값 으로, 열 순서대로.
+            # 빈값·병합 헤더 echo 는 스킵. ○ 는 '○' 원문 유지(정규화 '해당' 아님), 보고/금액/비고 그대로.
+            cells: List[Tuple[str, str]] = []
+            for col, label in sorted([*matrix_cols, *metadata_cols]):
+                value = _cell_text(canvas.get_cell(row, col))
                 if not value:
                     continue
-                if is_marker_cell(cell, value):
-                    approvers.append(one_line(label))
-                    if is_ambiguous_marker_cell(cell, value):
-                        ambiguous = True
-                else:
-                    relations.setdefault(one_line(value), []).append(one_line(label))
-
-            specials: Dict[str, str] = {}
-            for col, label in metadata_cols:
-                cell = canvas.get_cell(row, col)
-                value = _cell_text(cell)
-                if not value:
+                lbl = one_line(label)
+                if compact(value) in (compact(lbl), "전결권자"):  # 헤더 echo 제외
                     continue
-                # 병합 헤더가 본문으로 내려온 echo 는 제외
-                if compact(value) in (compact(label), "전결권자"):
-                    continue
-                specials[one_line(label)] = value
+                cells.append((lbl, value))
 
-            if not approvers and not specials and not relations:
+            if not cells:
                 continue
             if not path:
                 path = [f"행 {row}"]
 
             chunks.append(
                 self._make_rule_chunk(
-                    region, canvas, ctx, row, path, approvers, specials, relations,
-                    title=title, ambiguous=ambiguous, came_from_merge=came_from_merge,
+                    region, canvas, ctx, row, path, cells,
+                    title=title, came_from_merge=came_from_merge,
                 )
             )
         return chunks
@@ -314,54 +300,22 @@ class DelegationRulePlugin(ParserPlugin):
         ctx: ParseContext,
         row: int,
         path: List[str],
-        approvers: List[str],
-        specials: Dict[str, str],
-        relations: Dict[str, List[str]],
+        cells: List[Tuple[str, str]],
         *,
         title: Optional[str],
-        ambiguous: bool,
         came_from_merge: bool,
     ) -> RagChunk:
         path_text = " > ".join(path)
         rng = range_a1(row, region.min_col, row, region.max_col)
-
+        kv_str = ", ".join(f"{h}:{v}" for h, v in cells)
         fields: Dict[str, Any] = {
             "항목": path[-1] if path else "",
             "경로": path_text,
-            "전결권자": approvers,
+            "값": kv_str,
         }
-        facts: List[Dict[str, Any]] = [
-            {"predicate": "전결권자", "value": a} for a in approvers
-        ]
-        extras: List[str] = []
-        for label, value in specials.items():
-            fields[label] = value
-            expanded = expand_codes(value, ctx.code_map)
-            facts.append({"predicate": label, "value": value, "expanded": expanded})
-            names = [e["expanded"] for e in expanded if e["expanded"]]
-            display = value + (f" [{', '.join(names)}]" if names else "")
-            extras.append(f"{label}: {display}")
-
-        if relations:
-            rel_str = ", ".join(
-                f"{marker} {', '.join(cols)}" for marker, cols in relations.items()
-            )
-            fields["관계"] = rel_str  # 알려진 키 — sibling_merger._line 이 병합 시 읽는다
-            for marker, cols in relations.items():
-                facts.append({"predicate": marker, "value": ", ".join(cols)})
-            extras.append(rel_str)
-
+        facts: List[Dict[str, Any]] = [{"predicate": h, "value": v} for h, v in cells]
         base = f"{ctx.document_title}의 {canvas.sheet_name} 시트에서 '{path_text}' 항목"
-        if approvers:
-            content = f"{base}의 전결권자는 {', '.join(approvers)}이다."
-        elif specials:
-            content = f"{base}의 " + ", ".join(
-                f"{label}는 {value}이다" for label, value in specials.items()
-            ) + "."
-        else:
-            content = f"{base}."  # relations-only(금액행) 또는 빈 케이스 — extras 가 뒤에 붙음
-        if extras:
-            content += " (" + ", ".join(extras) + ")"
+        content = f"{base}: {kv_str}." if kv_str else f"{base}."
 
         return RagChunk(
             source_file=ctx.source_file,
@@ -388,9 +342,6 @@ class DelegationRulePlugin(ParserPlugin):
                 "sheet_index": canvas.sheet_index,
                 "excel_row": row,
                 "is_decision_row": True,
-                "has_approver": bool(approvers),
-                "has_special_values": bool(specials),
-                "ambiguous_marker": ambiguous,
                 "came_from_merged_cell": came_from_merge,
             },
         )

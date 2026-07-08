@@ -46,16 +46,8 @@ def _leaf(c: RagChunk) -> str:
 
 def _line(c: RagChunk) -> str:
     leaf = _leaf(c)
-    appr = _join((c.fields or {}).get("전결권자"))
-    base = f"- {leaf}: 전결권자 {appr}" if appr else f"- {leaf}"
-    extra = []
-    for k in ("합의", "수신", "비고", "관계"):
-        v = _join((c.fields or {}).get(k))
-        if v:
-            extra.append(f"{k}: {v}")
-    if extra:
-        base += " (" + ", ".join(extra) + ")"
-    return base
+    kv = _join((c.fields or {}).get("값"))
+    return f"- {leaf}: {kv}" if kv else f"- {leaf}"
 
 
 def _compose_content(group: List[RagChunk]) -> str:

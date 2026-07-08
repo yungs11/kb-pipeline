@@ -185,22 +185,9 @@ def build_content_text(chunk: "RagChunk", region: "Region", ctx: "ParseContext")
 
     if ct == "delegation_rule":
         subject = path_text or _first_of(fields, "항목") or title
-        approvers = _stringify(fields.get("전결권자"))
-        extras = []
-        for key in ("합의", "수신"):
-            value = _stringify(fields.get(key))
-            if value:
-                extras.append(f"{key}: {value}")
+        kv = _stringify(fields.get("값"))
         base = f"{doc}의 {sheet} 시트에서 '{subject}' 항목"
-        if approvers:
-            text = f"{base}의 전결권자는 {approvers}이다."
-        elif extras:
-            text = f"{base}의 전결 관련 기준이다."
-        else:
-            return f"{base}에 대한 전결 기준 항목이다."
-        if extras:
-            text += " (" + ", ".join(extras) + ")"
-        return text
+        return f"{base}: {kv}." if kv else f"{base}."
 
     if ct == "unsupported_artifact":
         return f"{doc}의 {sheet} 시트 {chunk.range} 영역은 지원되지 않는 구조여서 원문 위치만 보존했다."
