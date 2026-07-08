@@ -71,8 +71,7 @@ def _sig_meta(sig) -> dict:
     return {"triage_signals": {
         "char_count": sig.char_count,
         "image_coverage": round(sig.image_coverage, 3),
-        "drawing_count": sig.drawing_count,
-        "has_forms": sig.has_forms,
+        "content_len": sig.content_len,
     }}
 
 
