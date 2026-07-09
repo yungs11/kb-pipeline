@@ -77,21 +77,29 @@ def _sig_meta(sig) -> dict:
 
 def parse(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteResult:
     from kb_pipeline.blockify import hybrid_to_blocks, elements_to_blocks
-    try:
-        md_texts = _page_markdowns(file_bytes, filename)
-    except ToolError as e:
-        raise ParserError(str(e)) from e
 
     signals = triage_document(file_bytes)  # [] 이면 폴백
-    if signals and len(signals) != len(md_texts):
-        # ODL(PAGE_SEP 분할)과 fitz 페이지수가 어긋나면 signals[i]/reason 이 md_texts[i] 와
-        # 다른 페이지에 붙을 수 있음(비치명 — index 안전, 폴백). 관측을 위해 경고.
+
+    # ODL(_page_markdowns)은 TEXT_ONLY 페이지(또는 triage 폴백=[])에만 쓰인다 → **조건부 실행**.
+    # 전 페이지가 OCR/LLM/SKIP 이면 ODL 을 통째로 건너뛴다(스캔/아웃라인 문서 파싱 단축).
+    need_odl = (not signals) or any(s.bucket is Bucket.TEXT_ONLY for s in signals)
+    md_texts: list[str] | None = None
+    if need_odl:
+        try:
+            md_texts = _page_markdowns(file_bytes, filename)
+        except ToolError as e:
+            raise ParserError(str(e)) from e
+    if signals and md_texts is not None and len(signals) != len(md_texts):
         log.warning("triage 페이지수(%d) != ODL 페이지수(%d) — 페이지 정렬 주의",
                     len(signals), len(md_texts))
+
+    # 페이지 수: ODL 을 돌렸으면 그 기준, 아니면 triage 기준.
+    n_pages = len(md_texts) if md_texts is not None else len(signals)
     rendered = None
     pages: list[dict] = []
-    for i, md in enumerate(md_texts):
+    for i in range(n_pages):
         page_number = i + 1
+        md = md_texts[i] if md_texts is not None else ""
         sig = signals[i] if i < len(signals) else None
         route, reason = _route_for(sig, md)
 
