@@ -121,9 +121,9 @@ else:                                  # OCR_NEEDED 또는 LLM_NEEDED 하나라�
 > 결정 근거: 혼합 문서에 `'ocr'` 강제 시 깨끗한 텍스트 페이지까지 VLM 이 OCR → 원격 호출 낭비(+`_workspace` 의 파서 지연/비용 민감성).
 > `'auto'` 의 재-classify 는 pdfium 샘플링 1회로 저렴. 순수 스캔은 어차피 classify 가 'ocr' 이므로 강제로 그 패스마저 생략.
 
-### 4.4 VLM 원격 엔드포인트 설정
-- MinerU `server_url` 로 넘길 VLM 서버 주소/키를 env 로 주입. **기존 in-process VL 의 `MODEL_API_URL`/`MODEL_API_KEY`
-  재사용 여부는 구현 시 확정**(같은 qwen3-vl 서버면 재사용, MinerU 전용 VLM 서버면 신규 env `MINERU_VLM_SERVER_URL`).
+### 4.4 VLM 원격 엔드포인트 설정 (확정)
+- **MinerU 전용 VLM 서버가 별도로 존재**(사용자 확정). 기존 in-process VL 의 `MODEL_API_URL` 을 재사용하지 않고
+  **신규 env `MINERU_VLM_SERVER_URL`**(+필요 시 `MINERU_VLM_API_KEY`)로 MinerU `server_url` 에 주입한다.
   gitignored `parse_service/parse-svc.env` 에 둔다(비밀은 커밋 금지).
 - PP-OCR 모델 경로/버전(PP-OCRv5) env 로 명시(서버에 존재 가정).
 
@@ -187,7 +187,6 @@ parse-svc **blocks** 로 변환한다. 두 레인은 동일한 `RouteResult(kind
   로컬에서는 게이트/매핑/폴백을 fake MinerU 로 단위검증하고, 실 MinerU 경로는 배포서버 스택검증으로 분리.
 - **[리스크] content_list.json 스키마 드리프트** — MinerU 버전에 필드명/enum 이 바뀔 수 있음 → 버전 핀 + 매핑 Task 에서 소스 대조.
 - **[리스크] 원격 VLM 지연/비용** — 혼합 문서 `'auto'` 로 완화하되, 대형 스캔 문서는 여전히 느릴 수 있음(현행 파서도 표당 20–40s). 모니터링 대상.
-- **[결정 확인 필요] VLM 서버 공유 여부** — 기존 qwen3-vl 서버 재사용 vs MinerU 전용 VLM 서버(§4.4).
 
 ---
 
@@ -195,5 +194,4 @@ parse-svc **blocks** 로 변환한다. 두 레인은 동일한 `RouteResult(kind
 
 1. MinerU in-process 진입점(`do_parse` 임시파일 vs `doc_analyze` bytes 직호출) — 소스 확인 후.
 2. content_list.json 정확한 필드/enum 매핑.
-3. VLM 서버 env(재사용 `MODEL_API_URL` vs 신규 `MINERU_VLM_SERVER_URL`).
-4. MinerU/torch/paddle 의존성 설치 방식과 `.venv-kb` 반영(배포서버 전제조건 확인 후).
+3. MinerU/torch/paddle 의존성 설치 방식과 `.venv-kb` 반영(배포서버 전제조건 확인 후).
