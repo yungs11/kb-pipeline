@@ -7,7 +7,6 @@ import re
 from parse_service.parsers import RouteResult, ParserError
 from parse_service.tools import ToolError
 from parse_service.tools.opendataloader import convert_pdf_to_page_markdowns
-from parse_service.parsers.pdf.triage import triage_document, Bucket
 
 log = logging.getLogger("kb_pipeline.parse_service.parsers.pdf")
 # digital(=텍스트 추출 성공) 판정 최소 **실제 텍스트** 글자수. 스캔 페이지도 ODL 이
@@ -46,93 +45,36 @@ def _ocr_elements_for_page(jpeg: bytes, name: str, ocr_url: str | None = None) -
     return ocr_elements_sync(jpeg, name)
 
 
-_BUCKET_ROUTE = {
-    Bucket.TEXT_ONLY: "text",
-    Bucket.OCR_NEEDED: "ocr",
-    Bucket.LLM_NEEDED: "llm",
-    Bucket.SKIP: "skip",
-}
-
-
-def _route_for(sig, md: str) -> tuple[str, str]:
-    """triage 신호 → (route, reason). 신호 없으면 _digital_text_len 폴백."""
-    if sig is not None and sig.bucket is not None:
-        return _BUCKET_ROUTE[sig.bucket], sig.reason
-    # 폴백: 기존 digital 판정(실텍스트 있으면 ODL, 없으면 VL)
-    if _digital_text_len(md) >= _DIGITAL_MIN_CHARS:
-        return "text", "fallback:digital"
-    return "llm", "fallback:scanned"
-
-
-def _sig_meta(sig) -> dict:
-    """페이지 dict 에 붙일 관측용 신호(비어있으면 {}). additive."""
-    if sig is None:
-        return {}
-    return {"triage_signals": {
-        "char_count": sig.char_count,
-        "image_coverage": round(sig.image_coverage, 3),
-        "content_len": sig.content_len,
-    }}
-
-
 def parse(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteResult:
     from kb_pipeline.blockify import hybrid_to_blocks, elements_to_blocks
+    try:
+        md_texts = _page_markdowns(file_bytes, filename)
+    except ToolError as e:
+        raise ParserError(str(e)) from e
 
-    signals = triage_document(file_bytes)  # [] 이면 폴백
-
-    # ODL(_page_markdowns)은 TEXT_ONLY 페이지(또는 triage 폴백=[])에만 쓰인다 → **조건부 실행**.
-    # 전 페이지가 OCR/LLM/SKIP 이면 ODL 을 통째로 건너뛴다(스캔/아웃라인 문서 파싱 단축).
-    need_odl = (not signals) or any(s.bucket is Bucket.TEXT_ONLY for s in signals)
-    md_texts: list[str] | None = None
-    if need_odl:
-        try:
-            md_texts = _page_markdowns(file_bytes, filename)
-        except ToolError as e:
-            raise ParserError(str(e)) from e
-    if signals and md_texts is not None and len(signals) != len(md_texts):
-        log.warning("triage 페이지수(%d) != ODL 페이지수(%d) — 페이지 정렬 주의",
-                    len(signals), len(md_texts))
-
-    # 페이지 수: ODL 을 돌렸으면 그 기준, 아니면 triage 기준.
-    n_pages = len(md_texts) if md_texts is not None else len(signals)
     rendered = None
     pages: list[dict] = []
-    for i in range(n_pages):
+    for i, md in enumerate(md_texts):
         page_number = i + 1
-        md = md_texts[i] if md_texts is not None else ""
-        sig = signals[i] if i < len(signals) else None
-        route, reason = _route_for(sig, md)
-
-        if route == "skip":
+        if _digital_text_len(md) >= _DIGITAL_MIN_CHARS:
+            pages.append({"page_number": page_number,
+                          "blocks": hybrid_to_blocks(md, page_idx=page_number)})
             continue
-
-        if route == "text":
-            pages.append({
-                "page_number": page_number,
-                "blocks": hybrid_to_blocks(md, page_idx=page_number),
-                "route": route, "triage_reason": reason, **_sig_meta(sig),
-            })
-            continue
-
-        # ocr / llm → render + VL(seam; OCR 엔진 미정 → 현재 둘 다 VL)
         if rendered is None:
             rendered = _render_pages(file_bytes)
         page_jpeg = next((rp.jpeg for rp in rendered if rp.page_number == page_number), None)
         if page_jpeg is None:
-            log.warning("triage %s page %d has no rendered image", route, page_number)
-            pages.append({"page_number": page_number, "blocks": [],
-                          "route": route, "triage_reason": reason, **_sig_meta(sig)})
+            log.warning("scanned page %d has no rendered image", page_number)
+            pages.append({"page_number": page_number, "blocks": []})
             continue
         try:
             elements = _ocr_elements_for_page(page_jpeg, f"page-{page_number}.jpeg", ocr_url)
-        except Exception:  # noqa: BLE001 — 페이지 단위 실패 비치명
-            log.exception("VL/OCR failed for %s page %d", route, page_number)
-            pages.append({"page_number": page_number, "blocks": [],
-                          "route": route, "triage_reason": reason, **_sig_meta(sig)})
+        except Exception:  # noqa: BLE001 — 페이지 단위 OCR 실패는 비치명
+            log.exception("OCR failed for scanned page %d", page_number)
+            pages.append({"page_number": page_number, "blocks": []})
             continue
         blocks = elements_to_blocks(elements)
         for b in blocks:
             b["page_idx"] = page_number
-        pages.append({"page_number": page_number, "blocks": blocks,
-                      "route": route, "triage_reason": reason, **_sig_meta(sig)})
+        pages.append({"page_number": page_number, "blocks": blocks})
     return RouteResult(kind="pages", chunk_needed=True, pages=pages)
