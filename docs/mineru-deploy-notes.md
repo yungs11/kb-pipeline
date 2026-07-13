@@ -10,12 +10,29 @@
 로컬에서는 스캔 PDF 가 MinerU 레인으로 라우팅돼도 `mineru` import 실패 → `_invoke_mineru` 예외 →
 `parse()` 가 삼켜 **기존 ODL/VL 레인으로 폴백**(가용성 회귀 없음).
 
-## 전제조건 (배포서버)
+## 전제조건 (배포서버) — Task 8 소스대조로 확정(mineru 3.4.4)
 
-1. **MinerU 런타임 설치** — parse-svc `.venv-kb` 에 `mineru` + torch + PaddleOCR(PP-OCRv5 모델).
-   확인: `python -c "import mineru; from mineru.cli.common import do_parse; print('ok')"`
-2. **PP-OCR 모델(PP-OCRv5)** 이 서버에 존재 — `hybrid-http-client` 백엔드가 로컬 layout/OCR-det 용으로 사용.
-   MinerU 가 모델 경로를 env/기본경로로 요구하면 명시(플랜 Task 4 Step 1 에서 실제 요구 env 확정).
+1. **MinerU 런타임 설치** — parse-svc Docker 이미지(`Dockerfile.parse-svc`)에 이미 반영:
+   ```
+   # parse-svc 는 GPU 없음 → CPU torch(CUDA/nvidia 미포함으로 이미지 축소) → mineru[pipeline]
+   uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+   uv pip install "mineru[pipeline]"
+   ```
+   - hybrid-http-client 는 **`mineru[pipeline]`** 이면 충분(torch/torchvision/transformers/onnxruntime + PaddleOCR layout 의존).
+     `mineru-vl-utils`(원격 VLM http 클라이언트)는 base 의존이라 자동 포함. `mineru[core]`(vlm 엔진+gradio)는 불필요.
+   - ⚠️ **opencv(cv2) 시스템 라이브러리 필수** — mineru pipeline 이 cv2 를 import 하는데 `python:3.12-slim` 엔 그래픽 라이브러리가
+     없어 `libxcb.so.1`/`libGL` import 실패(Task 8 검증서 발견). Dockerfile 에 apt 설치 추가:
+     `libgl1 libglib2.0-0 libxcb1 libsm6 libxext6 libxrender1`.
+   - **requirements.txt 엔 넣지 않는다** — 로컬 Intel Mac/py3.14 dev 는 torch 미설치 유지 → MinerU 레인 ODL 폴백.
+   - 확인: `python -c "import mineru, torch; from mineru.cli.common import do_parse; print('ok')"`
+2. **PaddleOCR/layout 모델** — 런타임 auto-download(`auto_download_and_get_model_root_path`). 오프라인/지연 억제 시
+   빌드에서 사전다운로드: `mineru-models-download -s modelscope -m pipeline`(모델캐시 경로 env 고정). hybrid 는 layout+OCR-det 에 사용.
+3. **do_parse 실계약(확정)** — 코드는 아래에 맞춤:
+   - **필수 위치인자 `p_lang_list`**(기본값 없음) — 누락 시 TypeError. `_invoke_mineru` 가 `[MINERU_LANG or "korean"]` 전달.
+     유효 lang: `"korean"`(Korean,English) / `"ch"`(중·영·일·번체·라틴).
+   - `model` 파라미터 **없음** — http-client 는 vLLM 서빙 모델(MinerU2.5) 사용, MinerUClient 가 내부 처리.
+   - 출력경로 = `{output_dir}/{stem}/hybrid_{parse_method}/{stem}_content_list.json` — 코드 재귀 glob `**/*content_list.json` 로 포착.
+   - 동시성 = `max_concurrency`(기본 100, do_parse **kwargs) — `MINERU_MAX_CONCURRENCY` env 로 조절.
 3. **별도 VLM GPU 서버** 가동 — MinerU 가 `server_url` 로 호출하는 원격 vLLM(OpenAI 호환).
    **실 엔드포인트(2026-07-13 확정)**: `https://api-mineru.ys-helperai.com/v1`, model=`MinerU2.5`, **인증 없음**(api_key 아무 값).
    raw OpenAI 호환 chat.completions(이미지 1장 → VLM raw). hybrid-http-client 의 `server_url` 이 이걸 소비한다.
@@ -58,10 +75,12 @@ PaddleOCR layout 을 로컬 배치 예측하고 window 의 VLM 요청을 **동�
 ## 배포 후 스택검증 (플랜 Task 8)
 
 1. `import mineru` + PP-OCRv5 모델 존재 + `MINERU_VLM_SERVER_URL` 헬스체크.
-2. **do_parse 실제 계약 대조**(플랜 Task 4 Step 1): `inspect.signature(do_parse)` 로 인자명
-   (`output_dir`/`pdf_bytes_list`/`pdf_file_names`/`backend`/`server_url`/`parse_method`)·content_list.json
-   출력경로 패턴·content_list item 필드(`type`/`text`/`text_level`/`table_body`/`img_path`/`page_idx`)를 확인.
-   - 어긋나면 `mineru_lane._invoke_mineru` kwargs/glob 과 `_content_list_to_elements`/`_TYPE_TO_CATEGORY`
-     (특히 heading 이 `type=='text'`+`text_level` 로 오는 경우) 정정.
+2. ✅ **do_parse 계약 대조 완료(Task 8 Step 1)** — mineru 3.4.4 소스 직독으로 확정, 코드 반영됨(위 3항).
+   content_list v1 스키마 확정: text(+text_level)/equation(text,text_format:latex)/image(img_path)/
+   table(table_body:HTML)/**chart(별도 타입, content+img_path)**/list(list_items:문자열배열)/code(code_body).
+   `_content_list_to_elements` 가 chart→text(content)/list→불릿/heading→text_level 로 매핑(유실 없음).
+   → **런타임 잔여**: MinerUClient 가 vLLM 에 실제 요청 시 model 이름을 `/v1/models` 자동조회로 채우는지
+     (server_url `/v1` 포함 여부 포함) 첫 실호출로 확인 — 실패 시 `server_headers`/model kwargs 로 조정.
 3. 실 스캔 PDF 1건 `POST /parse` → 표가 `<table>` 로 비어있지 않게 추출(2026-07-07 빈 표 버그 재발 없음).
 4. 혼합 PDF(네이티브 텍스트 + 스캔) 1건 → 게이트가 `'ocr'` 강제 라우팅, 스캔 페이지 텍스트 유실 없음.
+5. **처리량**: vLLM `--max-num-seqs` 와 `MINERU_MAX_CONCURRENCY`(mineru_vl_utils 동시요청, 기본 100) 를 맞춰 GPU 포화.
