@@ -20,31 +20,81 @@ from kb_pipeline.blockify import elements_to_blocks
 log = logging.getLogger("kb_pipeline.parse_service.parsers.pdf.mineru_lane")
 
 _MINERU_BACKEND = "hybrid-http-client"
+# PaddleOCR OCR-det 언어(do_parse p_lang_list). "korean"=Korean,English / "ch"=중·영·일·번체·라틴.
+_DEFAULT_LANG = "korean"
 
-# MinerU content_list `type` → blockify `elements[]` `category`
-_TYPE_TO_CATEGORY = {
-    "text": "text", "title": "title", "list": "text",
-    "table": "table", "image": "image", "equation": "equation",
-}
+# MinerU content_list(v1, vlm 스키마) 아이템 형태 — 배포서버 소스 대조로 확정(plan Task 4 Step 1):
+#   text  : {type:'text', text, [text_level:N]}      # heading 은 별도 'title' 타입이 아니라 text_level
+#   equation: {type:'equation', text, text_format:'latex'}
+#   image : {type:'image', img_path, image_caption:[], content}
+#   table : {type:'table', table_body:<HTML>, table_caption:[], img_path}
+#   chart : {type:'chart', img_path, content:<md 문자열>}   # 순서도/차트 = 별도 타입
+#   list  : {type:'list', sub_type, list_items:[<문자열>,...]}
+#   code  : {type:'code', sub_type, code_body}
+
+
+def _list_items_to_markdown(list_items: list) -> str:
+    """MinerU list_items(문자열 배열) → 마크다운 불릿 리스트."""
+    lines = []
+    for it in list_items or []:
+        s = it if isinstance(it, str) else (it.get("text") if isinstance(it, dict) else str(it))
+        if s and s.strip():
+            lines.append(f"- {s.strip()}")
+    return "\n".join(lines)
 
 
 def _content_list_to_elements(content_list: list[dict]) -> list[dict]:
-    """MinerU content_list item → blockify elements[] 형태(표 HTML/이미지/수식/텍스트)."""
+    """MinerU content_list item → blockify elements[] 형태(표 HTML/이미지/수식/텍스트/차트/리스트).
+
+    blockify.elements_to_blocks 계약: table=content.html / image=content.img_path /
+    equation=content.text / title=category 'title'+최상위 text_level / 그 외=content.markdown.
+    """
     elements: list[dict] = []
     for item in content_list:
         t = (item.get("type") or "text").lower()
         page_idx = item.get("page_idx", 0) or 0
-        category = _TYPE_TO_CATEGORY.get(t, "text")
+
         if t == "table":
-            content = {"html": item.get("table_body") or ""}
+            elements.append({"category": "table",
+                             "content": {"html": item.get("table_body") or ""},
+                             "page_idx": page_idx})
         elif t == "image":
-            content = {"img_path": item.get("img_path") or ""}
+            elements.append({"category": "image",
+                             "content": {"img_path": item.get("img_path") or ""},
+                             "page_idx": page_idx})
+        elif t == "chart":
+            # chart(순서도/차트) = VLM 추출 content(마크다운) 우선 → 검색가능 텍스트.
+            # content 비면 이미지 참조로 보존(내용 유실 방지).
+            md = item.get("content") or ""
+            if md:
+                elements.append({"category": "text", "content": {"markdown": md},
+                                 "page_idx": page_idx})
+            else:
+                elements.append({"category": "image",
+                                 "content": {"img_path": item.get("img_path") or ""},
+                                 "page_idx": page_idx})
         elif t == "equation":
-            # MinerU equation 은 'latex' 또는 'text' 로 올 수 있음(blockify 헤더 문서화). 둘 다 수용.
-            content = {"text": item.get("latex") or item.get("text") or ""}
-        else:  # text/title/list
-            content = {"markdown": item.get("text") or ""}
-        elements.append({"category": category, "content": content, "page_idx": page_idx})
+            elements.append({"category": "equation",
+                             "content": {"text": item.get("text") or item.get("latex") or ""},
+                             "page_idx": page_idx})
+        elif t == "list":
+            elements.append({"category": "text",
+                             "content": {"markdown": item.get("text")
+                                         or _list_items_to_markdown(item.get("list_items") or [])},
+                             "page_idx": page_idx})
+        elif t == "code":
+            elements.append({"category": "text",
+                             "content": {"markdown": item.get("code_body") or item.get("text") or ""},
+                             "page_idx": page_idx})
+        else:  # 'text' — heading 은 text_level 보유
+            text_level = item.get("text_level")
+            el = {"category": "text",
+                  "content": {"markdown": item.get("text") or ""},
+                  "page_idx": page_idx}
+            if text_level:
+                el["category"] = "title"     # blockify: title → text 블록 + text_level 유지
+                el["text_level"] = text_level
+            elements.append(el)
     return elements
 
 
@@ -77,17 +127,26 @@ def _invoke_mineru(pdf_bytes: bytes, filename: str, parse_method: str) -> list[d
     server_url = os.environ.get("MINERU_VLM_SERVER_URL")
     if not server_url:
         raise RuntimeError("MINERU_VLM_SERVER_URL 미설정 — MinerU 레인 사용 불가")
+    lang = os.environ.get("MINERU_LANG") or _DEFAULT_LANG
     scratch = os.environ.get("SCRATCHPAD_DIR") or None
     output_dir = tempfile.mkdtemp(prefix="mineru_", dir=scratch)
     try:
-        _run_mineru_do_parse(
+        # do_parse 필수 위치인자: output_dir, pdf_file_names, pdf_bytes_list, p_lang_list, backend...
+        # (p_lang_list 누락 시 TypeError). model 파라미터는 없음 — http-client 는 vLLM 서빙 모델 사용.
+        kwargs = dict(
             output_dir=output_dir,
             pdf_bytes_list=[pdf_bytes],
             pdf_file_names=[os.path.splitext(os.path.basename(filename))[0]],
+            p_lang_list=[lang],
             backend=_MINERU_BACKEND,
             server_url=server_url,
             parse_method=parse_method,
         )
+        # mineru_vl_utils 동시 요청 수(기본 100). 배포서버 GPU vLLM --max-num-seqs 와 맞춰 조정.
+        max_conc = os.environ.get("MINERU_MAX_CONCURRENCY")
+        if max_conc:
+            kwargs["max_concurrency"] = int(max_conc)
+        _run_mineru_do_parse(**kwargs)
         matches = glob.glob(os.path.join(output_dir, "**", "*content_list.json"), recursive=True)
         if not matches:
             raise RuntimeError(f"MinerU content_list.json 미생성: {output_dir}")
