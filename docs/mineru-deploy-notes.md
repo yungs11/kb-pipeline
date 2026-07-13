@@ -83,6 +83,20 @@ PaddleOCR layout 을 로컬 배치 예측하고 window 의 VLM 요청을 **동�
    `_content_list_to_elements` 가 chart→text(content)/list→불릿/heading→text_level 로 매핑(유실 없음).
    → **런타임 잔여**: MinerUClient 가 vLLM 에 실제 요청 시 model 이름을 `/v1/models` 자동조회로 채우는지
      (server_url `/v1` 포함 여부 포함) 첫 실호출로 확인 — 실패 시 `server_headers`/model kwargs 로 조정.
-3. 실 스캔 PDF 1건 `POST /parse` → 표가 `<table>` 로 비어있지 않게 추출(2026-07-07 빈 표 버그 재발 없음).
-4. 혼합 PDF(네이티브 텍스트 + 스캔) 1건 → 게이트가 `'ocr'` 강제 라우팅, 스캔 페이지 텍스트 유실 없음.
+3. ✅ **스택 스모크 통과(2026-07-13)** — 실 이미지(kbp-parse-svc, 6.14GB) 컨테이너(gunicorn -w4) 기동 →
+   스캔 PDF `POST /parse` → **enriched_content 에 `<table>` HTML + 셀값 추출**(n_blocks=3, 표 비어있지 않음).
+   전 구간(게이트→MinerU 레인→라이브 VLM→blocks→enriched) 실서비스 동작 확인.
+4. 혼합 PDF(네이티브 텍스트 + 스캔) 1건 → 게이트가 `'ocr'` 강제 라우팅, 스캔 페이지 텍스트 유실 없음. (잔여)
 5. **처리량**: vLLM `--max-num-seqs` 와 `MINERU_MAX_CONCURRENCY`(mineru_vl_utils 동시요청, 기본 100) 를 맞춰 GPU 포화.
+
+## 런타임 주의(스택 스모크서 발견·해결)
+
+- ⚠️ **async 이벤트루프 충돌(치명, 해결됨)** — mineru_vl_utils `http_client.batch_predict` 는 `get_running_loop()`
+  성공 시 `loop.run_until_complete` 를 쓴다. FastAPI async 핸들러(`/parse`)의 실행 중 루프 위에서 동기 `do_parse`
+  를 부르면 `RuntimeError: This event loop is already running` → MinerU 레인 폴백 → **빈 결과**.
+  → `mineru_lane._invoke_mineru` 가 `do_parse` 를 **ThreadPoolExecutor 워커스레드**(실행 중 루프 없음)에서 실행
+  → mineru_vl_utils 가 `asyncio.run()` 깨끗한 경로. (회귀테스트 `test_invoke_runs_do_parse_off_running_event_loop`)
+- **MinerU multiprocessing** — MinerU 는 PDF 렌더에 spawn multiprocessing(persistent executor, max_workers=3)을 쓴다.
+  gunicorn `-w4` uvicorn 워커 밑에서 정상 동작 확인(크래시 없음). `parse_service.app` 이 do_parse 를 import 가 아닌
+  요청 핸들러에서 부르므로 spawn 재-import 문제 없음.
+- **첫 요청 모델 다운로드** — PaddleOCR/layout 모델(~215MB+)이 첫 `/parse` 때 런타임 다운로드(~1분+ 지연). 볼륨/사전다운로드로 억제.

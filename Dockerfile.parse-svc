@@ -9,26 +9,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm \
     && rm -rf /var/lib/apt/lists/* && npm install -g kordoc
 ENV KORDOC_BIN=kordoc KORDOC_MD_OUT=/tmp/kordoc_md_out EXCEL_PARSER_BACKEND=auto
 RUN mkdir -p /tmp/kordoc_md_out
-COPY pyproject.toml setup.py* requirements*.txt ./
+# opencv(cv2, mineru pipeline 의존) 런타임 시스템 라이브러리 — slim 이미지에 없어 import 시 libxcb/libGL 실패.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libgl1 libglib2.0-0 libxcb1 libsm6 libxext6 libxrender1 && rm -rf /var/lib/apt/lists/*
+
+# --- 의존성 레이어 (앱 코드보다 먼저 — requirements/torch/mineru 는 코드에 의존하지 않으므로
+#     코드 변경 시 이 무거운 레이어들이 캐시됨). 앱 패키지(kb_pipeline/parse_service/service)는
+#     /app 에 두고 cwd(sys.path)로 import 하므로 pip install -e . 불필요. ---
+COPY requirements*.txt pyproject.toml setup.py* ./
+RUN pip install --no-cache-dir uv && \
+    uv pip install --system --no-cache -r requirements.txt && \
+    uv pip install --system --no-cache gunicorn uvicorn
+# MinerU hybrid-http-client PDF 레인(스캔/혼합): torch+PaddleOCR 로 로컬 layout, VLM 은 원격(MINERU_VLM_SERVER_URL).
+# parse-svc 는 GPU 없음 → CPU torch(먼저 설치해 CUDA/nvidia 미포함으로 이미지 축소), 이어 mineru[pipeline]
+# (layout 의존 + mineru-vl-utils base 포함). requirements.txt 엔 넣지 않는다(로컬 Intel Mac/py3.14 dev 는
+# torch 미설치 유지 → MinerU 레인 ODL 폴백). six: mineru pytorchocr 가 import 하나 mineru[pipeline] 이 안 끌어옴
+# (Task 8 e2e 발견 — 누락 시 hybrid_analyze import 실패가 HybridDependencyError 로 가려짐).
+RUN uv pip install --system --no-cache torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
+    uv pip install --system --no-cache "mineru[pipeline]" six
+# PaddleOCR/layout 모델은 런타임 auto-download. 오프라인/지연 억제 원하면 빌드시 사전다운로드:
+#   RUN mineru-models-download -s modelscope -m pipeline   (모델 경로/캐시는 MINERU_MODEL_SOURCE 등으로 고정)
+
+# --- 앱 코드 (자주 바뀜 — 위 의존성 레이어 캐시를 무효화하지 않도록 마지막에 COPY) ---
 COPY kb_pipeline ./kb_pipeline
 COPY parse_service ./parse_service
 # parse_service/app.py 가 runtime에 `from service.llm import get_text_llm` 을 lazy import함
 COPY service ./service
-RUN pip install --no-cache-dir uv && \
-    (uv pip install --system --no-cache -r requirements.txt 2>/dev/null || uv pip install --system --no-cache -e .) && \
-    uv pip install --system --no-cache gunicorn uvicorn
-# MinerU hybrid-http-client PDF 레인(스캔/혼합): torch+PaddleOCR 로 로컬 layout, VLM 은 원격
-# (MINERU_VLM_SERVER_URL). parse-svc 는 GPU 없음 → CPU torch(먼저 설치해 CUDA/nvidia 미포함으로 이미지 축소),
-# 이어 mineru[pipeline](layout 의존 + mineru-vl-utils base 포함). requirements.txt 엔 넣지 않는다
-# (로컬 Intel Mac/py3.14 dev 는 torch 미설치 유지 → MinerU 레인 ODL 폴백).
-# opencv(cv2, mineru pipeline 의존) 런타임 시스템 라이브러리 — slim 이미지에 없어 import 시 libxcb/libGL 실패.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      libgl1 libglib2.0-0 libxcb1 libsm6 libxext6 libxrender1 && rm -rf /var/lib/apt/lists/*
-RUN uv pip install --system --no-cache torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
-    uv pip install --system --no-cache "mineru[pipeline]" six
-# six: mineru pytorchocr(PaddleOCR) 가 import 하나 mineru[pipeline] 이 안 끌어옴(Task 8 e2e 발견 —
-# 누락 시 hybrid_analyze import 실패가 HybridDependencyError 로 가려져 나타남).
-# PaddleOCR/layout 모델은 런타임 auto-download. 오프라인/지연 억제 원하면 빌드시 사전다운로드:
-#   RUN mineru-models-download -s modelscope -m pipeline   (모델 경로/캐시는 MINERU_MODEL_SOURCE 등으로 고정)
 EXPOSE 19001
 CMD ["gunicorn","-k","uvicorn.workers.UvicornWorker","-w","4","-b","0.0.0.0:19001","--timeout","1800","parse_service.app:app"]
