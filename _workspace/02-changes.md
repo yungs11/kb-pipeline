@@ -204,3 +204,19 @@ knowledge_base plan `23_plan_chunk_method_selection.md` §B 반영. adaptive_chu
 **커밋**: 2a `51692e9`..`2144f00` · 2b `f59a40b`+`8cfeb05` · 2c `7a0f980`+`ee39a66` · 2d `13c8dc0`+`a8f9818`+`f3e73f3` · 2e `fddbd2a`+`ee840dd`.
 
 **미결(범위 밖)**: E2E 다형식 동시적재 완주는 OpenRouter LLM 처리량 지연으로 미완(확장자별 단독 indexed 는 검증됨). LLM 크레딧 여유 시 재확인.
+
+## 8. PDF MinerU 레인 — 문서수준 게이트 (2026-07-13)
+
+> spec `docs/superpowers/specs/2026-07-13-mineru-pdf-integration-design.md` · plan `...-plans/2026-07-13-mineru-pdf-integration.md`(v3 READY, ultracode 4렌즈 blocking 0). 배포 노트 `docs/mineru-deploy-notes.md`.
+
+**결정**: PDF 파서에 **문서수준 게이트**(PyMuPDF triage 신호)를 붙여, 순수 텍스트 PDF 는 기존 ODL 레인, 스캔·혼합 PDF 는 **MinerU**(hybrid-http-client: PaddleOCR 로컬 layout + VLM 원격) 레인으로 분기. 기존 triage(`feat/pdf-triage`)를 게이트 신호원으로 이식.
+
+- **게이트**(`parsers/pdf/gate.py`): triage 버킷 집계. 비어있지 않은 페이지가 전부 `TEXT_ONLY`(또는 빈/열기실패)→ODL. `OCR_NEEDED` 하나라도 있으면 MinerU `parse_method='ocr'` **강제**. `OCR_NEEDED` 없이 `LLM_NEEDED` 만(스캔 없는 텍스트+이미지)→MinerU `'auto'`.
+- **MinerU 스파이크 검증(소스 직독)**: `_ocr_enable` 은 **문서당 단일 bool**(`ocr_classify`→`pdf_classify.classify`). VLM 이 항상 주 추출자, PaddleOCR 은 layout(bbox+type)+스캔시 OCR-det 보충. → 혼합 문서에 `'auto'` 두면 문서수준 classify='txt' 판정 시 스캔 페이지 텍스트 유실(2026-07-07 빈표 버그 재발) → **스캔 있으면 'ocr' 강제**로 방지.
+- **레인**(`parsers/pdf/mineru_lane.py`): `_invoke_mineru`(do_parse 디스크 출력 read, mineru 지연 import)→content_list→`_content_list_to_elements`→기존 `elements_to_blocks`(표 `<table>` HTML 보존 재사용)→1-based pages.
+- **폴백**(`parsers/pdf/__init__.py`): `_safe_decide_route`(gate 지연 import+try/except → pymupdf 부재/triage 예외 시 ODL, 새 500 없음). MinerU import/호출 실패 **또는 빈 결과** → ODL/in-process VL 폴백(가용성 회귀 없음). 기존 parse 본문은 `_odl_lane` 로 추출.
+- **env**: `MINERU_VLM_SERVER_URL`(별도 GPU) — `scripts/parse-svc.env`(gitignored, 런처 로드). 미설정 시 폴백.
+
+**불변식 유지**: 표 `<table>` HTML 보존 / 모달 U+3008·U+3009(blockify 경유) / page_idx 1-based / 청크 KB당 단일우주(blocks 만, 청킹=facade `/chunk`) / in-process(mineru 라이브러리 import, VLM 만 원격).
+
+**검증**: 로컬 단위검증 35 passed(triage 10·gate 11·mineru_lane 4·routing 5·기존 pdf 5). 회귀 0(기존 red 5건=minio auto-create + 모달 `KBP_MODAL_ENRICH` 는 baseline 동일, MinerU 무관). 실 MinerU end-to-end 는 배포서버 스택검증 잔여(로컬 Intel Mac 미설치).

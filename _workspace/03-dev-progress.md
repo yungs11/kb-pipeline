@@ -162,3 +162,19 @@ plan: `docs/superpowers/plans/2026-07-02-parser-consolidation-phase2.md` (v3 REA
 **Phase 2 파서 일원화 종료(2026-07-03)**: 파싱 fleet 이 parse-svc 단일 이미지 in-process 로 통합(java+node/kordoc+PyMuPDF). 외부 excel-parser/document-parser/redis 제거, markitdown 완전 제거, gotenberg(office→PDF)만 잔존. 상세는 02-changes §7.
 
 발견 리스크: `test_minio_client.py` 1건 기존 red(bucket auto-create 제거 vs 테스트 미갱신 — 2a 무관, 별도 정리), 모달 테스트 4건은 `KBP_MODAL_ENRICH=1` 필요(기본 off 정책). E2E 다형식 동시적재는 LLM 처리량 의존(코드 무관).
+
+## PDF MinerU 레인 진행 (2026-07-13)
+
+> spec/plan `docs/superpowers/{specs,plans}/2026-07-13-mineru-pdf-integration*.md`(plan v3 READY, ultracode 4렌즈 blocking 0). 상세 변경은 02-changes §8.
+
+| Task | 내용 | 상태 |
+|---|---|---|
+| 1 | triage.py(PyMuPDF 저비용 신호) 이식 = 게이트 신호원 | ✅ 완료 — test_triage 10 passed |
+| 2 | `gate.py` 문서수준 라우팅(스캔 있으면 ocr 강제, 예외→ODL) | ✅ 완료 — test_pdf_gate 11 passed |
+| 3+4 | `mineru_lane.py` content_list→blocks→pages 매핑 + in-process do_parse 호출(hybrid-http-client, 디스크 read, mineru 지연 import) | ✅ 완료 — test_mineru_lane 4 passed |
+| 5 | `__init__.py` parse 문서수준 분기 + `_safe_decide_route` 가드 + MinerU 실패·빈결과 ODL 폴백(기존 본문→`_odl_lane`) | ✅ 완료 — test_parser_pdf_routing 5 + 기존 pdf 5 passed |
+| 6 | env(`scripts/parse-svc.env` MINERU_VLM_SERVER_URL) + 배포 노트 `docs/mineru-deploy-notes.md` | ✅ 완료 |
+| 7 | 전체 회귀 + _workspace 반영 | ✅ 완료 — 신규/관련 35 passed, 회귀 0(기존 red 5건 baseline 동일 확인) |
+| 8 | **배포서버 스택검증(실 MinerU)** — do_parse 시그니처/출력경로/content_list enum(`text_level`) 소스 대조 + 실 스캔·혼합 PDF end-to-end | ⏳ **잔여** — 로컬(Intel Mac) MinerU 미설치, 배포서버 필요 |
+
+**MinerU 레인 종료(로컬 구현분, 2026-07-13)**: 게이트/매핑/폴백 in-process 구현+단위검증 완료. 실 MinerU 경로는 배포서버 몫(Task 8). 리스크: (a) MinerU/torch/PaddleOCR 배포서버 설치 미검증, (b) content_list heading 이 `type=='text'`+`text_level` 로 올 수 있어 `_TYPE_TO_CATEGORY` 정정 필요(Task 8), (c) 숨은 OCR 텍스트레이어(char>20) 스캔 PDF 는 triage 가 TEXT_ONLY/LLM_NEEDED 로 오분류→'auto' 가능(§9 모니터링, image 블록은 VLM 추출).
