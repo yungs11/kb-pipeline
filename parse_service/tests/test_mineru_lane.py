@@ -81,20 +81,44 @@ def test_real_live_vlm_content_list_maps_correctly():
 def test_run_mineru_uses_invoke_boundary(monkeypatch):
     seen = {}
 
-    def fake_invoke(pdf_bytes, filename, parse_method):
+    def fake_invoke(pdf_bytes, filename, parse_method, backend):
         seen["method"] = parse_method
+        seen["backend"] = backend
         return [{"type": "text", "text": "ocr 결과", "page_idx": 0}]
 
     monkeypatch.setattr(mineru_lane, "_invoke_mineru", fake_invoke)
-    pages = mineru_lane.run_mineru(b"%PDF", "a.pdf", "ocr")
-    assert seen["method"] == "ocr"
+    pages = mineru_lane.run_mineru(b"%PDF", "a.pdf", "ocr", "pipeline")
+    assert seen["method"] == "ocr" and seen["backend"] == "pipeline"
     assert pages[0]["page_number"] == 1 and pages[0]["blocks"]
 
 
-def test_invoke_requires_server_url(monkeypatch):
+def test_invoke_requires_server_url_for_hybrid(monkeypatch):
+    """http-client 계열(hybrid)은 server_url 필수."""
     monkeypatch.delenv("MINERU_VLM_SERVER_URL", raising=False)
     with pytest.raises(RuntimeError):
-        mineru_lane._invoke_mineru(b"%PDF", "a.pdf", "ocr")
+        mineru_lane._invoke_mineru(b"%PDF", "a.pdf", "ocr", "hybrid-http-client")
+
+
+def test_pipeline_backend_needs_no_server_url(monkeypatch):
+    """pipeline 은 완전 로컬 — server_url 없이도 동작(원격 VLM 불요)."""
+    monkeypatch.delenv("MINERU_VLM_SERVER_URL", raising=False)
+    captured = {}
+
+    def fake_run(**kw):
+        captured.update(kw)
+        out = kw["output_dir"]
+        sub = os.path.join(out, "a", "ocr")     # pipeline 출력경로: {stem}/{parse_method}/
+        os.makedirs(sub, exist_ok=True)
+        with open(os.path.join(sub, "a_content_list.json"), "w", encoding="utf-8") as f:
+            json.dump([{"type": "text", "text": "pipe", "page_idx": 0}], f)
+        return None
+
+    monkeypatch.setattr(mineru_lane, "_run_mineru_do_parse", fake_run)
+    cl = mineru_lane._invoke_mineru(b"%PDF", "a.pdf", "ocr", "pipeline")
+    assert captured["backend"] == "pipeline"
+    assert "server_url" not in captured          # pipeline 은 server_url 안 넘김
+    assert captured["p_lang_list"] == ["korean"]
+    assert cl == [{"type": "text", "text": "pipe", "page_idx": 0}]
 
 
 def test_invoke_passes_args_and_reads_disk_content_list(monkeypatch):

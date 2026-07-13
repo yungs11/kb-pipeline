@@ -69,9 +69,11 @@ def parse(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteResult:
     decision = _safe_decide_route(file_bytes)
     if decision is not None and decision.lane == "mineru":
         try:
-            pages = run_mineru(file_bytes, filename, decision.parse_method)
+            pages = run_mineru(file_bytes, filename, decision.parse_method,
+                               decision.backend)
         except Exception:  # noqa: BLE001 — MinerU 실패는 비치명, ODL/VL 폴백
-            log.exception("MinerU 레인 실패 — ODL/VL 폴백 (%s)", filename)
+            log.exception("MinerU 레인(%s) 실패 — ODL/VL 폴백 (%s)",
+                          decision.backend, filename)
         else:
             if pages and any(p.get("blocks") for p in pages):
                 return RouteResult(kind="pages", chunk_needed=True, pages=pages)

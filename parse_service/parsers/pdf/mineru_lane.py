@@ -20,7 +20,6 @@ from kb_pipeline.blockify import elements_to_blocks
 
 log = logging.getLogger("kb_pipeline.parse_service.parsers.pdf.mineru_lane")
 
-_MINERU_BACKEND = "hybrid-http-client"
 # PaddleOCR OCR-det 언어(do_parse p_lang_list). "korean"=Korean,English / "ch"=중·영·일·번체·라틴.
 _DEFAULT_LANG = "korean"
 
@@ -124,10 +123,8 @@ def _run_mineru_do_parse(**kwargs) -> None:
     do_parse(**kwargs)
 
 
-def _invoke_mineru(pdf_bytes: bytes, filename: str, parse_method: str) -> list[dict]:
-    server_url = os.environ.get("MINERU_VLM_SERVER_URL")
-    if not server_url:
-        raise RuntimeError("MINERU_VLM_SERVER_URL 미설정 — MinerU 레인 사용 불가")
+def _invoke_mineru(pdf_bytes: bytes, filename: str, parse_method: str,
+                   backend: str = "hybrid-http-client") -> list[dict]:
     lang = os.environ.get("MINERU_LANG") or _DEFAULT_LANG
     scratch = os.environ.get("SCRATCHPAD_DIR") or None
     output_dir = tempfile.mkdtemp(prefix="mineru_", dir=scratch)
@@ -139,14 +136,19 @@ def _invoke_mineru(pdf_bytes: bytes, filename: str, parse_method: str) -> list[d
             pdf_bytes_list=[pdf_bytes],
             pdf_file_names=[os.path.splitext(os.path.basename(filename))[0]],
             p_lang_list=[lang],
-            backend=_MINERU_BACKEND,
-            server_url=server_url,
+            backend=backend,
             parse_method=parse_method,
         )
-        # mineru_vl_utils 동시 요청 수(기본 100). 배포서버 GPU vLLM --max-num-seqs 와 맞춰 조정.
-        max_conc = os.environ.get("MINERU_MAX_CONCURRENCY")
-        if max_conc:
-            kwargs["max_concurrency"] = int(max_conc)
+        # http-client 계열(hybrid/vlm) 만 원격 VLM(server_url) 필요. pipeline 은 완전 로컬(불요).
+        if backend.endswith("client"):
+            server_url = os.environ.get("MINERU_VLM_SERVER_URL")
+            if not server_url:
+                raise RuntimeError(f"MINERU_VLM_SERVER_URL 미설정 — {backend} 사용 불가")
+            kwargs["server_url"] = server_url
+            # mineru_vl_utils 동시 요청 수(기본 100). GPU vLLM --max-num-seqs 와 맞춰 조정.
+            max_conc = os.environ.get("MINERU_MAX_CONCURRENCY")
+            if max_conc:
+                kwargs["max_concurrency"] = int(max_conc)
         # MinerU VLM http 클라이언트는 실행 중 루프가 있으면 loop.run_until_complete 를 써서
         # "event loop is already running"(FastAPI async 핸들러) 로 실패한다. 실행 중 루프가 없는
         # 워커 스레드에서 돌리면 mineru_vl_utils 가 asyncio.run() 깨끗한 경로를 탄다.
@@ -161,7 +163,8 @@ def _invoke_mineru(pdf_bytes: bytes, filename: str, parse_method: str) -> list[d
         shutil.rmtree(output_dir, ignore_errors=True)
 
 
-def run_mineru(pdf_bytes: bytes, filename: str, parse_method: str) -> list[dict]:
-    """MinerU 레인 진입 — content_list 획득 → pages 반환."""
-    content_list = _invoke_mineru(pdf_bytes, filename, parse_method)
+def run_mineru(pdf_bytes: bytes, filename: str, parse_method: str,
+               backend: str = "hybrid-http-client") -> list[dict]:
+    """MinerU 레인 진입 — content_list 획득 → pages 반환. backend=pipeline|hybrid-http-client."""
+    content_list = _invoke_mineru(pdf_bytes, filename, parse_method, backend)
     return _elements_to_pages(_content_list_to_elements(content_list))
