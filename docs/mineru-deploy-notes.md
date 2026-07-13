@@ -16,15 +16,44 @@
    확인: `python -c "import mineru; from mineru.cli.common import do_parse; print('ok')"`
 2. **PP-OCR 모델(PP-OCRv5)** 이 서버에 존재 — `hybrid-http-client` 백엔드가 로컬 layout/OCR-det 용으로 사용.
    MinerU 가 모델 경로를 env/기본경로로 요구하면 명시(플랜 Task 4 Step 1 에서 실제 요구 env 확정).
-3. **별도 VLM GPU 서버** 가동 — MinerU 가 `server_url` 로 호출하는 원격 VLM.
-   `scripts/parse-svc.env`(런처가 로드, gitignored) 에:
+3. **별도 VLM GPU 서버** 가동 — MinerU 가 `server_url` 로 호출하는 원격 vLLM(OpenAI 호환).
+   **실 엔드포인트(2026-07-13 확정)**: `https://api-mineru.ys-helperai.com/v1`, model=`MinerU2.5`, **인증 없음**(api_key 아무 값).
+   raw OpenAI 호환 chat.completions(이미지 1장 → VLM raw). hybrid-http-client 의 `server_url` 이 이걸 소비한다.
    ```
-   MINERU_VLM_SERVER_URL=http://<mineru-vlm-gpu-host>:<port>
-   # MINERU_VLM_API_KEY=... (필요 시)
+   MINERU_VLM_SERVER_URL=https://api-mineru.ys-helperai.com/v1
+   MINERU_VLM_MODEL=MinerU2.5
+   # MINERU_VLM_API_KEY=dummy   # 인증 없음 — SDK 요구 시 아무 값
    ```
    ⚠️ 반드시 `scripts/parse-svc.env` 에 둔다(`.gitignore` `scripts/*.env` 로 무시 + 런처
    `scripts/run-parse-svc.sh:44` 가 `set -a; . scripts/parse-svc.env` 로 로드). `parse_service/parse-svc.env`
    는 gitignore 도 로드도 안 되니 쓰지 말 것(비밀 유출·미로드).
+
+   **server_url 형식 주의**: 위 OpenAI SDK base_url 은 `/v1` 포함이다. MinerU `MinerUClient`(`mineru_vl_utils`)가
+   `server_url` 에 base(`/v1` 없이)를 원하는지 `/v1` 포함을 원하는지는 Task 4 Step 1(`inspect`)에서 확정. 우선 `/v1` 포함으로 두고 실패 시 base 로 조정.
+
+   raw 호출 형태(참고 — MinerU 가 내부에서 이 형태로 :8103 을 부른다. mineru_vl_utils 가 프롬프트/파싱 담당):
+   ```python
+   from openai import OpenAI
+   client = OpenAI(base_url="https://api-mineru.ys-helperai.com/v1", api_key="dummy")
+   resp = client.chat.completions.create(
+       model="MinerU2.5",
+       messages=[{"role": "user", "content": [
+           {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+           {"type": "text", "text": "<프롬프트>"}]}],
+       max_tokens=4096)
+   ```
+
+## 처리량 튜닝 (배치 속도)
+
+배치는 **두 층**에서 일어난다(설계 §2 검증): (a) parse-svc 로컬 — MinerU 가 페이지를 `window_size`(기본 64) 로 묶어
+PaddleOCR layout 을 로컬 배치 예측하고 window 의 VLM 요청을 **동시 발사**. (b) GPU — vLLM 이 그 동시요청을
+**continuous batching** 으로 토큰단위 동적 묶음. GPU 실효 배치 크기는 window_size(64) 가 아니라 아래 두 값이 결정한다.
+
+- **vLLM `--max-num-seqs`** (GPU 서버): GPU 가 동시에 물 수 있는 시퀀스 수 = 실효 배치 상한. 넉넉히(예: 64~256, GPU VRAM/KV캐시 여유에 맞춰). 낮으면 MinerU 가 아무리 동시 요청해도 GPU 에서 큐잉돼 처리량이 안 오른다.
+- **MinerU/mineru_vl_utils 동시성** (parse-svc): window 의 VLM 요청을 실제로 얼마나 병렬로 쏘는지. 이게 vLLM 에 충분한 in-flight 요청을 공급해야 continuous batching 이 효과를 낸다. **Task 4 Step 1 에서 mineru_vl_utils 가 동시(async) 발사인지 순차인지 확인** — 순차면 처리량 병목이므로 동시성 옵션/환경변수를 켠다. MinerU 는 보통 `MINERU_VLM_SERVER_URL` 계열과 함께 요청 동시성/배치 관련 옵션을 노출하므로 실제 옵션명을 do_parse/MinerUClient 시그니처로 확정.
+- **`window_size`(64)**: parse-svc 로컬 PaddleOCR 배치·메모리 파이프라인 단위. GPU 배치와 직접 무관하나 너무 작으면 in-flight 공급이 줄어 GPU 유휴가 생길 수 있다. 기본 64 유지, 지연/메모리 보며 조정.
+
+> 튜닝 순서: ① vLLM `--max-num-seqs` 를 목표 동시성 이상으로 → ② mineru_vl_utils 동시 발사 확인/활성화 → ③ 실측(스캔 N페이지 문서 parse 시간)으로 window_size·동시성 미세조정. GPU 가 포화되면(util ~100%) max-num-seqs 가 상한.
 
 ## 배포 후 스택검증 (플랜 Task 8)
 
