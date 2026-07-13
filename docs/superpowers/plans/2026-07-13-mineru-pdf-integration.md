@@ -1,5 +1,5 @@
 <!-- plan-version: v3 -->
-<!-- ultracode-validation: PENDING -->
+<!-- ultracode-validation: READY v3 at 2026-07-13T04:42:07Z -->
 
 # MinerU PDF 레인 통합 Implementation Plan
 
@@ -81,6 +81,8 @@ git commit -m "feat(parse-svc): triage(PyMuPDF 저비용 신호) 이식 — Mine
 - Produces: `RouteDecision`(frozen dataclass: `lane: str`("odl"|"mineru"), `parse_method: str | None`("ocr"|"auto"|None)), `decide_route(pdf_bytes: bytes) -> RouteDecision`.
 
 집계 규칙(spec §3.1·§4.3 정정): 비어있지 않은 버킷이 전부 `TEXT_ONLY`(또는 전부 SKIP/열기실패) → ODL. **`OCR_NEEDED` 가 하나라도 있으면 → MinerU `'ocr'` 강제**(스캔 페이지엔 네이티브 텍스트가 없어 'auto' 로 두면 문서수준 classify='txt' 시 유실). `OCR_NEEDED` 없이 `LLM_NEEDED` 만(스캔 없는 텍스트+이미지 혼합) → MinerU `'auto'`(유실 위험 없이 VLM 호출 최소화). **triage 예외(암호화/손상 페이지 반복 실패)는 삼켜 ODL 로**(가용성 회귀 방지).
+
+> **보증 범위(정확히)**: 이 게이트는 "**네이티브 텍스트 페이지는 텍스트를 잃지 않는다**"를 보증한다. "스캔 페이지가 절대 'auto' 로 안 간다"는 아니다 — 숨은/부분 OCR 텍스트 레이어(char>20)를 가진 스캔 PDF 는 triage 가 TEXT_ONLY/LLM_NEEDED 로 분류할 수 있고(triage 임계값 특성, feat/pdf-triage 상속), 그 경우 'auto'/ODL 로 갈 수 있다. 완화: 그런 페이지의 스캔 영역은 image 블록이라 `_ocr_enable=False` 여도 VLM 이 추출(spec §2.2), 그리고 spec §9 모니터링 대상.
 
 - [ ] **Step 1: 실패 테스트 작성**
 
@@ -522,7 +524,7 @@ def test_mineru_empty_result_falls_back_to_odl(monkeypatch):
 def test_gate_exception_routes_to_odl(monkeypatch):
     """_safe_decide_route 가 게이트 예외를 삼켜 None → ODL(새 500 없음)."""
     monkeypatch.setattr(pdf_parser, "_page_markdowns", lambda fb, fn: ["# 텍스트"])
-    # 실제 _safe_decide_route 사용: gate import 를 깨서 None 반환 유도
+    # 실제 _safe_decide_route 사용: decide_route 가 예외를 던져도 삼켜지는지 검증
     import parse_service.parsers.pdf.gate as gate
     monkeypatch.setattr(gate, "decide_route",
                         lambda b: (_ for _ in ()).throw(RuntimeError("boom")))
