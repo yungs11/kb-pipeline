@@ -5,6 +5,7 @@ import logging
 import re
 
 from parse_service.parsers import RouteResult, ParserError
+from parse_service.parsers.pdf.mineru_lane import run_mineru
 from parse_service.tools import ToolError
 from parse_service.tools.opendataloader import convert_pdf_to_page_markdowns
 
@@ -45,7 +46,40 @@ def _ocr_elements_for_page(jpeg: bytes, name: str, ocr_url: str | None = None) -
     return ocr_elements_sync(jpeg, name)
 
 
+def _safe_decide_route(file_bytes: bytes):
+    """게이트 호출 — pymupdf 부재/triage 예외를 삼켜 None(=ODL) 반환. 새 500 방지(가용성).
+
+    gate 는 top-level import 하지 않는다(gate→triage→import pymupdf 라 pymupdf 부재 시
+    모듈 로드가 통째로 깨져 ODL 레인까지 회귀). 여기서 지연 import + try/except 로 격리.
+    """
+    try:
+        from parse_service.parsers.pdf.gate import decide_route
+    except Exception:  # noqa: BLE001
+        log.exception("게이트 import 실패(pymupdf 부재?) — ODL 레인")
+        return None
+    try:
+        return decide_route(file_bytes)
+    except Exception:  # noqa: BLE001
+        log.exception("게이트 판정 실패 — ODL 레인")
+        return None
+
+
 def parse(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteResult:
+    """문서수준 게이트 → ODL 레인 or MinerU 레인(게이트/MinerU 실패·빈결과 시 ODL 폴백)."""
+    decision = _safe_decide_route(file_bytes)
+    if decision is not None and decision.lane == "mineru":
+        try:
+            pages = run_mineru(file_bytes, filename, decision.parse_method)
+        except Exception:  # noqa: BLE001 — MinerU 실패는 비치명, ODL/VL 폴백
+            log.exception("MinerU 레인 실패 — ODL/VL 폴백 (%s)", filename)
+        else:
+            if pages and any(p.get("blocks") for p in pages):
+                return RouteResult(kind="pages", chunk_needed=True, pages=pages)
+            log.warning("MinerU 빈 결과 — ODL/VL 폴백 (%s)", filename)
+    return _odl_lane(file_bytes, filename, ocr_url=ocr_url)
+
+
+def _odl_lane(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteResult:
     from kb_pipeline.blockify import hybrid_to_blocks, elements_to_blocks
     try:
         md_texts = _page_markdowns(file_bytes, filename)
