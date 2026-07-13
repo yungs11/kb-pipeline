@@ -193,3 +193,20 @@ mineru 3.4.4 실설치+import+실 do_parse 로 검증. **실환경 결함 4건 �
 - **Dockerfile 캐싱 재정렬**: requirements/torch/mineru/opencv libs 를 앱 코드 COPY 앞으로 → 코드 변경 시 무거운 재설치 회피.
 
 **잔여(실 배포)**: (a) 혼합 PDF('ocr' 강제) 실문서 1건 + 실 문서(한글 스캔) 품질 확인. (b) PaddleOCR layout 모델 빌드시 사전다운로드(첫 요청 ~215MB+ 런타임 다운로드 지연 억제). (c) 실 compose 스택(facade→parse-svc→edgequake) 배선 후 전 구간 적재검증. (d) VLM 엔드포인트 무인증 → 네트워크 접근제한 권고.
+
+## 게이트 3-레인화 + 실 스캔문서 검증 (2026-07-14)
+
+문서수준 게이트를 ODL/MinerU-pipeline/MinerU-hybrid **3-레인**으로 확장. **실측 근거**(신탁/약관 페이지별 triage 신호 덤프): 디지털 페이지는 char_count/image_coverage 로 텍스트/차트 구분 가능, **스캔 페이지(char=0)는 통짜 래스터라 싼 신호로 텍스트/순서도 구분 불가**(픽셀=layout 봐야 함). 그래서:
+- **스캔 존재(OCR_NEEDED)** → MinerU **pipeline**(로컬 PaddleOCR-v5+layout+표, ocr). server_url 불요. 순서도/차트는 image 블록→하류 modal-enrich VL(관찰 대상).
+- **스캔 없음 + 차트페이지 비율≥0.5**(`KBP_GATE_HYBRID_RATIO`) → MinerU **hybrid**(원격 VL).
+- 그 외(디지털 텍스트) → **ODL**. (큰 디지털문서가 그림 몇 장에 통째 hybrid 되는 회귀는 ratio 가드로 방지 — 292p 약관=LLM 22/285=0.08→ODL.)
+
+**backend 는 do_parse 호출당 1개**라 문서수준 단일선택이 유일 granularity(페이지별 혼합 불가 = "1개만 돌림"). 트레이드오프: 디지털多+스캔소수 문서도 전체 pipeline(디지털 재OCR).
+
+**실 스캔문서 컨테이너 검증**(신탁 아웃라인 3p, `POST /parse`): 게이트→pipeline 자동 라우팅 확인. 결과 **n_blocks=27, 표 `<table>`(rowspan/colspan 보존), 한글 텍스트 정상**(korean PP-OCRv5 rec). 표 매트릭스·한글 온전.
+- **pipeline 모델셋**: hybrid(det/rec/layout 3개)보다 +7개(표인식·수식) 필요 → 첫 요청 런타임 다운로드(384s, 1회) 후 캐시. 이후 다운로드 0(오프라인).
+- **속도(dev Mac CPU)**: 캐시 후 순수 파싱 3p ≈ 2.5분(페이지당 ~50s, CPU 2378%=24코어 풀). PaddleOCR det+rec+layout+표 전부 CPU라 대용량 스캔은 느림 → 배포서버 코어수·MINERU_PDF_RENDER_THREADS 로 완화. 근본은 GPU OCR 또는 페이지 축소.
+- **완전 오프라인**: `mineru.json`(models-dir 고정)+`MODELSCOPE_OFFLINE=1`+`HF_HUB_OFFLINE=1`. 단 캐시에 없는 모델은 첫 1회 받음(pipeline 모델셋 사전다운로드 권장).
+- 로컬 단위검증 44 tests(gate 3레인 파라미터 포함).
+
+**dev 실행 토폴로지(테스트용)**: 호스트 parse-svc(:19001) 대신 MinerU Docker 컨테이너를 :19001 에 기동(재현 스크립트 scratchpad `run-parse-svc-mineru.sh`). facade(:19000)는 호스트 유지. ⚠️ 컨테이너 쓰는 동안 호스트 `run-parse-svc.sh` 금지(:19001 충돌).

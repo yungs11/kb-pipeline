@@ -100,3 +100,11 @@ PaddleOCR layout 을 로컬 배치 예측하고 window 의 VLM 요청을 **동�
   gunicorn `-w4` uvicorn 워커 밑에서 정상 동작 확인(크래시 없음). `parse_service.app` 이 do_parse 를 import 가 아닌
   요청 핸들러에서 부르므로 spawn 재-import 문제 없음.
 - **첫 요청 모델 다운로드** — PaddleOCR/layout 모델(~215MB+)이 첫 `/parse` 때 런타임 다운로드(~1분+ 지연). 볼륨/사전다운로드로 억제.
+- ⚠️ **대용량 스캔 PDF 렌더 타임아웃(발견됨)** — MinerU 는 window(기본 64페이지)를 이미지로 렌더할 때 내부 타임아웃
+  `MINERU_PDF_RENDER_TIMEOUT`(**기본 300s**)을 건다. 고해상도 스캔 다수페이지(예: 86p)를 느린 CPU 에서 렌더하면
+  300s 초과 → `TimeoutError: PDF image rendering timeout` → MinerU 레인 폴백(ODL/VL)로 빠져 스캔 품질 유실.
+  → 대용량 대비 env 상향: `MINERU_PDF_RENDER_TIMEOUT=1800`, `MINERU_PDF_RENDER_THREADS=<코어수>`(기본 3).
+  근본 완화는 코어 많은 배포서버 + (선택) window_size 축소.
+- **완전 오프라인 모델**: `~/.cache/mineru.json`(`models-dir.pipeline`=캐시 경로) + `MODELSCOPE_OFFLINE=1`+`HF_HUB_OFFLINE=1` → 런타임 모델 네트워크 0.
+- ⚠️ **pipeline 은 hybrid 보다 모델이 더 많음** — hybrid 는 OCR det/rec + layout(3개)만, **pipeline 은 표인식·수식(MFR/MFD) 등 +7개** 추가 필요. 빌드시 사전다운로드는 backend 별로:
+  `mineru-models-download -s modelscope -m pipeline`(pipeline 전체) — hybrid 만 받으면 pipeline 첫 요청 때 표/수식 모델을 런타임 다운로드(오프라인이어도 캐시에 없으면 받음). 두 레인 다 쓰면 **pipeline 모델셋을 미리 받아두면 둘 다 커버**.
