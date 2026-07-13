@@ -58,6 +58,26 @@ def test_chart_without_content_falls_back_to_image():
     assert img["type"] == "image" and img["img_path"] == "imgs/c.jpg"
 
 
+def test_real_live_vlm_content_list_maps_correctly():
+    """Task 8 회귀 앵커 — 라이브 MinerU2.5 VLM 이 스캔 PDF 에서 실제 반환한 content_list(2026-07-13).
+    'header' 타입(페이지 헤더)·table_body HTML·page_idx 0 을 실제 관측대로 고정."""
+    real = [
+        {"type": "text", "text": "This is a scanned-style page with a table below.",
+         "bbox": [40, 115, 283, 140], "page_idx": 0},
+        {"type": "table", "img_path": "images/75.jpg", "table_caption": [], "table_footnote": [],
+         "table_body": "<table><tr><td>Name</td><td>Value</td></tr><tr><td>Alpha</td><td>123</td></tr></table>",
+         "bbox": [43, 246, 621, 548], "page_idx": 0},
+        {"type": "header", "text": "MinerU E2E Test Document", "bbox": [40, 48, 190, 70], "page_idx": 0},
+    ]
+    pages = mineru_lane._elements_to_pages(mineru_lane._content_list_to_elements(real))
+    assert pages[0]["page_number"] == 1
+    tbl = next(b for b in pages[0]["blocks"] if b["type"] == "table")
+    assert tbl["table_body"] == "<table><tr><td>Name</td><td>Value</td></tr><tr><td>Alpha</td><td>123</td></tr></table>"
+    texts = " ".join(b.get("text", "") for b in pages[0]["blocks"])
+    assert "scanned-style" in texts and "E2E Test Document" in texts  # header→text 유지
+    assert all(b["page_idx"] == 1 for b in pages[0]["blocks"])
+
+
 def test_run_mineru_uses_invoke_boundary(monkeypatch):
     seen = {}
 

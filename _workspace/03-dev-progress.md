@@ -175,6 +175,16 @@ plan: `docs/superpowers/plans/2026-07-02-parser-consolidation-phase2.md` (v3 REA
 | 5 | `__init__.py` parse 문서수준 분기 + `_safe_decide_route` 가드 + MinerU 실패·빈결과 ODL 폴백(기존 본문→`_odl_lane`) | ✅ 완료 — test_parser_pdf_routing 5 + 기존 pdf 5 passed |
 | 6 | env(`scripts/parse-svc.env` MINERU_VLM_SERVER_URL) + 배포 노트 `docs/mineru-deploy-notes.md` | ✅ 완료 |
 | 7 | 전체 회귀 + _workspace 반영 | ✅ 완료 — 신규/관련 35 passed, 회귀 0(기존 red 5건 baseline 동일 확인) |
-| 8 | **배포서버 스택검증(실 MinerU)** — do_parse 시그니처/출력경로/content_list enum(`text_level`) 소스 대조 + 실 스캔·혼합 PDF end-to-end | ⏳ **잔여** — 로컬(Intel Mac) MinerU 미설치, 배포서버 필요 |
+| 8 | **MinerU 실계약 검증(Docker py3.12 컨테이너 + 라이브 VLM e2e)** — do_parse 시그니처/출력경로/content_list 스키마 소스대조 + 실 스캔 PDF end-to-end | ✅ **실증 완료(2026-07-13)** — 아래 |
 
-**MinerU 레인 종료(로컬 구현분, 2026-07-13)**: 게이트/매핑/폴백 in-process 구현+단위검증 완료. 실 MinerU 경로는 배포서버 몫(Task 8). 리스크: (a) MinerU/torch/PaddleOCR 배포서버 설치 미검증, (b) content_list heading 이 `type=='text'`+`text_level` 로 올 수 있어 `_TYPE_TO_CATEGORY` 정정 필요(Task 8), (c) 숨은 OCR 텍스트레이어(char>20) 스캔 PDF 는 triage 가 TEXT_ONLY/LLM_NEEDED 로 오분류→'auto' 가능(§9 모니터링, image 블록은 VLM 추출).
+**Task 8 실증 완료(2026-07-13, Docker py3.12-slim 컨테이너 + 라이브 VLM `api-mineru.ys-helperai.com`)**:
+mineru 3.4.4 실설치+import+실 do_parse 로 검증. **실환경 결함 4건 발견·수정**:
+1. `do_parse` **`p_lang_list` 필수 위치인자** 누락 → 크래시. `[MINERU_LANG or "korean"]` 전달(라이브 REQUIRED 재확인).
+2. content_list 실스키마: heading=`text+text_level`(별도 title 타입 없음)·**chart=별도 타입**·list=`list_items`·code=`code_body` → `_content_list_to_elements` 재매핑(유실 0).
+3. opencv(cv2) `libxcb.so.1`/libGL 시스템 라이브러리 누락 → Dockerfile apt 추가(`libgl1 libglib2.0-0 libxcb1 libsm6 libxext6 libxrender1`).
+4. `six` 미포함(mineru pytorchocr import) → Dockerfile 추가(누락 시 HybridDependencyError 로 가려짐).
+확정: **`server_url`=/v1 없는 base**(mineru 가 `/v1/chat/completions` append), model 명 `/v1/models` 자동조회(kwargs 불요), 동시성 `max_concurrency`(기본100). 설치=CPU torch+`mineru[pipeline]`(core 불필요).
+**e2e 실증**: 스캔(이미지전용)PDF → hybrid-http-client(predictor init 1.19s) → 라이브 MinerU2.5 → content_list `{text, table(<table>HTML), header}`.
+**표가 `<table>` HTML 로 비어있지 않게 추출**(2026-07-07 빈표 버그 MinerU 해결 실증). 내 매핑이 실출력 정확변환(회귀 앵커 `test_real_live_vlm_content_list_maps_correctly`). 로컬 단위검증 39 passed(mineru_lane 8·gate 11·routing 5·pdf 5·triage 10).
+
+**잔여(실 배포서버/스택)**: (a) 실 parse-svc 이미지 빌드(멀티-GB) + 스택 기동 후 `POST /parse` 통합. (b) MinerU 내부 multiprocessing 이 gunicorn `-w4` 워커와 상호작용 없는지(스택 스모크시 확인). (c) 혼합 PDF('ocr' 강제) 실문서 1건. (d) PaddleOCR layout 모델 사전다운로드(오프라인 억제).
