@@ -122,6 +122,37 @@ def test_invoke_passes_args_and_reads_disk_content_list(monkeypatch):
     assert content_list == [{"type": "text", "text": "ocr 결과", "page_idx": 0}]
 
 
+def test_invoke_runs_do_parse_off_running_event_loop(monkeypatch):
+    """do_parse(mineru_vl_utils)는 실행 중 루프가 있으면 loop.run_until_complete 로 실패한다.
+    _invoke_mineru 를 실행 중인 asyncio 루프 안에서 불러도, do_parse 는 실행 중 루프가 없는
+    스레드에서 돌아야 한다(get_running_loop() 가 RuntimeError → asyncio.run 깨끗한 경로)."""
+    import asyncio
+    monkeypatch.setenv("MINERU_VLM_SERVER_URL", "http://vlm:8000")
+    seen = {}
+
+    def fake_run(**kw):
+        try:
+            asyncio.get_running_loop()
+            seen["loop_running"] = True   # 나쁨 — 여전히 실행 중 루프 위
+        except RuntimeError:
+            seen["loop_running"] = False  # 좋음 — 깨끗한 스레드
+        out = kw["output_dir"]
+        os.makedirs(out, exist_ok=True)
+        with open(os.path.join(out, "x_content_list.json"), "w", encoding="utf-8") as f:
+            json.dump([{"type": "text", "text": "ok", "page_idx": 0}], f)
+        return None
+
+    monkeypatch.setattr(mineru_lane, "_run_mineru_do_parse", fake_run)
+
+    async def call():
+        # 실행 중 루프 안에서 동기 _invoke_mineru 호출(FastAPI async 핸들러 재현)
+        return mineru_lane._invoke_mineru(b"%PDF", "x.pdf", "ocr")
+
+    cl = asyncio.run(call())
+    assert seen["loop_running"] is False, "do_parse 가 실행 중 루프 스레드에서 돌면 안 됨"
+    assert cl == [{"type": "text", "text": "ok", "page_idx": 0}]
+
+
 def test_invoke_passes_max_concurrency_when_set(monkeypatch):
     monkeypatch.setenv("MINERU_VLM_SERVER_URL", "http://vlm:8000")
     monkeypatch.setenv("MINERU_MAX_CONCURRENCY", "48")

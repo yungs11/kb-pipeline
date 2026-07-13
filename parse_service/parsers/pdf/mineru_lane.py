@@ -8,6 +8,7 @@ MinerU 는 로컬(Intel Mac) 미설치라 지연 import — 실경로는 배포�
 """
 from __future__ import annotations
 
+import concurrent.futures
 import glob
 import json
 import logging
@@ -146,7 +147,11 @@ def _invoke_mineru(pdf_bytes: bytes, filename: str, parse_method: str) -> list[d
         max_conc = os.environ.get("MINERU_MAX_CONCURRENCY")
         if max_conc:
             kwargs["max_concurrency"] = int(max_conc)
-        _run_mineru_do_parse(**kwargs)
+        # MinerU VLM http 클라이언트는 실행 중 루프가 있으면 loop.run_until_complete 를 써서
+        # "event loop is already running"(FastAPI async 핸들러) 로 실패한다. 실행 중 루프가 없는
+        # 워커 스레드에서 돌리면 mineru_vl_utils 가 asyncio.run() 깨끗한 경로를 탄다.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            ex.submit(_run_mineru_do_parse, **kwargs).result()
         matches = glob.glob(os.path.join(output_dir, "**", "*content_list.json"), recursive=True)
         if not matches:
             raise RuntimeError(f"MinerU content_list.json 미생성: {output_dir}")
