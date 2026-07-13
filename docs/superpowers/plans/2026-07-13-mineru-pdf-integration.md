@@ -600,11 +600,11 @@ git commit -m "feat(parse-svc): PDF parse 문서수준 분기(ODL/MinerU) + Mine
 
 `scripts/parse-svc.env` 에 추가(값은 실 서버 주소). **이 파일이 런처 `scripts/run-parse-svc.sh` 가 `set -a; . scripts/parse-svc.env` 로 프로세스에 로드하는 파일**이고 `.gitignore` `scripts/*.env` 로 무시된다. (`parse_service/parse-svc.env` 는 로드도 gitignore 도 안 되니 쓰지 말 것):
 ```
-# 실 엔드포인트(2026-07-13): raw vLLM OpenAI 호환, model=MinerU2.5, 인증 없음
-MINERU_VLM_SERVER_URL=https://api-mineru.ys-helperai.com/v1
-MINERU_VLM_MODEL=MinerU2.5
-# MINERU_VLM_API_KEY=dummy   # 인증 없음 — SDK 요구 시 아무 값
-# PP-OCR 모델 경로/버전(PP-OCRv5) — MinerU 가 env/기본경로로 요구하면 명시(spec §4.4). Task 4 Step 1 에서 실제 요구 env 확정.
+# 실 엔드포인트(2026-07-13): raw vLLM OpenAI 호환, model=MinerU2.5(자동조회), 인증 없음
+# ⚠️ /v1 없이 base 만 — mineru_vl_utils 가 f"{server_url}/v1/chat/completions" 생성(Task 8 소스확인).
+MINERU_VLM_SERVER_URL=https://api-mineru.ys-helperai.com
+# MINERU_LANG=korean            # PaddleOCR OCR-det 언어(기본 korean)
+# MINERU_MAX_CONCURRENCY=100    # mineru_vl_utils 동시요청(기본 100) — vLLM --max-num-seqs 와 매칭.
 # 처리량: vLLM --max-num-seqs(GPU 실효 배치 상한) + mineru_vl_utils 동시성 — docs/mineru-deploy-notes.md §처리량 튜닝 참고.
 ```
 확인(둘 다):

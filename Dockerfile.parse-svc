@@ -25,7 +25,9 @@ RUN pip install --no-cache-dir uv && \
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libgl1 libglib2.0-0 libxcb1 libsm6 libxext6 libxrender1 && rm -rf /var/lib/apt/lists/*
 RUN uv pip install --system --no-cache torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
-    uv pip install --system --no-cache "mineru[pipeline]"
+    uv pip install --system --no-cache "mineru[pipeline]" six
+# six: mineru pytorchocr(PaddleOCR) 가 import 하나 mineru[pipeline] 이 안 끌어옴(Task 8 e2e 발견 —
+# 누락 시 hybrid_analyze import 실패가 HybridDependencyError 로 가려져 나타남).
 # PaddleOCR/layout 모델은 런타임 auto-download. 오프라인/지연 억제 원하면 빌드시 사전다운로드:
 #   RUN mineru-models-download -s modelscope -m pipeline   (모델 경로/캐시는 MINERU_MODEL_SOURCE 등으로 고정)
 EXPOSE 19001

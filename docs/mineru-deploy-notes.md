@@ -34,12 +34,14 @@
    - 출력경로 = `{output_dir}/{stem}/hybrid_{parse_method}/{stem}_content_list.json` — 코드 재귀 glob `**/*content_list.json` 로 포착.
    - 동시성 = `max_concurrency`(기본 100, do_parse **kwargs) — `MINERU_MAX_CONCURRENCY` env 로 조절.
 3. **별도 VLM GPU 서버** 가동 — MinerU 가 `server_url` 로 호출하는 원격 vLLM(OpenAI 호환).
-   **실 엔드포인트(2026-07-13 확정)**: `https://api-mineru.ys-helperai.com/v1`, model=`MinerU2.5`, **인증 없음**(api_key 아무 값).
-   raw OpenAI 호환 chat.completions(이미지 1장 → VLM raw). hybrid-http-client 의 `server_url` 이 이걸 소비한다.
+   **실 엔드포인트(2026-07-13 확정)**: base=`https://api-mineru.ys-helperai.com`, model=`MinerU2.5`(자동조회), **인증 없음**.
+   `/v1/models` 라이브 확인(root: opendatalab/MinerU2.5-Pro-2605-1.2B, max_model_len 8192).
    ```
-   MINERU_VLM_SERVER_URL=https://api-mineru.ys-helperai.com/v1
-   MINERU_VLM_MODEL=MinerU2.5
-   # MINERU_VLM_API_KEY=dummy   # 인증 없음 — SDK 요구 시 아무 값
+   # ⚠️ /v1 없이 base 만 — mineru_vl_utils.http_client 가 f"{server_url}/v1/chat/completions" 를 만든다(Task 8 소스확인).
+   #    /v1 붙이면 /v1/v1/... 이중경로가 됨. 모델명은 _get_model_name 이 /v1/models 로 자동조회(model kwargs 불요).
+   MINERU_VLM_SERVER_URL=https://api-mineru.ys-helperai.com
+   # MINERU_LANG=korean          # PaddleOCR OCR-det 언어(기본 korean). "ch"=중·영·일·번체·라틴.
+   # MINERU_MAX_CONCURRENCY=100  # mineru_vl_utils 동시요청(기본 100) — vLLM --max-num-seqs 와 매칭.
    ```
    ⚠️ 반드시 `scripts/parse-svc.env` 에 둔다(`.gitignore` `scripts/*.env` 로 무시 + 런처
    `scripts/run-parse-svc.sh:44` 가 `set -a; . scripts/parse-svc.env` 로 로드). `parse_service/parse-svc.env`
