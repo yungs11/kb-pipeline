@@ -187,4 +187,9 @@ mineru 3.4.4 실설치+import+실 do_parse 로 검증. **실환경 결함 4건 �
 **e2e 실증**: 스캔(이미지전용)PDF → hybrid-http-client(predictor init 1.19s) → 라이브 MinerU2.5 → content_list `{text, table(<table>HTML), header}`.
 **표가 `<table>` HTML 로 비어있지 않게 추출**(2026-07-07 빈표 버그 MinerU 해결 실증). 내 매핑이 실출력 정확변환(회귀 앵커 `test_real_live_vlm_content_list_maps_correctly`). 로컬 단위검증 39 passed(mineru_lane 8·gate 11·routing 5·pdf 5·triage 10).
 
-**잔여(실 배포서버/스택)**: (a) 실 parse-svc 이미지 빌드(멀티-GB) + 스택 기동 후 `POST /parse` 통합. (b) MinerU 내부 multiprocessing 이 gunicorn `-w4` 워커와 상호작용 없는지(스택 스모크시 확인). (c) 혼합 PDF('ocr' 강제) 실문서 1건. (d) PaddleOCR layout 모델 사전다운로드(오프라인 억제).
+**스택 스모크 통과(2026-07-13)**: `Dockerfile.parse-svc` 에 MinerU[pipeline] 반영 → **실 이미지 빌드(6.14GB) + 컨테이너 기동(gunicorn -w4) + 스캔 PDF `POST /parse`** → enriched_content 에 `<table>` HTML + 셀값(n_blocks=3). 전 구간 실서비스 동작.
+- **event-loop 결함 발견·수정(치명)**: mineru_vl_utils `http_client.batch_predict` 가 `get_running_loop()` 성공 시 `loop.run_until_complete` → FastAPI async 핸들러 실행중 루프 위 동기 do_parse 호출이 `RuntimeError: event loop is already running` → MinerU 폴백 → 빈 결과였음. `_invoke_mineru` 가 do_parse 를 **ThreadPoolExecutor 워커스레드**(실행중 루프 없음)에서 실행 → 해소(회귀테스트 추가, 로컬 40 passed).
+- **multiprocessing 확인**: MinerU 는 PDF 렌더에 spawn multiprocessing(max_workers=3) 사용 — gunicorn -w4 밑에서 크래시 없이 정상(do_parse 를 import 아닌 핸들러에서 부르므로).
+- **Dockerfile 캐싱 재정렬**: requirements/torch/mineru/opencv libs 를 앱 코드 COPY 앞으로 → 코드 변경 시 무거운 재설치 회피.
+
+**잔여(실 배포)**: (a) 혼합 PDF('ocr' 강제) 실문서 1건 + 실 문서(한글 스캔) 품질 확인. (b) PaddleOCR layout 모델 빌드시 사전다운로드(첫 요청 ~215MB+ 런타임 다운로드 지연 억제). (c) 실 compose 스택(facade→parse-svc→edgequake) 배선 후 전 구간 적재검증. (d) VLM 엔드포인트 무인증 → 네트워크 접근제한 권고.
