@@ -1,9 +1,10 @@
-<!-- plan-version: v2 -->
+<!-- plan-version: v3 -->
 <!-- ultracode-validation: PENDING -->
 
 # MinerU PDF 레인 통합 Implementation Plan
 
 > **v2 변경(ultracode 검증 반영)**: (1) 스캔 페이지 하나라도 있으면 `parse_method='ocr'` 강제('auto' 유실 정정, Task 2). (2) env 경로 `scripts/parse-svc.env` 로 정정(Task 6·Global Constraints). (3) 게이트 호출 lazy+try/except 가드 → pymupdf 부재/triage 예외 시 ODL 폴백(Task 5). (4) MinerU 빈 결과도 폴백(Task 5). (5) do_parse 디스크 출력 계약 반영(Task 4).
+> **v3 변경(2차 검증)**: (6) File Structure 개요의 잔여 오표기 `parse_service/parse-svc.env` → `scripts/parse-svc.env` 정정(비밀유출 경로 제거, 유일 blocking). (7) equation `latex`/`text` 둘 다 수용(Task 3). (8) parse_method 가 게이트→run_mineru 로 전달되는지 라우팅 테스트에 assert 추가(Task 5). (9) PP-OCR env 노트(Task 6).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -33,7 +34,7 @@
 - `parse_service/parsers/pdf/mineru_lane.py` — **Create**. `run_mineru(...)` = `_invoke_mineru`(import 경계) → `_content_list_to_elements`(순수) → `elements_to_blocks`(재사용) → `_elements_to_pages`(순수).
 - `parse_service/parsers/pdf/__init__.py` — **Modify**. 기존 parse 본문을 `_odl_lane` 로 추출, `parse()` 는 게이트 분기 + MinerU 폴백.
 - `parse_service/tests/test_triage.py` — **Create**(이식). `parse_service/tests/test_pdf_gate.py`, `test_mineru_lane.py`, `test_parser_pdf_routing.py` — **Create**.
-- `parse_service/parse-svc.env`(gitignored) — **Modify**. `MINERU_VLM_SERVER_URL` 등.
+- `scripts/parse-svc.env`(gitignored via `scripts/*.env`, 런처 `scripts/run-parse-svc.sh:44` 가 로드) — **Modify**. `MINERU_VLM_SERVER_URL` 등. (`parse_service/parse-svc.env` 는 gitignore·로드 안 됨 — 쓰지 말 것.)
 - `_workspace/01-architecture.md`·`02-changes.md`·`03-dev-progress.md` — **Modify**(완료 후 반영).
 
 ---
@@ -277,7 +278,8 @@ def _content_list_to_elements(content_list: list[dict]) -> list[dict]:
         elif t == "image":
             content = {"img_path": item.get("img_path") or ""}
         elif t == "equation":
-            content = {"text": item.get("text") or ""}
+            # MinerU equation 은 'latex' 또는 'text' 로 올 수 있음(blockify 헤더 문서화). 둘 다 수용.
+            content = {"text": item.get("latex") or item.get("text") or ""}
         else:  # text/title/list
             content = {"markdown": item.get("text") or ""}
         elements.append({"category": category, "content": content, "page_idx": page_idx})
@@ -484,10 +486,16 @@ def test_odl_lane_when_gate_says_odl(monkeypatch):
 
 
 def test_mineru_lane_when_gate_says_mineru(monkeypatch):
-    monkeypatch.setattr(pdf_parser, "_safe_decide_route", lambda b: _mineru())
-    monkeypatch.setattr(pdf_parser, "run_mineru",
-                        lambda fb, fn, pm: [{"page_number": 1, "blocks": [{"type": "text", "text": "m"}]}])
+    monkeypatch.setattr(pdf_parser, "_safe_decide_route", lambda b: _mineru("ocr"))
+    seen = {}
+
+    def fake_run(fb, fn, pm):
+        seen["pm"] = pm  # parse_method 가 게이트→run_mineru 로 전달되는지(§4.3 유실수정 핵심)
+        return [{"page_number": 1, "blocks": [{"type": "text", "text": "m"}]}]
+
+    monkeypatch.setattr(pdf_parser, "run_mineru", fake_run)
     res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    assert seen["pm"] == "ocr", "게이트의 parse_method 가 run_mineru 로 전달돼야"
     assert res.kind == "pages" and res.pages[0]["blocks"][0]["text"] == "m"
 
 
@@ -592,6 +600,7 @@ git commit -m "feat(parse-svc): PDF parse 문서수준 분기(ODL/MinerU) + Mine
 ```
 MINERU_VLM_SERVER_URL=http://<mineru-vlm-gpu-host>:<port>
 # MINERU_VLM_API_KEY=... (필요 시)
+# PP-OCR 모델 경로/버전(PP-OCRv5) — MinerU 가 env/기본경로로 요구하면 명시(spec §4.4). Task 4 Step 1 에서 실제 요구 env 확정.
 ```
 확인(둘 다):
 ```bash
