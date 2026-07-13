@@ -44,9 +44,12 @@
 3. **layout = bbox + type(+reading order)**, 내용 아님. PaddleOCR(로컬)이 "지도"(각 영역의 위치·종류·순서)를 만들고,
    VLM(원격)이 그 영역의 실제 내용을 채운다.
 
-**설계 함의**: parse-svc 가 이미 게이트 판정을 하므로, MinerU 내부 재-classify(pdfium 재파싱)를 피하려면
-**순수 스캔 문서엔 `parse_method='ocr'` 강제**, **혼합(네이티브 텍스트 일부 존재) 문서엔 `parse_method='auto'`**
-(MinerU 가 블록단위로 네이티브 텍스트/VLM 을 자동 분리 → 원격 VLM 호출 최소화)로 넘긴다. (§4.3)
+**설계 함의(정정 — ultracode 검증 반영)**: `_ocr_enable` 은 **문서당 1개 bool**이고 이게 `not_extract_list`(VLM 이 스킵할 텍스트 블록)를
+문서 전체에 적용한다. 따라서 **스캔 페이지(네이티브 텍스트 없음)가 하나라도 있으면 `parse_method='ocr'` 강제**해야 한다 —
+`'auto'` 로 두면 텍스트 다수 문서를 MinerU 문서수준 classify 가 `'txt'` 로 판정 → `_ocr_enable=False` →
+그 스캔 페이지의 텍스트 블록을 VLM 이 스킵하고 네이티브 텍스트(없음)로 채움 → **스캔 텍스트 유실**(= 이 기능이 잡으려던 2026-07-07 버그 재발).
+`'auto'` 는 **스캔 페이지가 전혀 없는 경우에만**(네이티브 텍스트 + 래스터 이미지만 = `LLM_NEEDED` 페이지들) 안전 —
+모든 페이지가 네이티브 텍스트를 보유하므로 유실 없이 VLM 호출만 이미지 블록으로 최소화된다. (§4.3)
 
 ---
 
@@ -112,19 +115,21 @@ else:                                  # OCR_NEEDED 또는 LLM_NEEDED 하나라�
   bytes→결과를 얻는다. `do_parse` 만 실용적이면 **스크래치패드 임시파일**(session scratchpad)에 bytes 를 써서 호출하고
   즉시 정리(부수효과 격리). *정확한 in-process 진입 시그니처는 구현 플랜 Task 에서 MinerU 소스로 확정.*
 
-### 4.3 parse_method (문서수준, §3.1 집계 결과로 결정)
-| 문서 유형(게이트) | parse_method | 이유 |
+### 4.3 parse_method (문서수준, §3.1 집계 결과로 결정 — 정정됨)
+| 문서 유형(게이트 버킷) | parse_method | 이유 |
 |---|---|---|
-| 순수 스캔(`{OCR_NEEDED}`) | `'ocr'` 강제 | MinerU 재-classify(pdfium 재파싱) 회피. `_ocr_enable=True` → VLM 전량추출 + PaddleOCR det. |
-| 혼합(네이티브 텍스트 섞임) | `'auto'` | MinerU 가 블록단위로 네이티브 텍스트/VLM 자동 분리 → **원격 VLM 호출·비용 최소화**. |
+| 스캔 페이지 존재(`OCR_NEEDED` 하나라도 포함) | **`'ocr'` 강제** | 스캔 페이지엔 네이티브 텍스트가 없다. `'ocr'` → `_ocr_enable=True` → VLM 전량추출 + PaddleOCR det 로 그 텍스트를 읽는다. `'auto'` 로 두면 문서수준 classify 가 'txt' 판정 시 스캔 텍스트 유실(§2 함의). |
+| 스캔 없음 + 혼합(`LLM_NEEDED` 만, `OCR_NEEDED` 없음) | `'auto'` | 모든 페이지가 네이티브 텍스트 보유 → MinerU 가 텍스트=네이티브, 이미지=VLM 으로 처리해 **원격 VLM 호출 최소화**(유실 위험 없음). |
 
-> 결정 근거: 혼합 문서에 `'ocr'` 강제 시 깨끗한 텍스트 페이지까지 VLM 이 OCR → 원격 호출 낭비(+`_workspace` 의 파서 지연/비용 민감성).
-> `'auto'` 의 재-classify 는 pdfium 샘플링 1회로 저렴. 순수 스캔은 어차피 classify 가 'ocr' 이므로 강제로 그 패스마저 생략.
+> **정정 근거(ultracode 검증)**: 초안은 "혼합=auto"였으나, `_ocr_enable` 이 문서수준 단일 bool 이라 `{TEXT_ONLY + OCR_NEEDED}`(텍스트 다수 + 스캔 소수) 문서를
+> 'auto' 로 보내면 classify='txt' → 스캔 페이지 텍스트가 유실됨(2렌즈 독립 지적, spec §2 와 모순). 그래서 **스캔 페이지가 하나라도 있으면 'ocr' 강제**로 바꾼다.
+> 비용 최소화 목적의 'auto' 는 **스캔이 전혀 없는 텍스트+이미지 혼합**에만 안전하게 유지.
+> 순수 스캔(`{OCR_NEEDED}` 단독)도 'ocr' 로 가므로 MinerU 재-classify(pdfium 패스)까지 생략된다.
 
 ### 4.4 VLM 원격 엔드포인트 설정 (확정)
 - **MinerU 전용 VLM 서버가 별도로 존재**(사용자 확정). 기존 in-process VL 의 `MODEL_API_URL` 을 재사용하지 않고
   **신규 env `MINERU_VLM_SERVER_URL`**(+필요 시 `MINERU_VLM_API_KEY`)로 MinerU `server_url` 에 주입한다.
-  gitignored `parse_service/parse-svc.env` 에 둔다(비밀은 커밋 금지).
+  gitignored `scripts/parse-svc.env`(런처 `scripts/run-parse-svc.sh` 가 실제 로드하고 `.gitignore` `scripts/*.env` 로 무시됨)에 둔다(비밀은 커밋 금지).
 - PP-OCR 모델 경로/버전(PP-OCRv5) env 로 명시(서버에 존재 가정).
 
 ---
@@ -149,7 +154,9 @@ parse-svc **blocks** 로 변환한다. 두 레인은 동일한 `RouteResult(kind
 ## 6. 폴백 / 에러 처리
 
 - `triage_document([])`(PDF 열기 실패) → ODL 레인(기존 동작).
-- MinerU 호출 실패(원격 VLM 다운/타임아웃/import 실패) → **로그 + 폴백**:
+- **게이트 자체 실패(pymupdf 부재/triage 페이지 반복 중 예외 — 암호화·손상 PDF)** → ODL 레인 폴백. 게이트 호출은 반드시
+  try/except 로 감싸 새 500 을 만들지 않는다(triage 는 `pymupdf.open` 만 try/except, 페이지 반복은 try/finally 라 반복 중 예외가 전파됨).
+- MinerU 호출 실패(원격 VLM 다운/타임아웃/import 실패) **또는 성공했으나 빈 결과(blocks 전무)** → **로그 + 폴백**:
   1차 폴백 = 기존 in-process VL 경로(현행 스캔 처리)로 문서 처리. VL 도 실패하는 페이지는 빈 blocks(현행처럼 비치명).
   → MinerU 도입이 **가용성 회귀를 만들지 않는다**(스캔 PDF 가 최소 현행 수준은 보장).
 - 페이지 단위 부분 실패는 비치명(빈 blocks) — 현행 계약 유지.
