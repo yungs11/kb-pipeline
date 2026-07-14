@@ -213,8 +213,9 @@ def test_vl_lane_all_failed_falls_back_to_odl(monkeypatch):
     assert res.pages[0]["blocks"], "VL 전멸 시 ODL 폴백"
 
 
-def test_paddle_gw_diagram_pages_get_vl_supplement(monkeypatch):
-    """paddle_gw 성공 후 diagram_pages 에 VL 서술 블록 추가(게이트웨이 이미지참조 보완)."""
+def test_paddle_gw_diagram_pages_replaced_by_vl(monkeypatch):
+    """paddle_gw 다이어그램 페이지는 VL 서술로 **교체** — 게이트웨이 OCR 조각(오타·뒤죽박죽)과
+    죽은 이미지참조(게이트웨이 상대경로)를 남기지 않는다(2026-07-15 결정). 비다이어그램 페이지 불변."""
     monkeypatch.setattr(
         pdf_parser, "_safe_decide_route",
         lambda b: RouteDecision(lane="paddle_gw", backend=None, parse_method=None,
@@ -222,8 +223,10 @@ def test_paddle_gw_diagram_pages_get_vl_supplement(monkeypatch):
     import parse_service.parsers.pdf.paddle_gw as pg
     monkeypatch.setattr(pg, "run_paddle_gateway", lambda fb, fn: [
         {"page_number": 1, "blocks": [{"type": "text", "text": "p1", "page_idx": 1}]},
-        {"page_number": 2, "blocks": [{"type": "image", "img_path": "images/x.jpg",
-                                       "image_caption": [], "page_idx": 2}]},
+        {"page_number": 2, "blocks": [
+            {"type": "image", "img_path": "imgs/x.jpg", "image_caption": [], "page_idx": 2},
+            {"type": "text", "text": "소유궁이전 조각", "page_idx": 2},  # 게이트웨이 OCR 오타 조각
+        ]},
     ])
 
     class FakeRP:
@@ -236,5 +239,32 @@ def test_paddle_gw_diagram_pages_get_vl_supplement(monkeypatch):
                              "content": {"markdown": "순서도: START→요청→확인→END"}, "page": 1}])
     res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
     p2 = next(p for p in res.pages if p["page_number"] == 2)
-    assert any(b["type"] == "image" for b in p2["blocks"]), "게이트웨이 이미지참조 유지"
-    assert any("START→요청" in (b.get("text") or "") for b in p2["blocks"]), "VL 서술 추가"
+    assert any("START→요청" in (b.get("text") or "") for b in p2["blocks"]), "VL 서술 존재"
+    assert not any(b["type"] == "image" for b in p2["blocks"]), "죽은 이미지참조 제거"
+    assert not any("소유궁이전" in (b.get("text") or "") for b in p2["blocks"]), "OCR 조각 제거"
+    p1 = next(p for p in res.pages if p["page_number"] == 1)
+    assert p1["blocks"][0]["text"] == "p1", "비다이어그램 페이지 불변"
+
+
+def test_paddle_gw_diagram_vl_failure_keeps_gateway_blocks(monkeypatch):
+    """교체 모드에서 VL 실패 시 게이트웨이 블록 유지(없는 것보단 조각이 낫다 — 비치명)."""
+    monkeypatch.setattr(
+        pdf_parser, "_safe_decide_route",
+        lambda b: RouteDecision(lane="paddle_gw", backend=None, parse_method=None,
+                                diagram_pages=(1,)))
+    import parse_service.parsers.pdf.paddle_gw as pg
+    monkeypatch.setattr(pg, "run_paddle_gateway", lambda fb, fn: [
+        {"page_number": 1, "blocks": [{"type": "text", "text": "게이트웨이 조각", "page_idx": 1}]},
+    ])
+
+    class FakeRP:
+        page_number, jpeg = 1, b"jpegbytes"
+
+    monkeypatch.setattr(pdf_parser, "_render_pages", lambda fb: [FakeRP()])
+
+    def boom(jpeg, name, ocr_url):
+        raise RuntimeError("VL down")
+
+    monkeypatch.setattr(pdf_parser, "_ocr_elements_for_page", boom)
+    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    assert any("게이트웨이 조각" in (b.get("text") or "") for b in res.pages[0]["blocks"])
