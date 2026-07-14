@@ -65,6 +65,16 @@ def _safe_decide_route(file_bytes: bytes):
 
 
 def parse(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteResult:
+    """문서수준 게이트 라우팅 + VL 퇴화(무한반복) 블록 필터."""
+    res = _parse_routed(file_bytes, filename, ocr_url=ocr_url)
+    from parse_service.parsers.degen_filter import filter_degenerate_pages
+    removed = filter_degenerate_pages(res.pages or [])
+    if removed:
+        log.warning("VL 퇴화 블록 %d개 제거 (%s)", removed, filename)
+    return res
+
+
+def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteResult:
     """문서수준 게이트 → ODL / vl(차트多) / paddle_gw(스캔) — 실패·빈결과 시 ODL/VL 폴백."""
     decision = _safe_decide_route(file_bytes)
     if decision is not None and decision.lane == "vl":

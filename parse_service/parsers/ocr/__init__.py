@@ -115,4 +115,10 @@ def parse(file_bytes: bytes, filename: str, *, ocr_url: str | None = None) -> Ro
         raise ParserError(f"ocr failed for {filename}: {e}") from e
     if not elements:
         raise ParserError(f"ocr/vlm empty for {filename}")
-    return RouteResult(kind="pages", chunk_needed=True, pages=_elements_to_pages(elements))
+    pages = _elements_to_pages(elements)
+    # VL 퇴화(무한반복) 블록 제거 — pptx/이미지도 VL 경로라 pdf 레인과 동일 필터 적용.
+    from parse_service.parsers.degen_filter import filter_degenerate_pages
+    removed = filter_degenerate_pages(pages)
+    if removed:
+        log.warning("VL 퇴화 블록 %d개 제거 (%s)", removed, filename)
+    return RouteResult(kind="pages", chunk_needed=True, pages=pages)

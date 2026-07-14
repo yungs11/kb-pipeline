@@ -268,3 +268,22 @@ def test_paddle_gw_diagram_vl_failure_keeps_gateway_blocks(monkeypatch):
     monkeypatch.setattr(pdf_parser, "_ocr_elements_for_page", boom)
     res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
     assert any("게이트웨이 조각" in (b.get("text") or "") for b in res.pages[0]["blocks"])
+
+
+def test_parse_filters_degenerate_vl_blocks(monkeypatch):
+    """어느 레인이든 parse() 출구에서 VL 퇴화(무한반복) 블록이 제거된다."""
+    degen = "기계음 손상완을 잡고 " * 60
+    monkeypatch.setattr(pdf_parser, "_safe_decide_route",
+                        lambda b: RouteDecision(lane="paddle_gw", backend=None,
+                                                parse_method=None))
+    import parse_service.parsers.pdf.paddle_gw as pg
+    monkeypatch.setattr(pg, "run_paddle_gateway", lambda fb, fn: [
+        {"page_number": 1, "blocks": [
+            {"type": "text", "text": "정상 본문 텍스트입니다.", "page_idx": 1},
+            {"type": "text", "text": degen, "page_idx": 1},
+        ]},
+    ])
+    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    texts = [b.get("text", "") for b in res.pages[0]["blocks"]]
+    assert any("정상 본문" in t for t in texts), "정상 블록 유지"
+    assert not any("기계음 손상완" in t for t in texts), "퇴화 블록 제거"
