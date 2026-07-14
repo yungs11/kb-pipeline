@@ -8,14 +8,15 @@
 - 스캔 페이지(char=0)는 전부 통짜 래스터라 신호가 동일(image_coverage≈0/1 고정) →
   "텍스트냐 순서도냐"를 **싼 신호로 구분 불가**. 픽셀 안을 봐야(=layout) 알 수 있음.
 
-라우팅(문서수준):
-- 스캔 페이지 존재(OCR_NEEDED)  → **paddle_gw**(PaddleOCR-VL 게이트웨이, GPU 전체 파이프라인).
-    실측(신탁 3p): 48s vs MinerU pipeline(CPU) 181s. 실패 시 parse() 가 ODL/in-process VL 폴백
-    (사용자 결정 2026-07-15: MinerU 는 스캔 폴백 체인에서 제외).
-- 스캔 없음 + 차트/그림 페이지 비율 높음(LLM_NEEDED) → MinerU **hybrid**(원격 VL 품질).
-- 그 외(순수 디지털 텍스트, 차트 소수) → ODL(기존 빠른 경로; 다이어그램 페이지는 VL 서술 보충).
+라우팅(문서수준, 2026-07-15 확정):
+- 차트/그림 페이지 비율 ≥ KBP_GATE_VL_RATIO(0.5) — **스캔 여부 무관** → **vl** 레인
+    (페이지별 in-process VL(qwen) — 차트/순서도 중심 문서는 페이지 전체를 VL 이 읽는 게 최선).
+- 스캔 페이지 존재(OCR_NEEDED, 위 비율 미달) → **paddle_gw**(PaddleOCR-VL 게이트웨이, GPU 전체
+    파이프라인). 실측(신탁 3p): 48s vs MinerU pipeline(CPU) 181s. 실패 시 ODL/in-process VL 폴백.
+- 그 외(디지털 텍스트, 차트 소수) → ODL(기존 빠른 경로; 다이어그램 페이지는 VL 서술 보충).
 
-paddle_gw 는 KBP_PADDLE_OCR_GATEWAY_URL, hybrid 는 MINERU_VLM_SERVER_URL 필요.
+MinerU 레인(pipeline/hybrid)은 코드 잔존하나 게이트가 라우팅하지 않음(휴면 — 재활성화 가능).
+paddle_gw 는 KBP_PADDLE_OCR_GATEWAY_URL, vl 은 MODEL_API_URL(in-process VL) 필요.
 """
 from __future__ import annotations
 
@@ -24,19 +25,17 @@ from dataclasses import dataclass
 
 from parse_service.parsers.pdf.triage import triage_document, Bucket
 
-# 스캔 없는 디지털 문서에서 차트/그림 페이지(LLM_NEEDED) 비율이 이 이상이면 hybrid(VL 품질),
-# 미만이면 ODL(텍스트 위주 → 빠른 ODL + 그림은 modal-enrich VL). 큰 디지털 문서가 그림 몇 장
-# 때문에 통째로 hybrid(느림)로 가는 회귀를 막는 가드. 실측: 292p 약관은 LLM 22/285=0.08.
-_HYBRID_RATIO = float(os.environ.get("KBP_GATE_HYBRID_RATIO", "0.5"))
-
-_HYBRID_BACKEND = "hybrid-http-client"
+# 차트/그림 페이지(LLM_NEEDED) 비율이 이 이상이면 문서 전체 VL 레인(스캔 여부 무관),
+# 미만이면 스캔유무로 paddle_gw/ODL. 큰 텍스트 문서가 그림 몇 장 때문에 통째로 VL(느림)로
+# 가는 회귀를 막는 가드. 실측: 292p 약관은 LLM 22/285=0.08 → ODL 유지.
+_VL_RATIO = float(os.environ.get("KBP_GATE_VL_RATIO", "0.5"))
 
 
 @dataclass(frozen=True)
 class RouteDecision:
-    lane: str                 # "odl" | "mineru"
-    backend: str | None       # None(odl) | "pipeline" | "hybrid-http-client"
-    parse_method: str | None  # None(odl) | "ocr" | "auto"
+    lane: str                 # "odl" | "vl" | "paddle_gw" | "mineru"(휴면)
+    backend: str | None       # mineru 전용("pipeline"|"hybrid-http-client"), 그 외 None
+    parse_method: str | None  # mineru 전용("ocr"|"auto"), 그 외 None
     # 다이어그램(순서도/차트) 페이지 번호(1-based) — ODL 레인이 페이지 단위 VL 서술 보충에 사용.
     diagram_pages: tuple = ()
 
@@ -58,15 +57,16 @@ def decide_route(pdf_bytes: bytes) -> RouteDecision:
     # 다이어그램(순서도/차트) 페이지 — ODL 라우팅 시 페이지 단위 VL 서술 보충 대상.
     diagram_pages = tuple(s.page_number for s in sigs if getattr(s, "is_diagram", False))
 
-    # 스캔 페이지(네이티브 텍스트 없음)가 하나라도 있으면 → PaddleOCR-VL 게이트웨이(GPU).
-    # layout+VL+표 조립 전부 게이트웨이 서버 — parse-svc 로컬 의존 0. 실패 시 ODL/VL 폴백.
+    # ① 차트/그림 페이지 비율이 높으면 — 스캔 여부 무관 — 문서 전체 VL 레인(페이지별 in-process VL).
+    #    차트/순서도 중심 문서는 페이지 전체를 VL 이 읽는 게 최선(2026-07-15 결정, hybrid 대체).
+    if n_llm > 0 and (n_llm / total) >= _VL_RATIO:
+        return RouteDecision(lane="vl", backend=None, parse_method=None)
+
+    # ② 스캔 페이지(네이티브 텍스트 없음)가 하나라도 있으면 → PaddleOCR-VL 게이트웨이(GPU).
+    #    layout+VL+표 조립 전부 게이트웨이 서버 — parse-svc 로컬 의존 0. 실패 시 ODL/VL 폴백.
     if n_ocr > 0:
         return RouteDecision(lane="paddle_gw", backend=None, parse_method=None)
 
-    # 스캔 없음. 차트/그림 페이지 비율이 높으면 → hybrid(원격 VL 품질). 아니면 → ODL.
-    if n_llm > 0 and (n_llm / total) >= _HYBRID_RATIO:
-        return RouteDecision(lane="mineru", backend=_HYBRID_BACKEND, parse_method="auto")
-
-    # 순수 디지털 텍스트(+차트/다이어그램 소수) → ODL. 다이어그램 페이지는 ODL 레인이 VL 서술 보충.
+    # ③ 디지털 텍스트(+차트/다이어그램 소수) → ODL. 다이어그램 페이지는 ODL 레인이 VL 서술 보충.
     return RouteDecision(lane="odl", backend=None, parse_method=None,
                          diagram_pages=diagram_pages)

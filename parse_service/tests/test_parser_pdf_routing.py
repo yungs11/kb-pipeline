@@ -171,3 +171,43 @@ def test_paddle_gw_empty_result_falls_back(monkeypatch):
     monkeypatch.setattr(pdf_parser, "_page_markdowns", lambda fb, fn: ["# 폴백 텍스트"])
     res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
     assert res.pages[0]["blocks"], "빈 결과 시 ODL 폴백"
+
+
+def test_vl_lane_dispatch(monkeypatch):
+    """차트비율≥0.5 라우팅(vl) → 전 페이지 렌더→in-process VL → blocks."""
+    monkeypatch.setattr(pdf_parser, "_safe_decide_route",
+                        lambda b: RouteDecision(lane="vl", backend=None, parse_method=None))
+
+    class RP1:
+        page_number, jpeg = 1, b"j1"
+
+    class RP2:
+        page_number, jpeg = 2, b"j2"
+
+    monkeypatch.setattr(pdf_parser, "_render_pages", lambda fb: [RP1(), RP2()])
+    monkeypatch.setattr(pdf_parser, "_ocr_elements_for_page",
+                        lambda jpeg, name, ocr_url: [
+                            {"category": "text", "content": {"markdown": f"vl:{name}"}, "page": 0}])
+    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    assert [p["page_number"] for p in res.pages] == [1, 2]
+    assert "vl:page-1" in res.pages[0]["blocks"][0]["text"]
+    assert all(b["page_idx"] == 2 for b in res.pages[1]["blocks"])
+
+
+def test_vl_lane_all_failed_falls_back_to_odl(monkeypatch):
+    """VL 전 페이지 실패 → blocks 전무 → ODL 폴백."""
+    monkeypatch.setattr(pdf_parser, "_safe_decide_route",
+                        lambda b: RouteDecision(lane="vl", backend=None, parse_method=None))
+
+    class RP1:
+        page_number, jpeg = 1, b"j1"
+
+    monkeypatch.setattr(pdf_parser, "_render_pages", lambda fb: [RP1()])
+
+    def boom(jpeg, name, ocr_url):
+        raise RuntimeError("VL down")
+
+    monkeypatch.setattr(pdf_parser, "_ocr_elements_for_page", boom)
+    monkeypatch.setattr(pdf_parser, "_page_markdowns", lambda fb, fn: ["# 폴백 텍스트"])
+    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    assert res.pages[0]["blocks"], "VL 전멸 시 ODL 폴백"

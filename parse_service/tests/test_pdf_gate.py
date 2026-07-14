@@ -19,16 +19,18 @@ T, L, O, S = Bucket.TEXT_ONLY, Bucket.LLM_NEEDED, Bucket.OCR_NEEDED, Bucket.SKIP
     ([T, S], "odl", None, None),
     ([S], "odl", None, None),
     ([], "odl", None, None),
-    # 스캔 페이지 존재(OCR_NEEDED) → paddle_gw(게이트웨이) — 하나라도 있으면
+    # 차트/그림 페이지 비율 ≥0.5 → VL 레인 (스캔 여부 무관 — 2026-07-15 결정)
+    ([L, L], "vl", None, None),
+    ([T, L], "vl", None, None),                         # 1/2 = 0.5 ≥ 0.5
+    ([L], "vl", None, None),
+    ([O, L], "vl", None, None),                         # 스캔+차트 혼합도 비율 충족 시 VL
+    ([O, L, L], "vl", None, None),                      # 2/3 ≥ 0.5
+    # 스캔 페이지 존재(OCR_NEEDED, 차트비율 미달) → paddle_gw(게이트웨이)
     ([O, O], "paddle_gw", None, None),
     ([O, S], "paddle_gw", None, None),
-    ([T, O], "paddle_gw", None, None),                  # 혼합(디지털+스캔)도 paddle_gw
-    ([O, L], "paddle_gw", None, None),
-    # 스캔 없음 + 차트/그림 페이지 비율 높음(≥0.5) → MinerU hybrid(auto)
-    ([L, L], "mineru", "hybrid-http-client", "auto"),
-    ([T, L], "mineru", "hybrid-http-client", "auto"),   # 1/2 = 0.5 ≥ 0.5
-    ([L], "mineru", "hybrid-http-client", "auto"),
-    # 스캔 없음 + 차트 소수(<0.5) → ODL(텍스트 위주; 그림은 modal-enrich VL)
+    ([T, O], "paddle_gw", None, None),                  # 혼합(디지털+스캔)
+    ([O, T, L], "paddle_gw", None, None),               # 차트 1/3 < 0.5 → 스캔 우선
+    # 차트 소수(<0.5) + 스캔 없음 → ODL(텍스트 위주; 그림은 modal-enrich VL)
     ([T, T, L], "odl", None, None),                     # 1/3 < 0.5
     ([T, T, T, L], "odl", None, None),                  # 1/4 < 0.5
 ])

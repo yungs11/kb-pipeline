@@ -65,9 +65,19 @@ def _safe_decide_route(file_bytes: bytes):
 
 
 def parse(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteResult:
-    """문서수준 게이트 → ODL / paddle_gw(스캔) / MinerU(hybrid) — 실패·빈결과 시 ODL/VL 폴백."""
+    """문서수준 게이트 → ODL / vl(차트多) / paddle_gw(스캔) — 실패·빈결과 시 ODL/VL 폴백."""
     decision = _safe_decide_route(file_bytes)
-    if decision is not None and decision.lane == "paddle_gw":
+    if decision is not None and decision.lane == "vl":
+        # 차트/그림 페이지 비율 높음(스캔 여부 무관): 전 페이지 렌더→in-process VL(qwen).
+        try:
+            pages = _vl_lane(file_bytes, filename, ocr_url=ocr_url)
+        except Exception:  # noqa: BLE001 — VL 레인 실패는 비치명
+            log.exception("vl 레인 실패 — ODL 폴백 (%s)", filename)
+        else:
+            if pages and any(p.get("blocks") for p in pages):
+                return RouteResult(kind="pages", chunk_needed=True, pages=pages)
+            log.warning("vl 레인 빈 결과 — ODL 폴백 (%s)", filename)
+    elif decision is not None and decision.lane == "paddle_gw":
         # 스캔 문서: PaddleOCR-VL 게이트웨이(GPU 전체 파이프라인). 실패/빈결과 → ODL 레인
         # (스캔 페이지는 그 안의 in-process VL 보충으로 처리 — MinerU 폴백 없음, 2026-07-15 결정).
         try:
@@ -92,6 +102,28 @@ def parse(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteResult:
             log.warning("MinerU 빈 결과 — ODL/VL 폴백 (%s)", filename)
     diagram_pages = tuple(getattr(decision, "diagram_pages", ()) or ()) if decision else ()
     return _odl_lane(file_bytes, filename, ocr_url=ocr_url, diagram_pages=diagram_pages)
+
+
+def _vl_lane(file_bytes: bytes, filename: str, *, ocr_url: str) -> list[dict]:
+    """차트/그림 중심 문서: 전 페이지 렌더 → in-process VL(qwen) elements → blocks.
+
+    스캔 페이지 VL 보충과 동일 부품(_render_pages/_ocr_elements_for_page)을 문서 전체에 적용.
+    페이지 단위 실패는 비치명(빈 blocks) — 전 페이지 실패면 parse() 의 빈결과 폴백이 ODL 로 잡음.
+    """
+    from kb_pipeline.blockify import elements_to_blocks
+    pages: list[dict] = []
+    for rp in _render_pages(file_bytes):
+        try:
+            elements = _ocr_elements_for_page(rp.jpeg, f"page-{rp.page_number}.jpeg", ocr_url)
+        except Exception:  # noqa: BLE001
+            log.exception("vl lane page %d failed (%s)", rp.page_number, filename)
+            pages.append({"page_number": rp.page_number, "blocks": []})
+            continue
+        blocks = elements_to_blocks(elements)
+        for b in blocks:
+            b["page_idx"] = rp.page_number
+        pages.append({"page_number": rp.page_number, "blocks": blocks})
+    return pages
 
 
 def _odl_lane(file_bytes: bytes, filename: str, *, ocr_url: str,
