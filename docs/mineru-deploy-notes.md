@@ -108,3 +108,12 @@ PaddleOCR layout 을 로컬 배치 예측하고 window 의 VLM 요청을 **동�
 - **완전 오프라인 모델**: `~/.cache/mineru.json`(`models-dir.pipeline`=캐시 경로) + `MODELSCOPE_OFFLINE=1`+`HF_HUB_OFFLINE=1` → 런타임 모델 네트워크 0.
 - ⚠️ **pipeline 은 hybrid 보다 모델이 더 많음** — hybrid 는 OCR det/rec + layout(3개)만, **pipeline 은 표인식·수식(MFR/MFD) 등 +7개** 추가 필요. 빌드시 사전다운로드는 backend 별로:
   `mineru-models-download -s modelscope -m pipeline`(pipeline 전체) — hybrid 만 받으면 pipeline 첫 요청 때 표/수식 모델을 런타임 다운로드(오프라인이어도 캐시에 없으면 받음). 두 레인 다 쓰면 **pipeline 모델셋을 미리 받아두면 둘 다 커버**.
+
+## PaddleOCR-VL 게이트웨이 스캔 레인 (2026-07-15)
+
+스캔 레인이 MinerU pipeline(CPU) → **PaddleOCR-VL 게이트웨이**로 교체됨(`parsers/pdf/paddle_gw.py`).
+- **엔드포인트**: `KBP_PADDLE_OCR_GATEWAY_URL=https://api-doc.ys-helperai.com/ocr/paddleocr_vl` (multipart file+lang, 무인증 ⚠️ 접근제한 권고)
+- **방식**: 페이지 렌더(로컬 PyMuPDF) → 페이지별 병렬 POST(동시성 `KBP_VL_MAX_CONCURRENT`) → markdown+HTML표 → `hybrid_to_blocks`. 문서 통짜 대신 페이지별 = page_number 계약 보존 + 병렬 가속.
+- **실측**(신탁 3p 스캔, GPU 채점 경쟁 중): 게이트웨이 48s vs MinerU pipeline(CPU) 181s vs hybrid 166s. 표 `<table>` 구조보존·한국어 정확.
+- **폴백**(사용자 결정): 게이트웨이 실패/빈결과 → **ODL/in-process VL** (MinerU 는 스캔 폴백 체인 제외). 실전 검증됨 — 게이트웨이 vlm worker 장애 시 자동 폴백으로 정상 결과(308s).
+- MinerU hybrid 레인은 디지털 차트문서(비율≥0.5)용으로 유지. pipeline 레인 코드는 잔존(미사용) — 안정화 후 torch/mineru 를 이미지에서 제거하면 6GB→경량 원복 가능.
