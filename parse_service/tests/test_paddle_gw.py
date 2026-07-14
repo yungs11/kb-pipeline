@@ -38,33 +38,38 @@ def test_pages_parsed_in_parallel_with_table_html(monkeypatch):
     assert len(seen) == 2
 
 
-def test_page_failure_nonfatal_empty_blocks(monkeypatch):
-    """페이지 단위 실패는 비치명 — 그 페이지만 빈 blocks, 나머지 정상."""
+def test_nonprobe_page_failure_nonfatal_empty_blocks(monkeypatch):
+    """프로브(1p) 성공 후 개별 페이지 실패는 비치명 — 그 페이지만 빈 blocks."""
     monkeypatch.setenv("KBP_PADDLE_OCR_GATEWAY_URL", "https://gw/ocr/paddleocr_vl")
-    monkeypatch.setattr(paddle_gw, "_render_pages", lambda fb: [_RP(1), _RP(2)])
+    monkeypatch.setattr(paddle_gw, "_render_pages", lambda fb: [_RP(1), _RP(2), _RP(3)])
 
     def fake_post(jpeg, name):
-        if "page-1" in name:
+        if "page-2" in name:
             raise RuntimeError("gateway 5xx")
-        return "p2 텍스트"
+        return f"{name} 텍스트"
 
     monkeypatch.setattr(paddle_gw, "_post_page", fake_post)
     pages = paddle_gw.run_paddle_gateway(b"%PDF", "a.pdf")
-    assert pages[0]["blocks"] == []                         # 실패 페이지 = 빈
-    assert pages[1]["blocks"], "성공 페이지는 유지"
+    assert pages[0]["blocks"], "프로브(1p) 정상"
+    assert pages[1]["blocks"] == []                         # 실패 페이지 = 빈
+    assert pages[2]["blocks"], "성공 페이지 유지"
 
 
-def test_all_pages_failed_returns_empty_blocks(monkeypatch):
-    """전 페이지 실패 → blocks 전무 → parse() 의 빈결과 폴백(ODL/VL)이 잡는다."""
+def test_probe_failure_raises_for_fast_fallback(monkeypatch):
+    """첫 페이지(프로브) 실패 = 게이트웨이 불능 → 즉시 raise (페이지별 타임아웃 대기 없이
+    parse() 가 바로 ODL/VL 폴백). 행 게이트웨이가 문서 전체를 붙잡던 문제의 회귀 고정."""
     monkeypatch.setenv("KBP_PADDLE_OCR_GATEWAY_URL", "https://gw/ocr/paddleocr_vl")
-    monkeypatch.setattr(paddle_gw, "_render_pages", lambda fb: [_RP(1)])
+    monkeypatch.setattr(paddle_gw, "_render_pages", lambda fb: [_RP(1), _RP(2)])
+    calls = []
 
     def boom(jpeg, name):
-        raise RuntimeError("gateway down")
+        calls.append(name)
+        raise RuntimeError("gateway hang/down")
 
     monkeypatch.setattr(paddle_gw, "_post_page", boom)
-    pages = paddle_gw.run_paddle_gateway(b"%PDF", "a.pdf")
-    assert all(not p["blocks"] for p in pages)
+    with pytest.raises(RuntimeError):
+        paddle_gw.run_paddle_gateway(b"%PDF", "a.pdf")
+    assert calls == ["page-1.jpeg"], "프로브 1회만 호출하고 즉시 포기(나머지 페이지 시도 안 함)"
 
 
 def test_render_uses_low_dpi_env(monkeypatch):

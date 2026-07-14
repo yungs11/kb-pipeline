@@ -21,7 +21,9 @@ import httpx
 
 log = logging.getLogger("kb_pipeline.parse_service.parsers.pdf.paddle_gw")
 
-_DEFAULT_TIMEOUT = float(os.environ.get("KBP_PADDLE_GW_TIMEOUT", "600"))
+# 페이지당 타임아웃 — dpi150 정상 페이지 ~15-30s 실측이라 180s 면 충분. 게이트웨이 행(hang)
+# 시 오래 기다리지 않고 폴백하도록 짧게(600 이었을 때 행 게이트웨이에 페이지당 10분 대기).
+_DEFAULT_TIMEOUT = float(os.environ.get("KBP_PADDLE_GW_TIMEOUT", "180"))
 
 
 def _render_pages(file_bytes: bytes):
@@ -53,26 +55,38 @@ def _post_page(jpeg: bytes, name: str) -> str:
 
 
 def run_paddle_gateway(pdf_bytes: bytes, filename: str) -> list[dict]:
-    """스캔 PDF → 페이지 렌더 → 게이트웨이 병렬 호출 → pages[{page_number, blocks}]."""
+    """스캔 PDF → 페이지 렌더 → 게이트웨이 병렬 호출 → pages[{page_number, blocks}].
+
+    fail-fast(2026-07-15): **첫 페이지를 프로브**로 먼저 보낸다 — 실패하면 게이트웨이가
+    죽은/행 상태이므로 즉시 raise 해 parse() 가 ODL/VL 로 폴백한다(나머지 페이지가
+    타임아웃을 각자 기다리며 문서 전체를 붙잡는 것 방지). 프로브 성공 시 나머지는 병렬,
+    개별 페이지 실패는 비치명(빈 blocks).
+    """
     if not os.environ.get("KBP_PADDLE_OCR_GATEWAY_URL"):
         raise RuntimeError("KBP_PADDLE_OCR_GATEWAY_URL 미설정 — paddle_gw 레인 사용 불가")
     from kb_pipeline.blockify import hybrid_to_blocks
 
     rendered = _render_pages(pdf_bytes)
+    if not rendered:
+        return []
     max_workers = max(1, int(os.environ.get("KBP_VL_MAX_CONCURRENT", "3")))
 
-    def one(rp) -> tuple[int, list]:
+    def one(rp, probe: bool = False) -> tuple[int, list]:
         name = f"page-{rp.page_number}.jpeg"
         try:
             md = _post_page(rp.jpeg, name)
-        except Exception:  # noqa: BLE001 — 페이지 단위 실패는 비치명(빈 blocks)
+        except Exception:  # noqa: BLE001
+            if probe:
+                raise  # 첫 페이지 실패 = 게이트웨이 불능 → 레인 포기(즉시 폴백)
             log.exception("paddle_gw page %d failed (%s)", rp.page_number, filename)
             return rp.page_number, []
         blocks = hybrid_to_blocks(md, page_idx=rp.page_number)
         return rp.page_number, blocks
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
-        results = list(ex.map(one, rendered))
+    results = [one(rendered[0], probe=True)]   # 프로브 — 실패 시 여기서 raise
+    if len(rendered) > 1:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+            results += list(ex.map(one, rendered[1:]))
 
     return [{"page_number": n, "blocks": blocks}
             for n, blocks in sorted(results, key=lambda t: t[0])]
