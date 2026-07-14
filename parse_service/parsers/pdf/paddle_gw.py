@@ -21,9 +21,9 @@ import httpx
 
 log = logging.getLogger("kb_pipeline.parse_service.parsers.pdf.paddle_gw")
 
-# 페이지당 타임아웃 — dpi150 정상 페이지 ~15-30s 실측이라 180s 면 충분. 게이트웨이 행(hang)
-# 시 오래 기다리지 않고 폴백하도록 짧게(600 이었을 때 행 게이트웨이에 페이지당 10분 대기).
-_DEFAULT_TIMEOUT = float(os.environ.get("KBP_PADDLE_GW_TIMEOUT", "180"))
+# 페이지당 타임아웃 600s(사용자 결정 — 복잡한 페이지/일시 부하 여유). 행(hang) 게이트웨이
+# 조기 포기는 타임아웃이 아니라 **첫 페이지 프로브**가 담당(실패 시 즉시 폴백).
+_DEFAULT_TIMEOUT = float(os.environ.get("KBP_PADDLE_GW_TIMEOUT", "600"))
 
 
 def _render_pages(file_bytes: bytes):
