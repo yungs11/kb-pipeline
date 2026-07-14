@@ -6,11 +6,18 @@
 그리기 객체가 수만 개라 materialize 가 느림. 대신 content-stream 크기로 판별):
 
   native text 있음? (char>20)
+    ├─ 다이어그램(curve≥30 or line≥100 or img≥5&cov≥0.1) → LLM_NEEDED + is_diagram
     ├─ mixed(텍스트 + 래스터 이미지 ≥25%)  → LLM_NEEDED (이미지 시각정보 해석)
     └─ 그 외                                → TEXT_ONLY (ODL 텍스트 추출)
   native text 없음
     ├─ 내용 있음(이미지 or content-stream 큼) → OCR_NEEDED (스캔·아웃라인·벡터표 = 텍스트 읽기)
     └─ 없음                                    → SKIP (진짜 빈 페이지)
+
+다이어그램 신호(2026-07-14 실측 근거 — 정의서 p5 curve=144 / 소유권pptx p4 line=148·img11 /
+소유권 p3 텍스트 line=53 미검출): **native text 있는 페이지에만** get_cdrawings 로 curve/line 을
+센다. 병적 케이스(텍스트 없는 아웃라인 문서, 3.2만 curve)는 char=0 이라 이 경로를 안 타서
+기존 "get_drawings 금지" 성능 결정과 충돌하지 않는다(디지털 페이지 실측 ~13ms/p).
+표는 직선/rect 위주(curve 적음), 순서도는 곡선 커넥터·다수 직선 화살표·도형이미지로 구분.
 
 부수효과 없음(판정만). OCR_NEEDED 는 현재 VL fallback, 로컬 OCR 엔진 연결 시 그 경로로 분기.
 """
@@ -48,9 +55,13 @@ class PageSignals:
     image_coverage: float = 0.0
     # content-stream 바이트 크기(빈 페이지 vs 벡터/아웃라인 판별용 — get_drawings 대체 싼 신호)
     content_len: int = 0
+    # vector drawings (native-text 페이지 한정 — 다이어그램/순서도 신호)
+    curve_count: int = 0
+    line_count: int = 0
     # derived
     bucket: Optional[Bucket] = field(default=None, init=False)
     reason: str = field(default="", init=False)
+    is_diagram: bool = field(default=False, init=False)
 
 
 def classify(
@@ -58,14 +69,31 @@ def classify(
     *,
     mixed_image_cov: float = 0.25,
     content_min: int = 300,
+    diagram_curve_min: int = 30,
+    diagram_line_min: int = 100,
+    diagram_img_count: int = 5,
+    diagram_combo_curve_min: int = 10,
 ) -> PageSignals:
-    """native text 유무가 1차 갈림길. mixed 는 native text 있는 쪽에서만 판정."""
+    """native text 유무가 1차 갈림길. mixed/diagram 은 native text 있는 쪽에서만 판정."""
     chars = sig.char_count
     imgcov = sig.image_coverage
 
     if sig.has_native_text:
+        # 다이어그램(순서도/차트) = ① 곡선 커넥터형(curve 多) or ② 직선화살표+도형이미지 복합형.
+        # 단독 신호는 오검 — 실측(약관 292p): line 단독은 테두리 표(p275 line=1249, curve=8),
+        # img 단독은 아이콘/QR 페이지(p12 img=11) 를 오검. 진짜 순서도는 소유권pptx p4 처럼
+        # line(화살표)+img(도형)+curve(화살촉/라운드) 가 **동시에** 나타난다(148/11/12).
+        # 정의서 p5(곡선 커넥터형)는 curve=144 로 ① 에 걸림.
+        if (sig.curve_count >= diagram_curve_min
+                or (sig.line_count >= diagram_line_min
+                    and sig.image_count >= diagram_img_count
+                    and sig.curve_count >= diagram_combo_curve_min)):
+            sig.is_diagram = True
+            sig.bucket = Bucket.LLM_NEEDED
+            sig.reason = (f"다이어그램(curve={sig.curve_count}, line={sig.line_count}, "
+                          f"img={sig.image_count}/{imgcov:.2f})")
         # 혼합: 텍스트 + 실제 래스터 이미지(≥mixed_image_cov) → VL(이미지 시각정보 해석 필요)
-        if sig.image_count > 0 and imgcov >= mixed_image_cov:
+        elif sig.image_count > 0 and imgcov >= mixed_image_cov:
             sig.bucket = Bucket.LLM_NEEDED
             sig.reason = f"혼합 콘텐츠(텍스트+이미지={imgcov:.2f})"
         else:
@@ -117,6 +145,20 @@ def extract_signals(page: "pymupdf.Page") -> PageSignals:
             sig.content_len = len(page.read_contents())
         except Exception:  # noqa: BLE001
             sig.content_len = 0
+
+    # 벡터 드로잉(curve/line)은 **native text 있는 페이지에만** 센다(다이어그램 신호).
+    # 병적 케이스(텍스트 없는 아웃라인 문서, 수만 curve)는 char=0 → 이 경로 안 탐(성능 가드).
+    if sig.has_native_text:
+        try:
+            for d in page.get_cdrawings():
+                for it in d.get("items", []):
+                    k = it[0]
+                    if k == "c":
+                        sig.curve_count += 1
+                    elif k == "l":
+                        sig.line_count += 1
+        except Exception:  # noqa: BLE001 — 드로잉 파싱 실패는 신호 0 유지(비치명)
+            pass
 
     return sig
 

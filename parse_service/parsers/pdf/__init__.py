@@ -78,10 +78,12 @@ def parse(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteResult:
             if pages and any(p.get("blocks") for p in pages):
                 return RouteResult(kind="pages", chunk_needed=True, pages=pages)
             log.warning("MinerU 빈 결과 — ODL/VL 폴백 (%s)", filename)
-    return _odl_lane(file_bytes, filename, ocr_url=ocr_url)
+    diagram_pages = tuple(getattr(decision, "diagram_pages", ()) or ()) if decision else ()
+    return _odl_lane(file_bytes, filename, ocr_url=ocr_url, diagram_pages=diagram_pages)
 
 
-def _odl_lane(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteResult:
+def _odl_lane(file_bytes: bytes, filename: str, *, ocr_url: str,
+              diagram_pages: tuple = ()) -> RouteResult:
     from kb_pipeline.blockify import hybrid_to_blocks, elements_to_blocks
     try:
         md_texts = _page_markdowns(file_bytes, filename)
@@ -113,4 +115,28 @@ def _odl_lane(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteResult:
         for b in blocks:
             b["page_idx"] = page_number
         pages.append({"page_number": page_number, "blocks": blocks})
+
+    # 다이어그램(순서도/차트) 페이지 VL 서술 보충 — ODL 은 벡터 도형의 시각 구조(분기/연결)를
+    # 못 뽑는다(라벨 텍스트만). 해당 페이지만 렌더 → in-process VL 로 구조 서술을 **추가**한다
+    # (native 텍스트 블록은 유지 — VL 은 보충이지 대체가 아님). 실패는 페이지 단위 비치명.
+    for pno in diagram_pages:
+        entry = next((p for p in pages if p["page_number"] == pno), None)
+        if entry is None:
+            continue
+        if rendered is None:
+            rendered = _render_pages(file_bytes)
+        page_jpeg = next((rp.jpeg for rp in rendered if rp.page_number == pno), None)
+        if page_jpeg is None:
+            log.warning("diagram page %d has no rendered image", pno)
+            continue
+        try:
+            elements = _ocr_elements_for_page(page_jpeg, f"page-{pno}-diagram.jpeg", ocr_url)
+        except Exception:  # noqa: BLE001 — 다이어그램 VL 보충 실패는 비치명(native 텍스트는 이미 있음)
+            log.exception("diagram VL supplement failed for page %d", pno)
+            continue
+        extra = elements_to_blocks(elements)
+        for b in extra:
+            b["page_idx"] = pno
+        entry["blocks"].extend(extra)
+
     return RouteResult(kind="pages", chunk_needed=True, pages=pages)

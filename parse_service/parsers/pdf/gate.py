@@ -37,6 +37,8 @@ class RouteDecision:
     lane: str                 # "odl" | "mineru"
     backend: str | None       # None(odl) | "pipeline" | "hybrid-http-client"
     parse_method: str | None  # None(odl) | "ocr" | "auto"
+    # 다이어그램(순서도/차트) 페이지 번호(1-based) — ODL 레인이 페이지 단위 VL 서술 보충에 사용.
+    diagram_pages: tuple = ()
 
 
 _ODL = RouteDecision(lane="odl", backend=None, parse_method=None)
@@ -53,6 +55,8 @@ def decide_route(pdf_bytes: bytes) -> RouteDecision:
         return _ODL  # 전부 빈 페이지/열기 실패
     n_ocr = buckets.count(Bucket.OCR_NEEDED)
     n_llm = buckets.count(Bucket.LLM_NEEDED)
+    # 다이어그램(순서도/차트) 페이지 — ODL 라우팅 시 페이지 단위 VL 서술 보충 대상.
+    diagram_pages = tuple(s.page_number for s in sigs if getattr(s, "is_diagram", False))
 
     # 스캔 페이지(네이티브 텍스트 없음)가 하나라도 있으면 → MinerU pipeline(로컬, 빠름).
     # parse_method='ocr' 강제(스캔 텍스트를 반드시 읽음). 순서도/차트는 image 블록 → 하류 VL.
@@ -63,5 +67,6 @@ def decide_route(pdf_bytes: bytes) -> RouteDecision:
     if n_llm > 0 and (n_llm / total) >= _HYBRID_RATIO:
         return RouteDecision(lane="mineru", backend=_HYBRID_BACKEND, parse_method="auto")
 
-    # 순수 디지털 텍스트(+차트 소수) → ODL 기존 경로. 그림은 modal-enrich VL 이 서술.
-    return _ODL
+    # 순수 디지털 텍스트(+차트/다이어그램 소수) → ODL. 다이어그램 페이지는 ODL 레인이 VL 서술 보충.
+    return RouteDecision(lane="odl", backend=None, parse_method=None,
+                         diagram_pages=diagram_pages)

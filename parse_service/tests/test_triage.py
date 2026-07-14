@@ -101,3 +101,104 @@ def test_triage_document_blank_page_skip():
 def test_triage_document_bad_bytes_returns_empty():
     from parse_service.parsers.pdf.triage import triage_document
     assert triage_document(b"not a pdf at all") == []
+
+
+# ---- 다이어그램 신호 (2026-07-14: curve/line/img 합성 — native-text 페이지 한정) ----
+
+def _synth_pdf(draw=None, text="테스트 본문 텍스트입니다. 다이어그램 신호 검증용 문장.", images=0):
+    """합성 1페이지 PDF bytes — text(네이티브) + draw(page) 콜백 + 작은 이미지 n개."""
+    import pymupdf
+    doc = pymupdf.open()
+    page = doc.new_page(width=600, height=800)
+    if text:
+        page.insert_text((50, 50), text, fontsize=11)
+    if draw:
+        draw(page)
+    if images:
+        pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 40))
+        pix.clear_with(90)
+        for i in range(images):
+            x = 60 + (i % 5) * 100
+            y = 200 + (i // 5) * 100
+            page.insert_image(pymupdf.Rect(x, y, x + 90, y + 90), pixmap=pix)
+    data = doc.tobytes()
+    doc.close()
+    return data
+
+
+def _first_sig(pdf_bytes):
+    from parse_service.parsers.pdf.triage import triage_document
+    sigs = triage_document(pdf_bytes)
+    assert len(sigs) == 1
+    return sigs[0]
+
+
+def test_diagram_by_curves():
+    """곡선 커넥터형 순서도(정의서 p5 패턴: curve=144) — curve≥30 검출."""
+    def draw(page):
+        import pymupdf
+        for i in range(40):
+            y = 100 + i * 5
+            page.draw_bezier((50, y), (150, y + 40), (250, y - 40), (350, y))
+    s = _first_sig(_synth_pdf(draw=draw))
+    assert s.curve_count >= 30 and s.is_diagram
+    assert s.bucket == Bucket.LLM_NEEDED
+
+
+def test_diagram_by_lines_shapes_and_curves():
+    """직선화살표+도형이미지 복합형 PPT 순서도(소유권 p4: line=148·img=11·curve=12) —
+    line≥100 AND img≥5 AND curve≥10 동시 충족 시 검출."""
+    def draw(page):
+        for i in range(120):
+            y = 100 + i * 4
+            page.draw_line((50, y), (350, y))
+        for i in range(12):
+            y = 120 + i * 40
+            page.draw_bezier((400, y), (430, y + 15), (460, y - 15), (490, y))
+    s = _first_sig(_synth_pdf(draw=draw, images=8))
+    assert s.is_diagram and s.bucket == Bucket.LLM_NEEDED
+
+
+def test_line_heavy_table_not_diagram():
+    """대형 테두리 표(약관 p275 실측: line=1249·img=8·curve=8) — curve 부족으로 미검출.
+    line 단독 규칙이 표를 순서도로 오검하던 회귀 고정."""
+    def draw(page):
+        for i in range(150):
+            y = 60 + i * 4
+            page.draw_line((50, y), (350, y))
+        for i in range(8):
+            y = 100 + i * 60
+            page.draw_bezier((400, y), (420, y + 10), (440, y - 10), (460, y))
+    s = _first_sig(_synth_pdf(draw=draw, images=6))
+    assert not s.is_diagram, "표(line 多·curve 少)를 다이어그램으로 오검하면 안 됨"
+
+
+def test_icon_page_not_diagram():
+    """아이콘/QR 다수 텍스트 페이지(약관 p12 실측: img=11·line=9·curve=4) —
+    img 단독으론 미검출(마스코트/QR 페이지 오검 회귀 고정)."""
+    s = _first_sig(_synth_pdf(images=8))
+    assert not s.is_diagram, "아이콘/QR 페이지를 다이어그램으로 오검하면 안 됨"
+
+
+def test_text_page_with_boxes_not_diagram():
+    """박스 테두리 있는 텍스트 페이지(소유권 p3 패턴: line=53) — 오검 금지."""
+    def draw(page):
+        for i in range(12):
+            y = 100 + i * 20
+            page.draw_line((50, y), (350, y))
+    s = _first_sig(_synth_pdf(draw=draw))
+    assert not s.is_diagram
+    assert s.bucket == Bucket.TEXT_ONLY
+
+
+def test_textless_vector_page_skips_drawing_scan():
+    """텍스트 없는 벡터 페이지(아웃라인 신탁, 3.2만 curve 병적 케이스) —
+    native text 가드로 get_cdrawings 자체를 안 돌린다(curve_count=0 유지, OCR_NEEDED)."""
+    def draw(page):
+        for i in range(40):
+            y = 100 + i * 5
+            page.draw_bezier((50, y), (150, y + 40), (250, y - 40), (350, y))
+    s = _first_sig(_synth_pdf(draw=draw, text=""))
+    assert s.curve_count == 0 and s.line_count == 0   # 스캔 안 함
+    assert not s.is_diagram
+    assert s.bucket == Bucket.OCR_NEEDED

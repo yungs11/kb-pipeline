@@ -62,3 +62,57 @@ def test_gate_exception_routes_to_odl(monkeypatch):
                         lambda b: (_ for _ in ()).throw(RuntimeError("boom")))
     res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
     assert res.kind == "pages"  # 예외 안 나고 ODL 로
+
+
+def test_odl_diagram_pages_get_vl_supplement(monkeypatch):
+    """ODL 라우팅 + diagram_pages: 해당 페이지만 렌더→VL 서술 블록이 **추가**된다
+    (native 텍스트 블록 유지)."""
+    monkeypatch.setattr(
+        pdf_parser, "_safe_decide_route",
+        lambda b: RouteDecision(lane="odl", backend=None, parse_method=None,
+                                diagram_pages=(2,)))
+    monkeypatch.setattr(pdf_parser, "_page_markdowns",
+                        lambda fb, fn: ["# p1 텍스트", "# p2 순서도 라벨들"])
+
+    class FakeRP:
+        page_number, jpeg = 2, b"jpegbytes"
+
+    monkeypatch.setattr(pdf_parser, "_render_pages", lambda fb: [FakeRP()])
+    called = {}
+
+    def fake_vl(jpeg, name, ocr_url):
+        called["name"] = name
+        # 실제 ocr_elements_sync 는 순수텍스트 figure 를 text 로 재분류해 반환한다(Phase 2c).
+        return [{"category": "text",
+                 "content": {"markdown": "순서도: 업로드→파싱→가드 분기 구조"}, "page": 1}]
+
+    monkeypatch.setattr(pdf_parser, "_ocr_elements_for_page", fake_vl)
+    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    assert "diagram" in called["name"]                      # 다이어그램 보충 경로로 호출됨
+    p2 = next(p for p in res.pages if p["page_number"] == 2)
+    texts = " ".join(b.get("text", "") for b in p2["blocks"])
+    assert "순서도 라벨들" in texts, "native 텍스트 유지"
+    assert any("업로드→파싱" in (b.get("text") or "") for b in p2["blocks"]), "VL 서술 추가"
+    p1 = next(p for p in res.pages if p["page_number"] == 1)
+    assert len(p1["blocks"]) >= 1                            # p1 은 보충 없음(원래 블록만)
+
+
+def test_odl_diagram_vl_failure_nonfatal(monkeypatch):
+    """다이어그램 VL 보충 실패 → 해당 페이지 native 블록만으로 정상 반환(비치명)."""
+    monkeypatch.setattr(
+        pdf_parser, "_safe_decide_route",
+        lambda b: RouteDecision(lane="odl", backend=None, parse_method=None,
+                                diagram_pages=(1,)))
+    monkeypatch.setattr(pdf_parser, "_page_markdowns", lambda fb, fn: ["# 텍스트"])
+
+    class FakeRP:
+        page_number, jpeg = 1, b"jpegbytes"
+
+    monkeypatch.setattr(pdf_parser, "_render_pages", lambda fb: [FakeRP()])
+
+    def boom(jpeg, name, ocr_url):
+        raise RuntimeError("VL down")
+
+    monkeypatch.setattr(pdf_parser, "_ocr_elements_for_page", boom)
+    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    assert res.kind == "pages" and res.pages[0]["blocks"], "native 블록 유지 + 예외 없음"

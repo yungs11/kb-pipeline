@@ -44,3 +44,26 @@ def test_triage_exception_falls_back_to_odl(monkeypatch):
     monkeypatch.setattr(gate, "triage_document", boom)
     d = gate.decide_route(b"%PDF")
     assert (d.lane, d.backend, d.parse_method) == ("odl", None, None)
+
+
+def test_odl_route_carries_diagram_pages(monkeypatch):
+    """다이어그램 페이지(LLM_NEEDED+is_diagram)가 비율 미달로 ODL 라우팅될 때
+    diagram_pages 로 전달돼야(ODL 레인 VL 보충용). 정의서 패턴: 15p 중 1p 순서도."""
+    sigs = []
+    for n in range(1, 7):                     # 6p: p5 만 다이어그램
+        s = _sig(T if n != 5 else L)
+        s.page_number = n
+        if n == 5:
+            s.is_diagram = True
+        sigs.append(s)
+    monkeypatch.setattr(gate, "triage_document", lambda b: sigs)
+    d = gate.decide_route(b"%PDF")
+    assert d.lane == "odl"                    # 1/6 < 0.5 → ODL
+    assert d.diagram_pages == (5,)
+
+
+def test_mineru_route_has_no_diagram_pages(monkeypatch):
+    """스캔 문서(pipeline 라우팅)는 diagram_pages 불필요(MinerU 가 chart 를 image 블록으로 냄)."""
+    monkeypatch.setattr(gate, "triage_document", lambda b: [_sig(O)])
+    d = gate.decide_route(b"%PDF")
+    assert d.lane == "mineru" and d.diagram_pages == ()
