@@ -65,9 +65,21 @@ def _safe_decide_route(file_bytes: bytes):
 
 
 def parse(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteResult:
-    """문서수준 게이트 → ODL 레인 or MinerU 레인(게이트/MinerU 실패·빈결과 시 ODL 폴백)."""
+    """문서수준 게이트 → ODL / paddle_gw(스캔) / MinerU(hybrid) — 실패·빈결과 시 ODL/VL 폴백."""
     decision = _safe_decide_route(file_bytes)
-    if decision is not None and decision.lane == "mineru":
+    if decision is not None and decision.lane == "paddle_gw":
+        # 스캔 문서: PaddleOCR-VL 게이트웨이(GPU 전체 파이프라인). 실패/빈결과 → ODL 레인
+        # (스캔 페이지는 그 안의 in-process VL 보충으로 처리 — MinerU 폴백 없음, 2026-07-15 결정).
+        try:
+            from parse_service.parsers.pdf.paddle_gw import run_paddle_gateway
+            pages = run_paddle_gateway(file_bytes, filename)
+        except Exception:  # noqa: BLE001 — 게이트웨이 실패는 비치명
+            log.exception("paddle_gw 레인 실패 — ODL/VL 폴백 (%s)", filename)
+        else:
+            if pages and any(p.get("blocks") for p in pages):
+                return RouteResult(kind="pages", chunk_needed=True, pages=pages)
+            log.warning("paddle_gw 빈 결과 — ODL/VL 폴백 (%s)", filename)
+    elif decision is not None and decision.lane == "mineru":
         try:
             pages = run_mineru(file_bytes, filename, decision.parse_method,
                                decision.backend)

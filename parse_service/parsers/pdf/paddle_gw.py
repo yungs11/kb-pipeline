@@ -1,0 +1,72 @@
+"""paddle_gw 레인 — 스캔 PDF 를 PaddleOCR-VL 게이트웨이(GPU)로 페이지별 병렬 파싱.
+
+게이트웨이(:8000 `/ocr/paddleocr_vl`, 2026-07-15 실측)가 layout(PP-DocLayoutV2)+VL 인식+표 조립을
+**전부 GPU 서버에서** 수행하고 "마크다운 + 인라인 HTML 표"(= 우리 표준 중간표현, ODL 과 동일)를
+반환한다 → parse-svc 로컬 의존 0(httpx 만), 기존 `hybrid_to_blocks` 재사용.
+
+문서 통짜 대신 **페이지별 호출**(이미지 1장 multipart)로: ① page_number 계약 보존
+(page_spans/페이지이미지/chunks_meta), ② 병렬 가속(GPU continuous batching).
+실측(신탁 3p 스캔): 게이트웨이 48s vs MinerU pipeline(CPU) 181s vs hybrid 166s. 한국어·표 HTML 정상.
+
+실패 정책: 페이지 단위 비치명(빈 blocks) — 전 페이지 실패 시 blocks 전무가 되고,
+parse() 의 빈결과 검사가 ODL/in-process VL 폴백으로 잡는다(사용자 결정: 폴백은 in-process VL).
+"""
+from __future__ import annotations
+
+import concurrent.futures
+import logging
+import os
+
+import httpx
+
+log = logging.getLogger("kb_pipeline.parse_service.parsers.pdf.paddle_gw")
+
+_DEFAULT_TIMEOUT = float(os.environ.get("KBP_PADDLE_GW_TIMEOUT", "600"))
+
+
+def _render_pages(file_bytes: bytes):
+    from parse_service.pdf_pages import render_pdf_pages
+    return render_pdf_pages(file_bytes)
+
+
+def _post_page(jpeg: bytes, name: str) -> str:
+    """게이트웨이에 페이지 이미지 1장 POST → markdown(+HTML 표) 텍스트 반환."""
+    url = os.environ["KBP_PADDLE_OCR_GATEWAY_URL"]
+    lang = os.environ.get("KBP_PADDLE_GW_LANG", "korean")
+    resp = httpx.post(
+        url,
+        files={"file": (name, jpeg, "image/jpeg")},
+        data={"lang": lang},
+        timeout=_DEFAULT_TIMEOUT,
+    )
+    resp.raise_for_status()
+    body = resp.json()
+    if body.get("status") != "ok":
+        raise RuntimeError(f"gateway status={body.get('status')} error={body.get('error')}")
+    return body.get("text") or ""
+
+
+def run_paddle_gateway(pdf_bytes: bytes, filename: str) -> list[dict]:
+    """스캔 PDF → 페이지 렌더 → 게이트웨이 병렬 호출 → pages[{page_number, blocks}]."""
+    if not os.environ.get("KBP_PADDLE_OCR_GATEWAY_URL"):
+        raise RuntimeError("KBP_PADDLE_OCR_GATEWAY_URL 미설정 — paddle_gw 레인 사용 불가")
+    from kb_pipeline.blockify import hybrid_to_blocks
+
+    rendered = _render_pages(pdf_bytes)
+    max_workers = max(1, int(os.environ.get("KBP_VL_MAX_CONCURRENT", "3")))
+
+    def one(rp) -> tuple[int, list]:
+        name = f"page-{rp.page_number}.jpeg"
+        try:
+            md = _post_page(rp.jpeg, name)
+        except Exception:  # noqa: BLE001 — 페이지 단위 실패는 비치명(빈 blocks)
+            log.exception("paddle_gw page %d failed (%s)", rp.page_number, filename)
+            return rp.page_number, []
+        blocks = hybrid_to_blocks(md, page_idx=rp.page_number)
+        return rp.page_number, blocks
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        results = list(ex.map(one, rendered))
+
+    return [{"page_number": n, "blocks": blocks}
+            for n, blocks in sorted(results, key=lambda t: t[0])]

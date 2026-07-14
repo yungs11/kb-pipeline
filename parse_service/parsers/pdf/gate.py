@@ -8,13 +8,14 @@
 - 스캔 페이지(char=0)는 전부 통짜 래스터라 신호가 동일(image_coverage≈0/1 고정) →
   "텍스트냐 순서도냐"를 **싼 신호로 구분 불가**. 픽셀 안을 봐야(=layout) 알 수 있음.
 
-라우팅(문서수준, backend 는 do_parse 호출당 1개라 문서수준이 유일 granularity):
-- 스캔 페이지 존재(OCR_NEEDED)  → MinerU **pipeline**(로컬 PaddleOCR+layout+표, 빠름).
-    스캔텍스트/단순표에 충분. 순서도/차트는 image 블록으로 나와 하류 modal-enrich VL 이 서술.
+라우팅(문서수준):
+- 스캔 페이지 존재(OCR_NEEDED)  → **paddle_gw**(PaddleOCR-VL 게이트웨이, GPU 전체 파이프라인).
+    실측(신탁 3p): 48s vs MinerU pipeline(CPU) 181s. 실패 시 parse() 가 ODL/in-process VL 폴백
+    (사용자 결정 2026-07-15: MinerU 는 스캔 폴백 체인에서 제외).
 - 스캔 없음 + 차트/그림 페이지 비율 높음(LLM_NEEDED) → MinerU **hybrid**(원격 VL 품질).
-- 그 외(순수 디지털 텍스트, 차트 소수) → ODL(기존 빠른 경로; 그림은 modal-enrich VL).
+- 그 외(순수 디지털 텍스트, 차트 소수) → ODL(기존 빠른 경로; 다이어그램 페이지는 VL 서술 보충).
 
-pipeline 은 원격 VL 불필요(완전 로컬). hybrid 만 MINERU_VLM_SERVER_URL 필요.
+paddle_gw 는 KBP_PADDLE_OCR_GATEWAY_URL, hybrid 는 MINERU_VLM_SERVER_URL 필요.
 """
 from __future__ import annotations
 
@@ -29,7 +30,6 @@ from parse_service.parsers.pdf.triage import triage_document, Bucket
 _HYBRID_RATIO = float(os.environ.get("KBP_GATE_HYBRID_RATIO", "0.5"))
 
 _HYBRID_BACKEND = "hybrid-http-client"
-_PIPELINE_BACKEND = "pipeline"
 
 
 @dataclass(frozen=True)
@@ -58,10 +58,10 @@ def decide_route(pdf_bytes: bytes) -> RouteDecision:
     # 다이어그램(순서도/차트) 페이지 — ODL 라우팅 시 페이지 단위 VL 서술 보충 대상.
     diagram_pages = tuple(s.page_number for s in sigs if getattr(s, "is_diagram", False))
 
-    # 스캔 페이지(네이티브 텍스트 없음)가 하나라도 있으면 → MinerU pipeline(로컬, 빠름).
-    # parse_method='ocr' 강제(스캔 텍스트를 반드시 읽음). 순서도/차트는 image 블록 → 하류 VL.
+    # 스캔 페이지(네이티브 텍스트 없음)가 하나라도 있으면 → PaddleOCR-VL 게이트웨이(GPU).
+    # layout+VL+표 조립 전부 게이트웨이 서버 — parse-svc 로컬 의존 0. 실패 시 ODL/VL 폴백.
     if n_ocr > 0:
-        return RouteDecision(lane="mineru", backend=_PIPELINE_BACKEND, parse_method="ocr")
+        return RouteDecision(lane="paddle_gw", backend=None, parse_method=None)
 
     # 스캔 없음. 차트/그림 페이지 비율이 높으면 → hybrid(원격 VL 품질). 아니면 → ODL.
     if n_llm > 0 and (n_llm / total) >= _HYBRID_RATIO:

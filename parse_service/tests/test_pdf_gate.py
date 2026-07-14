@@ -19,11 +19,11 @@ T, L, O, S = Bucket.TEXT_ONLY, Bucket.LLM_NEEDED, Bucket.OCR_NEEDED, Bucket.SKIP
     ([T, S], "odl", None, None),
     ([S], "odl", None, None),
     ([], "odl", None, None),
-    # 스캔 페이지 존재(OCR_NEEDED) → MinerU pipeline(ocr) — 하나라도 있으면
-    ([O, O], "mineru", "pipeline", "ocr"),
-    ([O, S], "mineru", "pipeline", "ocr"),
-    ([T, O], "mineru", "pipeline", "ocr"),              # 혼합(디지털+스캔)도 pipeline
-    ([O, L], "mineru", "pipeline", "ocr"),
+    # 스캔 페이지 존재(OCR_NEEDED) → paddle_gw(게이트웨이) — 하나라도 있으면
+    ([O, O], "paddle_gw", None, None),
+    ([O, S], "paddle_gw", None, None),
+    ([T, O], "paddle_gw", None, None),                  # 혼합(디지털+스캔)도 paddle_gw
+    ([O, L], "paddle_gw", None, None),
     # 스캔 없음 + 차트/그림 페이지 비율 높음(≥0.5) → MinerU hybrid(auto)
     ([L, L], "mineru", "hybrid-http-client", "auto"),
     ([T, L], "mineru", "hybrid-http-client", "auto"),   # 1/2 = 0.5 ≥ 0.5
@@ -62,8 +62,8 @@ def test_odl_route_carries_diagram_pages(monkeypatch):
     assert d.diagram_pages == (5,)
 
 
-def test_mineru_route_has_no_diagram_pages(monkeypatch):
-    """스캔 문서(pipeline 라우팅)는 diagram_pages 불필요(MinerU 가 chart 를 image 블록으로 냄)."""
+def test_scan_route_has_no_diagram_pages(monkeypatch):
+    """스캔 문서(paddle_gw 라우팅)는 diagram_pages 불필요(게이트웨이가 전 페이지 VL 처리)."""
     monkeypatch.setattr(gate, "triage_document", lambda b: [_sig(O)])
     d = gate.decide_route(b"%PDF")
-    assert d.lane == "mineru" and d.diagram_pages == ()
+    assert d.lane == "paddle_gw" and d.diagram_pages == ()

@@ -116,3 +116,58 @@ def test_odl_diagram_vl_failure_nonfatal(monkeypatch):
     monkeypatch.setattr(pdf_parser, "_ocr_elements_for_page", boom)
     res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
     assert res.kind == "pages" and res.pages[0]["blocks"], "native 블록 유지 + 예외 없음"
+
+
+def test_paddle_gw_lane_dispatch(monkeypatch):
+    """스캔 라우팅(paddle_gw) → run_paddle_gateway 호출, pages 반환."""
+    monkeypatch.setattr(pdf_parser, "_safe_decide_route",
+                        lambda b: RouteDecision(lane="paddle_gw", backend=None,
+                                                parse_method=None))
+    import parse_service.parsers.pdf.paddle_gw as pg
+    monkeypatch.setattr(pg, "run_paddle_gateway",
+                        lambda fb, fn: [{"page_number": 1,
+                                         "blocks": [{"type": "text", "text": "gw", "page_idx": 1}]}])
+    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    assert res.kind == "pages" and res.pages[0]["blocks"][0]["text"] == "gw"
+
+
+def test_paddle_gw_failure_falls_back_to_odl_vl(monkeypatch):
+    """게이트웨이 실패 → ODL 레인 폴백(스캔 페이지는 in-process VL 보충 — MinerU 미경유)."""
+    monkeypatch.setattr(pdf_parser, "_safe_decide_route",
+                        lambda b: RouteDecision(lane="paddle_gw", backend=None,
+                                                parse_method=None))
+    import parse_service.parsers.pdf.paddle_gw as pg
+
+    def boom(fb, fn):
+        raise RuntimeError("gateway down")
+
+    monkeypatch.setattr(pg, "run_paddle_gateway", boom)
+    called = {"mineru": False}
+    monkeypatch.setattr(pdf_parser, "run_mineru",
+                        lambda *a, **k: called.__setitem__("mineru", True))
+    # ODL 폴백 경로: 스캔 md(빈) → 렌더 → in-process VL
+    monkeypatch.setattr(pdf_parser, "_page_markdowns", lambda fb, fn: ["   "])
+
+    class FakeRP:
+        page_number, jpeg = 1, b"jpegbytes"
+
+    monkeypatch.setattr(pdf_parser, "_render_pages", lambda fb: [FakeRP()])
+    monkeypatch.setattr(pdf_parser, "_ocr_elements_for_page",
+                        lambda jpeg, name, ocr_url: [
+                            {"category": "text", "content": {"markdown": "vl 폴백"}, "page": 0}])
+    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    assert not called["mineru"], "폴백 체인에 MinerU 없어야(2026-07-15 결정)"
+    assert any("vl 폴백" in (b.get("text") or "") for b in res.pages[0]["blocks"])
+
+
+def test_paddle_gw_empty_result_falls_back(monkeypatch):
+    """게이트웨이 성공했으나 blocks 전무(전 페이지 실패) → ODL/VL 폴백."""
+    monkeypatch.setattr(pdf_parser, "_safe_decide_route",
+                        lambda b: RouteDecision(lane="paddle_gw", backend=None,
+                                                parse_method=None))
+    import parse_service.parsers.pdf.paddle_gw as pg
+    monkeypatch.setattr(pg, "run_paddle_gateway",
+                        lambda fb, fn: [{"page_number": 1, "blocks": []}])
+    monkeypatch.setattr(pdf_parser, "_page_markdowns", lambda fb, fn: ["# 폴백 텍스트"])
+    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    assert res.pages[0]["blocks"], "빈 결과 시 ODL 폴백"
