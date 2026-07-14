@@ -64,8 +64,11 @@ def decide_route(pdf_bytes: bytes) -> RouteDecision:
 
     # ② 스캔 페이지(네이티브 텍스트 없음)가 하나라도 있으면 → PaddleOCR-VL 게이트웨이(GPU).
     #    layout+VL+표 조립 전부 게이트웨이 서버 — parse-svc 로컬 의존 0. 실패 시 ODL/VL 폴백.
+    #    diagram_pages 전달 — 게이트웨이는 순서도를 이미지 참조로만 내므로(서술 없음)
+    #    paddle_gw 레인도 해당 페이지에 VL 서술을 보충한다(2026-07-15, 소유권 p4 실측).
     if n_ocr > 0:
-        return RouteDecision(lane="paddle_gw", backend=None, parse_method=None)
+        return RouteDecision(lane="paddle_gw", backend=None, parse_method=None,
+                             diagram_pages=diagram_pages)
 
     # ③ 디지털 텍스트(+차트/다이어그램 소수) → ODL. 다이어그램 페이지는 ODL 레인이 VL 서술 보충.
     return RouteDecision(lane="odl", backend=None, parse_method=None,

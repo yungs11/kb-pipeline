@@ -211,3 +211,30 @@ def test_vl_lane_all_failed_falls_back_to_odl(monkeypatch):
     monkeypatch.setattr(pdf_parser, "_page_markdowns", lambda fb, fn: ["# 폴백 텍스트"])
     res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
     assert res.pages[0]["blocks"], "VL 전멸 시 ODL 폴백"
+
+
+def test_paddle_gw_diagram_pages_get_vl_supplement(monkeypatch):
+    """paddle_gw 성공 후 diagram_pages 에 VL 서술 블록 추가(게이트웨이 이미지참조 보완)."""
+    monkeypatch.setattr(
+        pdf_parser, "_safe_decide_route",
+        lambda b: RouteDecision(lane="paddle_gw", backend=None, parse_method=None,
+                                diagram_pages=(2,)))
+    import parse_service.parsers.pdf.paddle_gw as pg
+    monkeypatch.setattr(pg, "run_paddle_gateway", lambda fb, fn: [
+        {"page_number": 1, "blocks": [{"type": "text", "text": "p1", "page_idx": 1}]},
+        {"page_number": 2, "blocks": [{"type": "image", "img_path": "images/x.jpg",
+                                       "image_caption": [], "page_idx": 2}]},
+    ])
+
+    class FakeRP:
+        page_number, jpeg = 2, b"jpegbytes"
+
+    monkeypatch.setattr(pdf_parser, "_render_pages", lambda fb: [FakeRP()])
+    monkeypatch.setattr(pdf_parser, "_ocr_elements_for_page",
+                        lambda jpeg, name, ocr_url: [
+                            {"category": "text",
+                             "content": {"markdown": "순서도: START→요청→확인→END"}, "page": 1}])
+    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    p2 = next(p for p in res.pages if p["page_number"] == 2)
+    assert any(b["type"] == "image" for b in p2["blocks"]), "게이트웨이 이미지참조 유지"
+    assert any("START→요청" in (b.get("text") or "") for b in p2["blocks"]), "VL 서술 추가"

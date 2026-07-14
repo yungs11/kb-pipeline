@@ -69,3 +69,18 @@ def test_scan_route_has_no_diagram_pages(monkeypatch):
     monkeypatch.setattr(gate, "triage_document", lambda b: [_sig(O)])
     d = gate.decide_route(b"%PDF")
     assert d.lane == "paddle_gw" and d.diagram_pages == ()
+
+
+def test_paddle_gw_route_carries_diagram_pages(monkeypatch):
+    """스캔 문서에 디지털 다이어그램 페이지가 섞이면(소유권 p4 패턴) paddle_gw 라우팅에도
+    diagram_pages 전달 — 게이트웨이가 순서도를 이미지참조로만 내므로 VL 보충 필요."""
+    sigs = []
+    for n, b in [(1, O), (2, T), (3, T), (4, L), (5, T), (6, T), (7, T)]:
+        s = _sig(b); s.page_number = n
+        if n == 4:
+            s.is_diagram = True
+        sigs.append(s)
+    monkeypatch.setattr(gate, "triage_document", lambda b: sigs)
+    d = gate.decide_route(b"%PDF")
+    assert d.lane == "paddle_gw"      # 스캔 존재, 차트 1/7 < 0.5
+    assert d.diagram_pages == (4,)

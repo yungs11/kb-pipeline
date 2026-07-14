@@ -87,6 +87,9 @@ def parse(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteResult:
             log.exception("paddle_gw 레인 실패 — ODL/VL 폴백 (%s)", filename)
         else:
             if pages and any(p.get("blocks") for p in pages):
+                # 게이트웨이는 순서도를 이미지 참조로만 냄 → 다이어그램 페이지 VL 서술 보충.
+                _supplement_diagram_pages(pages, file_bytes,
+                                          decision.diagram_pages, ocr_url)
                 return RouteResult(kind="pages", chunk_needed=True, pages=pages)
             log.warning("paddle_gw 빈 결과 — ODL/VL 폴백 (%s)", filename)
     elif decision is not None and decision.lane == "mineru":
@@ -160,9 +163,22 @@ def _odl_lane(file_bytes: bytes, filename: str, *, ocr_url: str,
             b["page_idx"] = page_number
         pages.append({"page_number": page_number, "blocks": blocks})
 
-    # 다이어그램(순서도/차트) 페이지 VL 서술 보충 — ODL 은 벡터 도형의 시각 구조(분기/연결)를
-    # 못 뽑는다(라벨 텍스트만). 해당 페이지만 렌더 → in-process VL 로 구조 서술을 **추가**한다
-    # (native 텍스트 블록은 유지 — VL 은 보충이지 대체가 아님). 실패는 페이지 단위 비치명.
+    _supplement_diagram_pages(pages, file_bytes, diagram_pages, ocr_url, rendered=rendered)
+    return RouteResult(kind="pages", chunk_needed=True, pages=pages)
+
+
+def _supplement_diagram_pages(pages: list, file_bytes: bytes, diagram_pages: tuple,
+                              ocr_url: str, rendered=None) -> None:
+    """다이어그램(순서도/차트) 페이지 VL 서술 보충 — ODL/paddle_gw 공용.
+
+    ODL 은 벡터 도형의 시각 구조(분기/연결)를 못 뽑고(라벨 텍스트만), paddle_gw(게이트웨이)는
+    순서도를 이미지 참조로만 낸다(서술 없음 — 소유권 p4 실측). 해당 페이지만 렌더 →
+    in-process VL 로 구조 서술 블록을 **추가**한다(기존 블록 유지 — 보충이지 대체 아님).
+    실패는 페이지 단위 비치명. pages 를 제자리 수정.
+    """
+    if not diagram_pages:
+        return
+    from kb_pipeline.blockify import elements_to_blocks
     for pno in diagram_pages:
         entry = next((p for p in pages if p["page_number"] == pno), None)
         if entry is None:
@@ -175,12 +191,10 @@ def _odl_lane(file_bytes: bytes, filename: str, *, ocr_url: str,
             continue
         try:
             elements = _ocr_elements_for_page(page_jpeg, f"page-{pno}-diagram.jpeg", ocr_url)
-        except Exception:  # noqa: BLE001 — 다이어그램 VL 보충 실패는 비치명(native 텍스트는 이미 있음)
+        except Exception:  # noqa: BLE001 — 다이어그램 VL 보충 실패는 비치명(기존 블록은 이미 있음)
             log.exception("diagram VL supplement failed for page %d", pno)
             continue
         extra = elements_to_blocks(elements)
         for b in extra:
             b["page_idx"] = pno
         entry["blocks"].extend(extra)
-
-    return RouteResult(kind="pages", chunk_needed=True, pages=pages)
