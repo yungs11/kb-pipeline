@@ -48,10 +48,37 @@ def is_degenerate_text(text: str) -> bool:
     return False
 
 
-def filter_degenerate_pages(pages: list) -> int:
-    """pages[{page_number, blocks}] 에서 퇴화 text 블록 제거(제자리). 제거 수 반환.
+_CELL_RE = None  # lazy compile
 
-    표(table) 블록은 제외 — 셀 값 반복이 정당할 수 있음(v1 범위 결정).
+_TABLE_MIN_CELLS = 20        # 이보다 작은 표는 판정 보류(정상 소형 표 오검 방지)
+_TABLE_DOMINANT_RATIO = 0.6  # 동일 셀 값이 전체(유의미 셀)의 이 비율 이상 = 퇴화
+_TABLE_CELL_MIN_LEN = 2      # 'O'/'X'/숫자 등 1글자 체크셀은 정당한 반복 → 분모·분자에서 제외
+
+
+def is_degenerate_table(table_body: str) -> bool:
+    """표 퇴화 판정 — 동일 셀 값이 표를 지배(예: '송개왕' ×45)하면 VL 퇴화로 본다.
+
+    체크리스트(O/X)·숫자 반복은 정당하므로 2글자 미만 셀은 제외하고 계산. 소형 표 보류.
+    """
+    global _CELL_RE
+    if not table_body:
+        return False
+    if _CELL_RE is None:
+        import re
+        _CELL_RE = re.compile(r"<t[dh][^>]*>(.*?)</t[dh]>", re.S | re.I)
+    import re as _re
+    cells = [_re.sub(r"<[^>]+>", "", c).strip() for c in _CELL_RE.findall(table_body)]
+    meaningful = [c for c in cells if len(c) >= _TABLE_CELL_MIN_LEN]
+    if len(meaningful) < _TABLE_MIN_CELLS:
+        return False
+    top = Counter(meaningful).most_common(1)[0][1]
+    return (top / len(meaningful)) >= _TABLE_DOMINANT_RATIO
+
+
+def filter_degenerate_pages(pages: list) -> int:
+    """pages[{page_number, blocks}] 에서 퇴화 블록 제거(제자리). 제거 수 반환.
+
+    text 계열 = is_degenerate_text(반복/압축비), table = is_degenerate_table(지배 셀 값).
     """
     removed = 0
     for page in pages or []:
@@ -59,6 +86,11 @@ def filter_degenerate_pages(pages: list) -> int:
         kept = []
         for b in blocks:
             if b.get("type") == "table":
+                if is_degenerate_table(b.get("table_body") or ""):
+                    removed += 1
+                    log.warning("degenerate VL table removed (page %s): %r...",
+                                page.get("page_number"), (b.get("table_body") or "")[:60])
+                    continue
                 kept.append(b)
                 continue
             if is_degenerate_text(b.get("text") or ""):

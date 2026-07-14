@@ -57,3 +57,36 @@ def test_filter_pages_removes_only_degenerate_blocks():
     assert len(pages[0]["blocks"]) == 2                       # 정상 text + table 유지
     assert any(t == "table" for t, _ in p1_types), "표 블록은 v1 필터 대상 아님"
     assert pages[1]["blocks"] == []                           # 퇴화만 있던 페이지는 빔
+
+
+# ---- v2: 표 블록도 검사(보수적 임계) ----
+
+DEGEN_TABLE = ("<table>" + "".join(
+    f"<tr><td>송개왕</td><td>02-</td><td>송개왕</td><td>송개왕</td></tr>" for _ in range(15))
+    + "</table>")
+
+NORMAL_TABLE = ("<table><tr><th>구분</th><th>전체 물건</th><th>기 이전</th><th>금회</th>"
+                "<th>누계</th><th>잔여</th><th>이전율</th></tr>"
+                "<tr><td>공동주택</td><td>90</td><td>25</td><td>5</td><td>30</td><td>60</td><td>33.3%</td></tr>"
+                "<tr><td>근린생활시설</td><td>10</td><td>2</td><td>1</td><td>3</td><td>7</td><td>30.0%</td></tr>"
+                "<tr><td>합계</td><td>100</td><td>27</td><td>6</td><td>33</td><td>67</td><td>33.0%</td></tr></table>")
+
+# 반복 셀이 정당한 표(체크리스트 O/X 등) — 오검 금지
+CHECK_TABLE = ("<table><tr><th>항목</th><th>확인</th></tr>" + "".join(
+    f"<tr><td>점검항목 {i}: 서류 구비 및 날인 여부 확인</td><td>O</td></tr>" for i in range(12))
+    + "</table>")
+
+
+def test_degenerate_table_detected():
+    pages = [{"page_number": 1, "blocks": [
+        {"type": "table", "table_body": DEGEN_TABLE, "page_idx": 1}]}]
+    assert filter_degenerate_pages(pages) == 1
+    assert pages[0]["blocks"] == []
+
+
+def test_normal_tables_not_flagged():
+    pages = [{"page_number": 1, "blocks": [
+        {"type": "table", "table_body": NORMAL_TABLE, "page_idx": 1},
+        {"type": "table", "table_body": CHECK_TABLE, "page_idx": 1}]}]
+    assert filter_degenerate_pages(pages) == 0
+    assert len(pages[0]["blocks"]) == 2
