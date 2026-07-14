@@ -210,3 +210,13 @@ mineru 3.4.4 실설치+import+실 do_parse 로 검증. **실환경 결함 4건 �
 - 로컬 단위검증 44 tests(gate 3레인 파라미터 포함).
 
 **dev 실행 토폴로지(테스트용)**: 호스트 parse-svc(:19001) 대신 MinerU Docker 컨테이너를 :19001 에 기동(재현 스크립트 scratchpad `run-parse-svc-mineru.sh`). facade(:19000)는 호스트 유지. ⚠️ 컨테이너 쓰는 동안 호스트 `run-parse-svc.sh` 금지(:19001 충돌).
+
+## 다이어그램(순서도) 검출 + ODL VL 보충 (2026-07-14)
+
+**배경**: ODL 은 벡터 순서도의 라벨 텍스트만 뽑고 시각 구조(분기/연결)를 유실. 실측 — 정의서 p5(디지털+벡터 순서도)가 TEXT_ONLY 로 오분류돼 구조 소실. 스캔 페이지는 픽셀이라 싼 신호로 순서도 판별 불가(별도 케이스 — MinerU 레인이 chart→image 블록으로 처리).
+
+**신호(triage)**: native-text 페이지에만 `get_cdrawings` 로 curve/line 카운트(char=0 병적 아웃라인 문서는 가드로 스킵 — "get_drawings 금지" 성능결정 유지, 디지털 ~13ms/p·292p 문서 게이트 ~5s). 검출: `curve≥30`(곡선 커넥터형) OR `line≥100 AND img≥5 AND curve≥10`(PPT 복합형). **단독 신호는 오검**(실측: line 단독=테두리 표 약관 p275 line=1249·curve=8, img 단독=아이콘/QR 약관 p12 img=11) → 복합 조건으로 약관 292p 오검 23→0.
+
+**배선**: `RouteDecision.diagram_pages` → ODL 레인이 해당 페이지만 렌더→in-process VL(qwen) elements 서술 블록 **추가**(native 텍스트 유지, 실패 비치명). 문서수준 backend 택일과 무관한 페이지 단위 보충.
+
+**실문서 검증**: 정의서 15p → ODL + diagram=(5,) 정확 / 약관 292p → diagram=() / 신탁·소유권 라우팅 불변. 54 tests. 실측 픽스처 4문서(정의서 p5·소유권pptx p3/p4·약관 p12/p275)를 합성 PDF 회귀로 고정.
