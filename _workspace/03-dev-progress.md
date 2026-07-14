@@ -220,3 +220,14 @@ mineru 3.4.4 실설치+import+실 do_parse 로 검증. **실환경 결함 4건 �
 **배선**: `RouteDecision.diagram_pages` → ODL 레인이 해당 페이지만 렌더→in-process VL(qwen) elements 서술 블록 **추가**(native 텍스트 유지, 실패 비치명). 문서수준 backend 택일과 무관한 페이지 단위 보충.
 
 **실문서 검증**: 정의서 15p → ODL + diagram=(5,) 정확 / 약관 292p → diagram=() / 신탁·소유권 라우팅 불변. 54 tests. 실측 픽스처 4문서(정의서 p5·소유권pptx p3/p4·약관 p12/p275)를 합성 PDF 회귀로 고정.
+
+## 스캔 레인 → PaddleOCR-VL 게이트웨이 교체 (2026-07-15)
+
+GPU 제약(AISP 5GB — MinerU VL+PaddleOCR GPU 동시 탑재 불가)과 CPU pipeline 속도(표 236셀 3p=181s) 문제로,
+스캔 레인을 **PaddleOCR-VL 게이트웨이**(api-doc.ys-helperai.com/ocr/paddleocr_vl — layout+VL+표조립 전부 GPU 서버)로 교체.
+- **경위**: VL 단독(raw 프롬프트)은 표 평문화(불변식 위반, 프롬프트 탐침으로 실증) → 공식 클라이언트는 로컬 layout 재조립(반대) → **게이트웨이 = 로컬 의존 0**(httpx만) + markdown+HTML표(표준 중간표현 그대로 → hybrid_to_blocks 재사용).
+- **paddle_gw 레인**(`parsers/pdf/paddle_gw.py`): 페이지 렌더 → 페이지별 병렬 POST(KBP_VL_MAX_CONCURRENT) → hybrid_to_blocks(page_idx). 페이지 계약 보존.
+- **실측**: 신탁 3p 스캔 — 게이트웨이 48s vs MinerU pipeline(CPU) 181s vs hybrid 166s. 표 8개 `<table>`·한국어 정확.
+- **폴백**(사용자 결정): 게이트웨이 실패/빈결과 → ODL/in-process VL(**MinerU 폴백 제외**). hybrid 레인은 디지털 차트문서용 유지, pipeline 레인 코드 잔존(미사용).
+- **폴백 실전 검증**: 게이트웨이 vlm worker 장애(대량 채점 세션과 GPU 충돌 추정) 중 e2e → 자동 폴백으로 정상 결과(표 7개, 308s). 가용성 보장 확인.
+- 61 tests. **잔여**: 게이트웨이 회복 후 :19001 경유 e2e 재확인(레인 자체 통과 확인용). 게이트웨이 무인증 접근제한 권고. 안정화 후 torch/mineru 이미지 제거 검토(6GB→경량).
