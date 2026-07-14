@@ -25,8 +25,14 @@ _DEFAULT_TIMEOUT = float(os.environ.get("KBP_PADDLE_GW_TIMEOUT", "600"))
 
 
 def _render_pages(file_bytes: bytes):
+    """게이트웨이 전송용 렌더 — MinIO 페이지이미지(dpi300)와 별개로 낮은 dpi 사용.
+
+    실측(2026-07-15): dpi150 으로도 한국어/표 품질 충분(스모크 검증). dpi300 은 픽셀 4배 →
+    업로드 큼 + 게이트웨이 VL 입력 커져 페이지당 처리시간 증가. KBP_PADDLE_GW_DPI 로 조절.
+    """
     from parse_service.pdf_pages import render_pdf_pages
-    return render_pdf_pages(file_bytes)
+    dpi = int(os.environ.get("KBP_PADDLE_GW_DPI", "150"))
+    return render_pdf_pages(file_bytes, dpi=dpi)
 
 
 def _post_page(jpeg: bytes, name: str) -> str:

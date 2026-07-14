@@ -65,3 +65,21 @@ def test_all_pages_failed_returns_empty_blocks(monkeypatch):
     monkeypatch.setattr(paddle_gw, "_post_page", boom)
     pages = paddle_gw.run_paddle_gateway(b"%PDF", "a.pdf")
     assert all(not p["blocks"] for p in pages)
+
+
+def test_render_uses_low_dpi_env(monkeypatch):
+    """게이트웨이용 렌더는 KBP_PADDLE_GW_DPI(기본 150) — MinIO 페이지이미지(300)와 분리."""
+    seen = {}
+
+    def fake_render(pdf_bytes, *, dpi=300, jpg_quality=90):
+        seen["dpi"] = dpi
+        return []
+
+    import parse_service.pdf_pages as pp
+    monkeypatch.setattr(pp, "render_pdf_pages", fake_render)
+    monkeypatch.delenv("KBP_PADDLE_GW_DPI", raising=False)
+    paddle_gw._render_pages(b"%PDF")
+    assert seen["dpi"] == 150                     # 기본 150
+    monkeypatch.setenv("KBP_PADDLE_GW_DPI", "200")
+    paddle_gw._render_pages(b"%PDF")
+    assert seen["dpi"] == 200                     # env override
