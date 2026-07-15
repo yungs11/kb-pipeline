@@ -40,10 +40,14 @@ def _render_pages(file_bytes: bytes):
     return render_pdf_pages(file_bytes)
 
 
-def _ocr_elements_for_page(jpeg: bytes, name: str, ocr_url: str | None = None) -> list[dict]:
-    # Phase 2c: in-process VL OCR (HTTP 제거).
+def _ocr_elements_for_page(jpeg: bytes, name: str, ocr_url: str | None = None,
+                           *, diagram: bool = False) -> list[dict]:
+    # Phase 2c: in-process VL OCR (HTTP 제거). diagram=True 면 순서도 서술 전용 프롬프트.
     from parse_service.parsers.ocr import ocr_elements_sync
-    return ocr_elements_sync(jpeg, name)
+    from parse_service.parsers.ocr import prompts
+    override = ((prompts.DIAGRAM_SYSTEM_PROMPT, prompts.DIAGRAM_USER_PROMPT)
+                if diagram else None)
+    return ocr_elements_sync(jpeg, name, override)
 
 
 def _safe_decide_route(file_bytes: bytes):
@@ -200,7 +204,8 @@ def _supplement_diagram_pages(pages: list, file_bytes: bytes, diagram_pages: tup
             log.warning("diagram page %d has no rendered image", pno)
             continue
         try:
-            elements = _ocr_elements_for_page(page_jpeg, f"page-{pno}-diagram.jpeg", ocr_url)
+            elements = _ocr_elements_for_page(page_jpeg, f"page-{pno}-diagram.jpeg", ocr_url,
+                                              diagram=True)
         except Exception:  # noqa: BLE001 — 다이어그램 VL 실패는 비치명(기존 블록 유지)
             log.exception("diagram VL supplement failed for page %d", pno)
             continue

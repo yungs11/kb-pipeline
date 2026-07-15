@@ -80,7 +80,7 @@ def test_odl_diagram_pages_get_vl_supplement(monkeypatch):
     monkeypatch.setattr(pdf_parser, "_render_pages", lambda fb: [FakeRP()])
     called = {}
 
-    def fake_vl(jpeg, name, ocr_url):
+    def fake_vl(jpeg, name, ocr_url, diagram=False):
         called["name"] = name
         # 실제 ocr_elements_sync 는 순수텍스트 figure 를 text 로 재분류해 반환한다(Phase 2c).
         return [{"category": "text",
@@ -234,7 +234,7 @@ def test_paddle_gw_diagram_pages_replaced_by_vl(monkeypatch):
 
     monkeypatch.setattr(pdf_parser, "_render_pages", lambda fb: [FakeRP()])
     monkeypatch.setattr(pdf_parser, "_ocr_elements_for_page",
-                        lambda jpeg, name, ocr_url: [
+                        lambda jpeg, name, ocr_url, diagram=False: [
                             {"category": "text",
                              "content": {"markdown": "순서도: START→요청→확인→END"}, "page": 1}])
     res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
@@ -287,3 +287,29 @@ def test_parse_filters_degenerate_vl_blocks(monkeypatch):
     texts = [b.get("text", "") for b in res.pages[0]["blocks"]]
     assert any("정상 본문" in t for t in texts), "정상 블록 유지"
     assert not any("기계음 손상완" in t for t in texts), "퇴화 블록 제거"
+
+
+def test_diagram_supplement_uses_diagram_prompt(monkeypatch):
+    """다이어그램 보충은 순서도 전용 프롬프트(DIAGRAM_*)로 VL 호출 — 범용 전사 프롬프트 아님."""
+    monkeypatch.setattr(
+        pdf_parser, "_safe_decide_route",
+        lambda b: RouteDecision(lane="odl", backend=None, parse_method=None,
+                                diagram_pages=(1,)))
+    monkeypatch.setattr(pdf_parser, "_page_markdowns", lambda fb, fn: ["# p1 순서도 라벨"])
+
+    class FakeRP:
+        page_number, jpeg = 1, b"jpegbytes"
+
+    monkeypatch.setattr(pdf_parser, "_render_pages", lambda fb: [FakeRP()])
+    seen = {}
+
+    def fake_sync(fb, fn, override=None):
+        seen["override"] = override
+        return [{"category": "text", "content": {"markdown": "START→요청→END"}, "page": 0}]
+
+    import parse_service.parsers.ocr as ocr_mod
+    monkeypatch.setattr(ocr_mod, "ocr_elements_sync", fake_sync)
+    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    from parse_service.parsers.ocr import prompts
+    assert seen["override"] == (prompts.DIAGRAM_SYSTEM_PROMPT, prompts.DIAGRAM_USER_PROMPT)
+    assert res.kind == "pages"

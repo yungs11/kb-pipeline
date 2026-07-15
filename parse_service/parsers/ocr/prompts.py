@@ -571,6 +571,32 @@ def get_excel_prompts() -> Dict[str, Dict[str, str]]:
 
 
 # ============================================
+# 다이어그램(순서도/플로우차트) 전용 프롬프트 — 보충 호출용
+# ============================================
+# 범용 전사 프롬프트는 순서도를 "박스 라벨 나열"로 전사한다(흐름 유실). 다이어그램 페이지
+# 보충에는 이 프롬프트로 **논리 흐름을 서술**시킨다. 출력 스키마는 동일(elements/figure/markdown)
+# 이라 blockify·재분류 경로를 그대로 탄다.
+DIAGRAM_SYSTEM_PROMPT = """You are a JSON converter that describes diagrams and flowcharts. Output ONLY valid JSON. No explanations outside the JSON.
+
+## OUTPUT FORMAT
+```json
+{"elements": [{"category": "figure", "content": {"html": "", "markdown": "<설명>", "text": ""}, "coordinates": [], "id": 0, "page": 1}]}
+```
+Start with { and end with }."""
+
+DIAGRAM_USER_PROMPT = """이 이미지는 업무 순서도/플로우차트/다이어그램이다. 박스 안 글자를 그대로 나열하지 말고, **논리 흐름을 서술**하라.
+
+규칙:
+- 시작(START)부터 끝(END)까지 각 단계를 순서대로, 화살표(→)로 연결해 흐름이 드러나게 서술한다.
+- 조건 분기(예: 미납/보완, 불일치/보완, 예/아니오)가 있으면 어느 단계에서 어떤 조건으로 어디로 가는지 명시한다.
+- 스윔레인(수행 주체: 현업/시스템 등)이 있으면 각 단계의 주체를 함께 적는다.
+- 순서도 밖의 표·주석·체크리스트 텍스트는 원문 그대로 보존한다(순서도 아닌 부분은 전사).
+- 원문자(①②③ / ㉠㉡ / ㈎㈏)는 정확히 그대로 유지한다.
+
+category="figure", content.markdown 에 위 서술을 담아 JSON 으로 출력하라. Output JSON now:"""
+
+
+# ============================================
 # 하위 호환성 유지
 # ============================================
 
@@ -610,4 +636,7 @@ __all__ = [
     'EXCEL_CHART_USER_PROMPT',
     'EXCEL_IMAGE_SYSTEM_PROMPT',
     'EXCEL_IMAGE_USER_PROMPT',
+    # 다이어그램 전용
+    'DIAGRAM_SYSTEM_PROMPT',
+    'DIAGRAM_USER_PROMPT',
 ]

@@ -46,10 +46,16 @@ async def _file_to_base64_pages(file_bytes: bytes, filename: str) -> list[str]:
         os.unlink(path)
 
 
-async def ocr_file_to_elements(file_bytes: bytes, filename: str) -> dict:
+async def ocr_file_to_elements(file_bytes: bytes, filename: str,
+                               prompt_override: tuple[str, str] | None = None) -> dict:
+    """VL OCR — file_bytes 를 elements[] 로. prompt_override=(system, user) 주면 그 프롬프트로
+    호출한다(다이어그램 전용 서술 등). None 이면 기본 전사 프롬프트."""
     from parse_service.parsers.ocr import vl_api, elements_parser, prompts
     b64_pages = await _file_to_base64_pages(file_bytes, filename)
-    system_p, user_p = prompts.build_system_prompt(), prompts.build_user_prompt()
+    if prompt_override is not None:
+        system_p, user_p = prompt_override
+    else:
+        system_p, user_p = prompts.build_system_prompt(), prompts.build_user_prompt()
     all_elements: list[dict] = []
     next_id = 0
     for page_num, b64 in enumerate(b64_pages, start=1):
@@ -79,18 +85,20 @@ async def ocr_file_to_elements(file_bytes: bytes, filename: str) -> dict:
     return {"elements": all_elements, "metadata": {"page_cnt": len(b64_pages)}}
 
 
-def ocr_elements_sync(file_bytes: bytes, filename: str) -> list[dict]:
+def ocr_elements_sync(file_bytes: bytes, filename: str,
+                      prompt_override: tuple[str, str] | None = None) -> list[dict]:
     # parse-svc /parse 핸들러는 async def 라 이벤트루프가 도는 스레드에서 호출될 수 있다 —
     # 그 안에서 asyncio.run() 은 RuntimeError. 루프가 돌고 있으면 별도 스레드에서
     # asyncio.run 을 실행해 안전하게 블로킹한다.
+    def _run():
+        return asyncio.run(ocr_file_to_elements(file_bytes, filename, prompt_override))["elements"]
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(ocr_file_to_elements(file_bytes, filename))["elements"]
+        return _run()
     import concurrent.futures
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        fut = pool.submit(lambda: asyncio.run(ocr_file_to_elements(file_bytes, filename)))
-        return fut.result()["elements"]
+        return pool.submit(_run).result()
 
 
 def _whole_file_elements(file_bytes: bytes, filename: str, ocr_url: str | None = None) -> list[dict]:
