@@ -21,9 +21,13 @@ import httpx
 
 log = logging.getLogger("kb_pipeline.parse_service.parsers.pdf.paddle_gw")
 
-# 페이지당 타임아웃 600s(사용자 결정 — 복잡한 페이지/일시 부하 여유). 행(hang) 게이트웨이
+# 페이지당 총 시한 600s(사용자 결정 — 복잡한 페이지/일시 부하 여유). 행(hang) 게이트웨이
 # 조기 포기는 타임아웃이 아니라 **첫 페이지 프로브**가 담당(실패 시 즉시 폴백).
 _DEFAULT_TIMEOUT = float(os.environ.get("KBP_PADDLE_GW_TIMEOUT", "600"))
+# 비동기(tasks) 폴링 간격 — 각 폴링 호출은 즉시 응답이라 CF 100s 무관.
+_POLL_INTERVAL = float(os.environ.get("KBP_PADDLE_GW_POLL_INTERVAL", "5"))
+# 개별 HTTP 호출(submit/poll/result) 타임아웃 — 짧아도 됨(작업 대기는 폴링 루프가 담당).
+_HTTP_TIMEOUT = float(os.environ.get("KBP_PADDLE_GW_HTTP_TIMEOUT", "60"))
 
 
 def _render_pages(file_bytes: bytes):
@@ -38,19 +42,48 @@ def _render_pages(file_bytes: bytes):
 
 
 def _post_page(jpeg: bytes, name: str) -> str:
-    """게이트웨이에 페이지 이미지 1장 POST → markdown(+HTML 표) 텍스트 반환."""
-    url = os.environ["KBP_PADDLE_OCR_GATEWAY_URL"]
+    """게이트웨이에 페이지 이미지 1장 → markdown(+HTML 표) 텍스트 반환. **비동기(tasks) 방식**.
+
+    submit(POST {url}/tasks → task_id) → poll(GET /tasks/{id}, 즉시응답) → result(GET .../result).
+    각 HTTP 호출이 즉시 응답이라 Cloudflare 100s 제한을 우회 — dots 처럼 페이지당 70s+ 걸리는
+    생성형 VLM 도 안전(2026-07-15 실측: 동기 방식은 밀집 페이지 p7/p10 이 CF 524 로 실패했음).
+    """
+    import time
+    base = os.environ["KBP_PADDLE_OCR_GATEWAY_URL"].rstrip("/")
     lang = os.environ.get("KBP_PADDLE_GW_LANG", "korean")
+
+    # 1) submit — 즉시 task_id
     resp = httpx.post(
-        url,
+        f"{base}/tasks",
         files={"file": (name, jpeg, "image/jpeg")},
         data={"lang": lang},
-        timeout=_DEFAULT_TIMEOUT,
+        timeout=_HTTP_TIMEOUT,
     )
     resp.raise_for_status()
-    body = resp.json()
+    task_id = resp.json().get("task_id")
+    if not task_id:
+        raise RuntimeError(f"gateway submit: task_id 없음 — {resp.json()}")
+
+    # 2) poll — completed/failed 까지 (총 시한 _DEFAULT_TIMEOUT)
+    deadline = time.monotonic() + _DEFAULT_TIMEOUT
+    while True:
+        st_resp = httpx.get(f"{base}/tasks/{task_id}", timeout=_HTTP_TIMEOUT)
+        st_resp.raise_for_status()
+        status = st_resp.json().get("status")
+        if status == "completed":
+            break
+        if status == "failed":
+            raise RuntimeError(f"gateway task failed: {st_resp.json().get('error')}")
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"gateway task {task_id} poll timeout ({_DEFAULT_TIMEOUT}s)")
+        time.sleep(_POLL_INTERVAL)
+
+    # 3) result
+    r = httpx.get(f"{base}/tasks/{task_id}/result", timeout=_HTTP_TIMEOUT)
+    r.raise_for_status()
+    body = r.json()
     if body.get("status") != "ok":
-        raise RuntimeError(f"gateway status={body.get('status')} error={body.get('error')}")
+        raise RuntimeError(f"gateway result status={body.get('status')} error={body.get('error')}")
     return body.get("text") or ""
 
 

@@ -88,3 +88,76 @@ def test_render_uses_low_dpi_env(monkeypatch):
     monkeypatch.setenv("KBP_PADDLE_GW_DPI", "200")
     paddle_gw._render_pages(b"%PDF")
     assert seen["dpi"] == 200                     # env override
+
+
+# ---- 비동기(tasks) 게이트웨이 (2026-07-15: dots CF 524 우회 — submit→poll→result) ----
+
+def test_async_post_page_submits_polls_and_fetches_result(monkeypatch):
+    """_post_page: POST /tasks → task_id, GET /tasks/{id} 폴링(queued→running→completed),
+    GET /tasks/{id}/result → text. CF 100s 무관."""
+    monkeypatch.setenv("KBP_PADDLE_OCR_GATEWAY_URL", "https://gw/ocr/dots_ocr")
+    monkeypatch.setattr(paddle_gw, "_POLL_INTERVAL", 0)  # 테스트: 대기 없이
+    calls = []
+
+    class FakeResp:
+        def __init__(self, body): self._b = body
+        def raise_for_status(self): pass
+        def json(self): return self._b
+
+    state = {"n": 0}
+
+    def fake_post(url, **kw):
+        calls.append(("POST", url))
+        assert url == "https://gw/ocr/dots_ocr/tasks"
+        assert kw["data"]["lang"] == "korean"
+        return FakeResp({"task_id": "t-1", "status": "queued"})
+
+    def fake_get(url, **kw):
+        calls.append(("GET", url))
+        if url.endswith("/result"):
+            return FakeResp({"status": "ok", "text": "# 결과\n<table><tr><td>셀</td></tr></table>"})
+        state["n"] += 1
+        return FakeResp({"status": "running" if state["n"] < 3 else "completed"})
+
+    monkeypatch.setattr(paddle_gw.httpx, "post", fake_post)
+    monkeypatch.setattr(paddle_gw.httpx, "get", fake_get)
+    md = paddle_gw._post_page(b"jpeg", "page-1.jpeg")
+    assert "<table>" in md
+    assert calls[0] == ("POST", "https://gw/ocr/dots_ocr/tasks")
+    assert calls[-1] == ("GET", "https://gw/ocr/dots_ocr/tasks/t-1/result")
+
+
+def test_async_task_failed_raises(monkeypatch):
+    monkeypatch.setenv("KBP_PADDLE_OCR_GATEWAY_URL", "https://gw/ocr/dots_ocr")
+    monkeypatch.setattr(paddle_gw, "_POLL_INTERVAL", 0)
+
+    class FakeResp:
+        def __init__(self, body): self._b = body
+        def raise_for_status(self): pass
+        def json(self): return self._b
+
+    monkeypatch.setattr(paddle_gw.httpx, "post",
+                        lambda url, **kw: FakeResp({"task_id": "t-2", "status": "queued"}))
+    monkeypatch.setattr(paddle_gw.httpx, "get",
+                        lambda url, **kw: FakeResp({"status": "failed", "error": "vlm oom"}))
+    with pytest.raises(RuntimeError):
+        paddle_gw._post_page(b"jpeg", "page-1.jpeg")
+
+
+def test_async_poll_timeout_raises(monkeypatch):
+    """폴링이 _DEFAULT_TIMEOUT 을 넘기면 RuntimeError(페이지 비치명 처리로 연결)."""
+    monkeypatch.setenv("KBP_PADDLE_OCR_GATEWAY_URL", "https://gw/ocr/dots_ocr")
+    monkeypatch.setattr(paddle_gw, "_POLL_INTERVAL", 0)
+    monkeypatch.setattr(paddle_gw, "_DEFAULT_TIMEOUT", 0.01)  # 즉시 만료
+
+    class FakeResp:
+        def __init__(self, body): self._b = body
+        def raise_for_status(self): pass
+        def json(self): return self._b
+
+    monkeypatch.setattr(paddle_gw.httpx, "post",
+                        lambda url, **kw: FakeResp({"task_id": "t-3", "status": "queued"}))
+    monkeypatch.setattr(paddle_gw.httpx, "get",
+                        lambda url, **kw: FakeResp({"status": "running"}))
+    with pytest.raises(RuntimeError):
+        paddle_gw._post_page(b"jpeg", "page-1.jpeg")
