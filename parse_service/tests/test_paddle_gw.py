@@ -161,3 +161,35 @@ def test_async_poll_timeout_raises(monkeypatch):
                         lambda url, **kw: FakeResp({"status": "running"}))
     with pytest.raises(RuntimeError):
         paddle_gw._post_page(b"jpeg", "page-1.jpeg")
+
+
+def test_raw_json_layout_response_retried_once(monkeypatch):
+    """실관측(2026-07-15 p10): dots 가 간헐적으로 markdown 대신 raw JSON layout
+    ('[{"bbox":...,"category":...') 을 반환 — 단독 재호출은 정상. 1회 재시도로 복구."""
+    monkeypatch.setenv("KBP_PADDLE_OCR_GATEWAY_URL", "https://gw/ocr/dots_ocr")
+    monkeypatch.setattr(paddle_gw, "_POLL_INTERVAL", 0)
+
+    class FakeResp:
+        def __init__(self, body): self._b = body
+        def raise_for_status(self): pass
+        def json(self): return self._b
+
+    submits = {"n": 0}
+
+    def fake_post(url, **kw):
+        submits["n"] += 1
+        return FakeResp({"task_id": f"t-{submits['n']}", "status": "queued"})
+
+    def fake_get(url, **kw):
+        if url.endswith("/result"):
+            if "t-1" in url:   # 1차: raw JSON layout (형식 오류)
+                return FakeResp({"status": "ok",
+                                 "text": '[{"bbox": [36, 55], "category": "Section-header", "text": "x"}]' * 50})
+            return FakeResp({"status": "ok", "text": "# 정상\n<table><tr><td>셀</td></tr></table>"})
+        return FakeResp({"status": "completed"})
+
+    monkeypatch.setattr(paddle_gw.httpx, "post", fake_post)
+    monkeypatch.setattr(paddle_gw.httpx, "get", fake_get)
+    md = paddle_gw._post_page(b"jpeg", "page-10.jpeg")
+    assert submits["n"] == 2, "raw JSON 1회 재시도"
+    assert "<table>" in md and not md.strip().startswith("[{")

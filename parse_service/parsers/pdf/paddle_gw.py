@@ -41,7 +41,25 @@ def _render_pages(file_bytes: bytes):
     return render_pdf_pages(file_bytes, dpi=dpi)
 
 
+def _looks_like_raw_layout_json(text: str) -> bool:
+    """dots 간헐 형식 오류: markdown 대신 raw layout JSON('[{"bbox":..,"category":..')
+    을 반환하는 케이스(2026-07-15 p10 실관측 — 재호출은 정상이었음)."""
+    head = (text or "").lstrip()[:200]
+    return head.startswith("[{") and '"bbox"' in head and '"category"' in head
+
+
 def _post_page(jpeg: bytes, name: str) -> str:
+    """게이트웨이 페이지 호출(1회 재시도 래퍼) — raw JSON 형식 오류 시 한 번 더."""
+    md = _post_page_once(jpeg, name)
+    if _looks_like_raw_layout_json(md):
+        log.warning("gateway returned raw layout JSON for %s — retrying once", name)
+        md = _post_page_once(jpeg, name)
+        if _looks_like_raw_layout_json(md):
+            raise RuntimeError(f"gateway raw-JSON output persisted for {name}")
+    return md
+
+
+def _post_page_once(jpeg: bytes, name: str) -> str:
     """게이트웨이에 페이지 이미지 1장 → markdown(+HTML 표) 텍스트 반환. **비동기(tasks) 방식**.
 
     submit(POST {url}/tasks → task_id) → poll(GET /tasks/{id}, 즉시응답) → result(GET .../result).
