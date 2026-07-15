@@ -112,3 +112,31 @@ def test_scattered_repeat_table_detected():
     t = "<table>" + "".join(rows) + "</table>"
     pages = [{"page_number": 1, "blocks": [{"type": "table", "table_body": t, "page_idx": 1}]}]
     assert filter_degenerate_pages(pages) == 1
+
+
+# ---- v4: 짧은 루프(60-200자) + 표 ttr(단어 다양성) — 실관측 잔존물(2026-07-15 2차) ----
+
+def test_short_loop_text_detected():
+    """실관측: '완성의 협력을 위한'×5 가 79자라 <200자 보류에 걸려 통과했음.
+    60자+ 에선 3-gram 지배(≥0.5) 또는 ttr≤0.45 면 퇴화."""
+    short_loop = "완성된 윤리적경영의 완성과 " + "완성의 협력을 위한 " * 5
+    assert is_degenerate_text(short_loop)
+
+
+def test_short_normal_annotation_not_flagged():
+    """실관측 정상: 69자 주석 (주)¹... (ttr=1.0, top3=0.21) — 오검 금지."""
+    normal = "(주)¹ 요청(동의)서 상 위탁자 및 시공사, 대리금융기관(우선수익자) 책임으로 분양대금 완납 확인(조건부 동의) 문구 기재"
+    assert not is_degenerate_text(normal)
+    check = ("Check Point ① 소유권이전 요청(동의)서 징구\nCheck Point ② 분양대금 입금 확인\n"
+             "Check Point ③ 분양계약서 상 최종 수분양자 확인\nCheck Point ④ 소유권이전 관리대장 확인")
+    assert not is_degenerate_text(check)
+
+
+def test_low_ttr_table_detected():
+    """실관측 표9(2차 런): rowspan 병합으로 dom=0.20 이지만 단어 다양성 ttr=0.35
+    ('송개왕/송삼왕부송삼' 변주 반복) — 정상표 최저 ttr=0.69 와 분리."""
+    # 같은 단어 변주가 셀들에 반복 → ttr 낮음
+    cells = ["순번", "송개왕의", "성명", "낙인"] + ["송개왕", "송개왕 순위", "송삼왕부송삼", "송개왕"] * 12
+    t = "<table>" + "".join(f"<tr><td>{c}</td></tr>" for c in cells) + "</table>"
+    pages = [{"page_number": 1, "blocks": [{"type": "table", "table_body": t, "page_idx": 1}]}]
+    assert filter_degenerate_pages(pages) == 1

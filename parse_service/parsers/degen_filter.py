@@ -26,9 +26,27 @@ _NGRAM_MIN_COUNT = 8      # 최소 반복 횟수
 _NGRAM_MIN_COVER = 0.35   # 지배 구절이 전체 단어의 이 비율 이상 차지
 
 
+_SHORT_MIN = 60           # 짧은 루프 판정 하한(이 미만은 완전 보류)
+_SHORT_G3_COVER = 0.5     # 60-200자: 3-gram 지배 점유율(실관측 퇴화 0.71 vs 정상 최대 0.21)
+_SHORT_TTR_MAX = 0.45     # 60-200자: 단어 다양성 하한(실관측 퇴화 0.33 vs 정상 최저 0.73)
+
+
 def is_degenerate_text(text: str) -> bool:
     """VL 퇴화 반복 텍스트인지 판정. 확신 없으면 False(오검 방지 우선)."""
-    if not text or len(text) < _MIN_LEN:
+    if not text or len(text) < _SHORT_MIN:
+        return False
+    words = text.split()
+
+    # 짧은 텍스트(60-200자): 강한 신호만 — 3-gram 지배 or 극저 다양성.
+    # 실관측(2026-07-15): '완성의 협력을 위한'×5(79자, top3=0.71, ttr=0.33)가 <200 보류로 통과했었음.
+    if len(text) < _MIN_LEN:
+        n = len(words)
+        if n >= 9:
+            g3 = Counter(tuple(words[i:i + 3]) for i in range(n - 2))
+            top3 = g3.most_common(1)[0][1] * 3 / n
+            ttr = len(set(words)) / n
+            if top3 >= _SHORT_G3_COVER or ttr <= _SHORT_TTR_MAX:
+                return True
         return False
 
     # ① 압축률 — 반복 루프는 극단적으로 잘 압축됨.
@@ -38,7 +56,6 @@ def is_degenerate_text(text: str) -> bool:
         return True
 
     # ② 지배 구절(단어 5-gram) 과다 반복.
-    words = text.split()
     if len(words) >= _NGRAM * 6:
         grams = Counter(tuple(words[i:i + _NGRAM]) for i in range(len(words) - _NGRAM + 1))
         top_count = grams.most_common(1)[0][1]
@@ -92,7 +109,16 @@ def is_degenerate_table(table_body: str) -> bool:
     if dom >= _TABLE_DOMINANT_RATIO:
         return True
     # R3: 산재 반복형 — 중간 dom 이지만 압축비도 낮음(정상표는 dom≤0.17 or comp≥0.39)
-    return dom >= 0.35 and comp < 0.36
+    if dom >= 0.35 and comp < 0.36:
+        return True
+    # R4: 단어 다양성 — rowspan 병합 등으로 dom 이 낮아도 같은 단어 변주가 표를 채움.
+    #     실관측(2026-07-15 2차): 퇴화표 ttr=0.35 vs 정상표 최저 0.69.
+    words = joined.split()
+    if len(words) >= 30:
+        ttr = len(set(words)) / len(words)
+        if ttr <= 0.45:
+            return True
+    return False
 
 
 def filter_degenerate_pages(pages: list) -> int:
