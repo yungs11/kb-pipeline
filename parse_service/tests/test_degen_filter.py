@@ -71,10 +71,14 @@ NORMAL_TABLE = ("<table><tr><th>구분</th><th>전체 물건</th><th>기 이전<
                 "<tr><td>근린생활시설</td><td>10</td><td>2</td><td>1</td><td>3</td><td>7</td><td>30.0%</td></tr>"
                 "<tr><td>합계</td><td>100</td><td>27</td><td>6</td><td>33</td><td>67</td><td>33.0%</td></tr></table>")
 
-# 반복 셀이 정당한 표(체크리스트 O/X 등) — 오검 금지
+# 반복 셀(O/X)이 정당한 현실적 체크리스트 — 항목 내용은 서로 다름. 오검 금지.
+# (동일 장문 셀이 12번 반복되는 표는 VL 퇴화와 통계적으로 동형이라 구분 불가 — 알려진 트레이드오프)
+_CHECK_ITEMS = ["소유권이전 요청서 징구 여부", "분양대금 완납 확인", "중도금 대출 완제 확인",
+                "최종계약자와 등기명의자 일치", "매매계약서 등 증빙 첨부", "관리대장 중복 신청 점검",
+                "등기위임장 날인 상태", "매도용 인감증명서 유효기간", "미분양물건 할인률 기재",
+                "사업관계자 동의 여부", "부동산거래계약 신고 확인", "소송·제한권리 현황 점검"]
 CHECK_TABLE = ("<table><tr><th>항목</th><th>확인</th></tr>" + "".join(
-    f"<tr><td>점검항목 {i}: 서류 구비 및 날인 여부 확인</td><td>O</td></tr>" for i in range(12))
-    + "</table>")
+    f"<tr><td>{it}</td><td>O</td></tr>" for it in _CHECK_ITEMS) + "</table>")
 
 
 def test_degenerate_table_detected():
@@ -90,3 +94,21 @@ def test_normal_tables_not_flagged():
         {"type": "table", "table_body": CHECK_TABLE, "page_idx": 1}]}]
     assert filter_degenerate_pages(pages) == 0
     assert len(pages[0]["blocks"]) == 2
+
+
+def test_giant_repeated_cell_table_detected():
+    """실관측 표9 형(2026-07-15): 셀 2개뿐이지만 한 셀이 '손을'×수십(2490자) — R1 압축비."""
+    giant = "손을 " * 500
+    t = f"<table><tr><td>권리·의무승계내역</td><td>{giant}</td></tr></table>"
+    pages = [{"page_number": 1, "blocks": [{"type": "table", "table_body": t, "page_idx": 1}]}]
+    assert filter_degenerate_pages(pages) == 1
+
+
+def test_scattered_repeat_table_detected():
+    """실관측 표10 형: '송개왕' 이 60셀 중 43% 산재(dom 0.43, comp 0.34) — R3."""
+    rows = []
+    for i in range(15):
+        rows.append(f"<tr><td>송개왕</td><td>0{i%3}-</td><td>송개왕</td><td>송개왕 순위</td></tr>")
+    t = "<table>" + "".join(rows) + "</table>"
+    pages = [{"page_number": 1, "blocks": [{"type": "table", "table_body": t, "page_idx": 1}]}]
+    assert filter_degenerate_pages(pages) == 1

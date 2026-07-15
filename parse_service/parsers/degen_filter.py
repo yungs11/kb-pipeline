@@ -56,9 +56,14 @@ _TABLE_CELL_MIN_LEN = 2      # 'O'/'X'/숫자 등 1글자 체크셀은 정당한
 
 
 def is_degenerate_table(table_body: str) -> bool:
-    """표 퇴화 판정 — 동일 셀 값이 표를 지배(예: '송개왕' ×45)하면 VL 퇴화로 본다.
+    """표 퇴화 판정 — 실관측(2026-07-15 소유권 양식페이지) 임계 보정 v3.
 
-    체크리스트(O/X)·숫자 반복은 정당하므로 2글자 미만 셀은 제외하고 계산. 소형 표 보류.
+    실측 분포: 정상표 dom≤0.17·comp≥0.39 / 퇴화표 ① 거대반복셀형 comp=0.03(셀2개,
+    '손을'×수십 2490자) ② 산재반복형 dom=0.43·comp=0.34('송개왕' 60셀). 세 규칙:
+      R1 셀 연결 텍스트 압축비 < 0.16 (텍스트와 동일 — 거대반복셀형; 셀 수 무관)
+      R2 지배 셀값 ≥ 0.6 (동일 값이 표를 지배; 20셀+)
+      R3 dom ≥ 0.35 AND comp < 0.36 (산재반복형; 정상 최악 0.17/0.39 와 마진)
+    체크리스트(O/X)·숫자(2글자 미만 셀)는 dom 계산에서 제외(정당한 반복 오검 방지).
     """
     global _CELL_RE
     if not table_body:
@@ -68,11 +73,26 @@ def is_degenerate_table(table_body: str) -> bool:
         _CELL_RE = re.compile(r"<t[dh][^>]*>(.*?)</t[dh]>", re.S | re.I)
     import re as _re
     cells = [_re.sub(r"<[^>]+>", "", c).strip() for c in _CELL_RE.findall(table_body)]
+    joined = " ".join(c for c in cells if c)
+
+    # R1: 셀 연결 텍스트 압축비 — 거대 반복셀(예: '손을'×수십)은 셀 수와 무관하게 잡힘.
+    if len(joined) >= _MIN_LEN:
+        raw = joined.encode("utf-8")
+        comp = len(zlib.compress(raw, 6)) / len(raw)
+        if comp < _COMPRESS_MAX:
+            return True
+    else:
+        comp = 1.0
+
     meaningful = [c for c in cells if len(c) >= _TABLE_CELL_MIN_LEN]
     if len(meaningful) < _TABLE_MIN_CELLS:
         return False
-    top = Counter(meaningful).most_common(1)[0][1]
-    return (top / len(meaningful)) >= _TABLE_DOMINANT_RATIO
+    dom = Counter(meaningful).most_common(1)[0][1] / len(meaningful)
+    # R2: 지배 셀값
+    if dom >= _TABLE_DOMINANT_RATIO:
+        return True
+    # R3: 산재 반복형 — 중간 dom 이지만 압축비도 낮음(정상표는 dom≤0.17 or comp≥0.39)
+    return dom >= 0.35 and comp < 0.36
 
 
 def filter_degenerate_pages(pages: list) -> int:
