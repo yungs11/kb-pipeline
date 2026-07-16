@@ -131,3 +131,18 @@ PaddleOCR layout 을 로컬 배치 예측하고 window 의 VLM 요청을 **동�
   동시성 3=238s 와 오차 범위 — 벽시계는 밀집 페이지(p10 출력 10KB)가 지배.
 - 서버 분석: 동시성 8은 페이지당 66-78s 로 CF 100s 에 근접(524 위험) + CPU layout 경쟁 → **4 확정**(`KBP_VL_MAX_CONCURRENT=4`).
 - 추가 속도는 서버측(CPU layout 가속/무거운 페이지) 영역 — 클라이언트 노브(dpi·동시성·프로브) 소진.
+
+## 스캔 게이트웨이 엔진 확정: paddleocr_vl (2026-07-16)
+
+같은 api-doc 게이트웨이에 dots_ocr / paddleocr_vl 둘 다 노출됨. 46p 소장(밀집 텍스트/표) 실측 비교로 **기본 = paddleocr_vl** 확정:
+
+| | dots_ocr | **paddleocr_vl(기본)** |
+|---|---|---|
+| 46p 시간 | 1236s(20.6분) | **684s(11.4분)** |
+| 빈/실패 페이지 | 4개 | **0개** |
+| 내용량 | 37KB | **93KB** |
+
+- **문서 성격별 강약**: 밀집 텍스트/표(소장·계약서)=paddle 우위(빠름·완주·다량). 양식/순서도(프로세스정의서)=dots 환각 적음. 기본은 다수 케이스인 paddle.
+- **엔진 전환**: `KBP_PADDLE_OCR_GATEWAY_URL` 만 `/ocr/{engine}` 로 바꾸면 됨(dots/paddle/mineru_vlm 동일 계약: file+lang→markdown+HTML표, 비동기 tasks 공용).
+- **비동기(tasks) 호출**: submit→poll→result 로 CF 100s 우회(paddle_gw._post_page). 대용량(46p) 은 gunicorn `--timeout 3600` 로 완주 보장(20분+ 걸려도 부분성공 저장). 서버 `DGX_MAX_CONCURRENT=4` 가 동시처리 상한 — 클라 동시성 4 초과는 큐 대기만 늘림.
+- **부분 실패 저장**: 페이지 단위 빈 결과는 비치명 — 나머지 페이지는 enriched_content 로 정상 적재(빈 페이지만 누락).
