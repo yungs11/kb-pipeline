@@ -16,6 +16,7 @@ from __future__ import annotations
 import concurrent.futures
 import logging
 import os
+import re
 
 import httpx
 
@@ -28,6 +29,25 @@ _DEFAULT_TIMEOUT = float(os.environ.get("KBP_PADDLE_GW_TIMEOUT", "600"))
 _POLL_INTERVAL = float(os.environ.get("KBP_PADDLE_GW_POLL_INTERVAL", "5"))
 # 개별 HTTP 호출(submit/poll/result) 타임아웃 — 짧아도 됨(작업 대기는 폴링 루프가 담당).
 _HTTP_TIMEOUT = float(os.environ.get("KBP_PADDLE_GW_HTTP_TIMEOUT", "60"))
+
+
+# 게이트웨이(paddleocr_vl)가 표/그림에 넣는 상대경로 이미지 참조. 실제 파일은 게이트웨이
+# 서버에만 있어 우리 MinIO/UI 엔 없음 → UI 404(2026-07-16 실관측 img_in_image_box_*.jpg).
+# 페이지 이미지는 parse-svc 가 따로 렌더·MinIO 업로드하므로 이 참조는 불필요·유해 → 제거.
+_IMG_TAG_RE = re.compile(r'<img\b[^>]*\bsrc=["\']imgs/[^"\']*["\'][^>]*/?>', re.I)
+_MD_IMG_RE = re.compile(r'!\[[^\]]*\]\(imgs/[^)]*\)')
+_BARE_IMG_RE = re.compile(r'^[ \t]*imgs/[^\s]+\.(?:jpg|jpeg|png|webp|bmp|tiff?)[ \t]*$',
+                          re.I | re.M)
+
+
+def _strip_gateway_image_refs(md: str) -> str:
+    """게이트웨이 상대경로 이미지 참조(imgs/...) 제거 — <img>·마크다운·맨몸 경로. 내용 보존."""
+    if not md or "imgs/" not in md:
+        return md
+    md = _IMG_TAG_RE.sub("", md)
+    md = _MD_IMG_RE.sub("", md)
+    md = _BARE_IMG_RE.sub("", md)
+    return md
 
 
 def _render_pages(file_bytes: bytes):
@@ -131,6 +151,7 @@ def run_paddle_gateway(pdf_bytes: bytes, filename: str) -> list[dict]:
                 raise  # 첫 페이지 실패 = 게이트웨이 불능 → 레인 포기(즉시 폴백)
             log.exception("paddle_gw page %d failed (%s)", rp.page_number, filename)
             return rp.page_number, []
+        md = _strip_gateway_image_refs(md)   # imgs/ 죽은 참조 제거(UI 404 방지)
         blocks = hybrid_to_blocks(md, page_idx=rp.page_number)
         return rp.page_number, blocks
 

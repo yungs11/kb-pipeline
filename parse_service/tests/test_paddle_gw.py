@@ -193,3 +193,28 @@ def test_raw_json_layout_response_retried_once(monkeypatch):
     md = paddle_gw._post_page(b"jpeg", "page-10.jpeg")
     assert submits["n"] == 2, "raw JSON 1회 재시도"
     assert "<table>" in md and not md.strip().startswith("[{")
+
+
+# ---- 게이트웨이 죽은 이미지참조 제거 (2026-07-16: imgs/img_in_image_box_*.jpg → UI 404) ----
+
+def test_strip_dead_image_refs():
+    """게이트웨이가 넣는 imgs/ 상대경로 이미지 참조는 게이트웨이 서버에만 존재 → 제거.
+    <img> 태그·마크다운 이미지·맨몸 경로 모두. 표/텍스트 내용은 보존."""
+    md = ('<table><tr><td>등록번호 <img src="imgs/img_in_image_box_462_887.jpg" alt="Image" /></td>'
+          '<td>195511-</td></tr></table>\n\n'
+          '전주지방법원 전주등기소\n\n'
+          'imgs/img_in_image_box_673_806.jpg\n\n'
+          '![Image](imgs/img_in_image_box_1_2.jpg)\n\n'
+          '※ 등기필정보 사용방법')
+    out = paddle_gw._strip_gateway_image_refs(md)
+    assert "img_in_image_box" not in out
+    assert "imgs/" not in out
+    assert "등록번호" in out and "195511-" in out   # 표 내용 보존
+    assert "전주지방법원 전주등기소" in out
+    assert "등기필정보 사용방법" in out
+    assert "<table>" in out and "</table>" in out   # 표 구조 보존
+
+
+def test_strip_keeps_real_content_untouched():
+    md = "# 제목\n\n<table><tr><td>정상 표</td></tr></table>\n\n본문 텍스트"
+    assert paddle_gw._strip_gateway_image_refs(md) == md
