@@ -224,6 +224,7 @@ def test_paddle_gw_diagram_pages_replaced_by_vl(monkeypatch):
     monkeypatch.setattr(pg, "run_paddle_gateway", lambda fb, fn: [
         {"page_number": 1, "blocks": [{"type": "text", "text": "p1", "page_idx": 1}]},
         {"page_number": 2, "blocks": [
+            {"type": "text", "text": "Ⅱ. 소유권이전 업무순서도", "text_level": 2, "page_idx": 2},  # 제목(heading)
             {"type": "image", "img_path": "imgs/x.jpg", "image_caption": [], "page_idx": 2},
             {"type": "text", "text": "소유궁이전 조각", "page_idx": 2},  # 게이트웨이 OCR 오타 조각
         ]},
@@ -240,6 +241,8 @@ def test_paddle_gw_diagram_pages_replaced_by_vl(monkeypatch):
     res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
     p2 = next(p for p in res.pages if p["page_number"] == 2)
     assert any("START→요청" in (b.get("text") or "") for b in p2["blocks"]), "VL 서술 존재"
+    assert any(b.get("text_level") and "업무순서도" in b.get("text", "")
+               for b in p2["blocks"]), "제목(heading) 블록은 보존"
     assert not any(b["type"] == "image" for b in p2["blocks"]), "죽은 이미지참조 제거"
     assert not any("소유궁이전" in (b.get("text") or "") for b in p2["blocks"]), "OCR 조각 제거"
     p1 = next(p for p in res.pages if p["page_number"] == 1)

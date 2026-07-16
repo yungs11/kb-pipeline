@@ -213,6 +213,10 @@ def _supplement_diagram_pages(pages: list, file_bytes: bytes, diagram_pages: tup
         for b in extra:
             b["page_idx"] = pno
         if replace and extra:
-            entry["blocks"] = extra
+            # 교체 모드(paddle_gw): 게이트웨이 OCR 조각·죽은 이미지참조는 버리되, 게이트웨이가
+            # 제대로 읽은 **제목(heading = text_level 보유)** 은 보존한다(2026-07-16, "Ⅱ.업무순서도"
+            # 유실 실관측). heading + VL 서술 순으로 재구성.
+            headings = [b for b in entry["blocks"] if b.get("text_level")]
+            entry["blocks"] = headings + extra
         else:
             entry["blocks"].extend(extra)
