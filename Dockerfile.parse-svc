@@ -36,4 +36,4 @@ COPY parse_service ./parse_service
 # parse_service/app.py 가 runtime에 `from service.llm import get_text_llm` 을 lazy import함
 COPY service ./service
 EXPOSE 19001
-CMD ["gunicorn","-k","uvicorn.workers.UvicornWorker","-w","4","-b","0.0.0.0:19001","--timeout","1800","parse_service.app:app"]
+CMD ["gunicorn","-k","uvicorn.workers.UvicornWorker","-w","4","-b","0.0.0.0:19001","--timeout","3600","parse_service.app:app"]
