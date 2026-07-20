@@ -132,6 +132,7 @@ services:
       ADAPTIVE_CHUNK_RERANK_API_KEY: ${ADAPTIVE_CHUNK_RERANK_API_KEY}
       ADAPTIVE_CHUNK_COREF_LLM_MODEL: ${ADAPTIVE_CHUNK_COREF_LLM_MODEL}
       ADAPTIVE_CHUNK_COREF_REASONING: ${ADAPTIVE_CHUNK_COREF_REASONING}
+    ports: ["18060:18060"]   # 호스트 facade(:18060) 접근용 (2026-07-20)
     networks: [kbp]
     healthcheck:
       test: ["CMD","curl","-fsS","http://localhost:18060/healthz"]
