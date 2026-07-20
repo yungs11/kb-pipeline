@@ -73,8 +73,8 @@ services:
       # HOST/PORT (not EDGEQUAKE_HOST/EDGEQUAKE_PORT) — edgequake main.rs reads these
       HOST: 0.0.0.0
       PORT: "8081"
-      EDGEQUAKE_DEFAULT_LLM_MODEL: qwen/qwen3.5-9b
-      EDGEQUAKE_LLM_MODEL: qwen/qwen3.5-9b   # prevents COMPAT-GUARD downgrade bug
+      EDGEQUAKE_DEFAULT_LLM_MODEL: qwen/qwen3.5-122b-a10b
+      EDGEQUAKE_LLM_MODEL: qwen/qwen3.5-122b-a10b   # prevents COMPAT-GUARD downgrade bug
       EDGEQUAKE_LLM_DISABLE_REASONING: "1"   # qwen reasoning off(키워드추출 30-55s→수초, 2026-07-16)
       EDGEQUAKE_EXTRACTION_LANGUAGE: Korean   # 엔티티/관계 설명 한글 저장(미설정 시 영어 강제, 2026-07-16)
       EDGEQUAKE_EMBEDDING_PROVIDER: openai

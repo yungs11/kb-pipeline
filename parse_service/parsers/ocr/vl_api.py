@@ -186,6 +186,10 @@ def _build_payload(base64_image: str, user_prompt: str, system_prompt: str) -> D
         "max_tokens": int(max_tokens),
         "temperature": 0.1
     }
+    # OpenRouter reasoning off — qwen3.5 등 reasoning 모델이 OCR/서술에 수천 토큰 think 를
+    # 생성해 느려지는 것 방지(KBP_VL_DISABLE_REASONING, 기본 on). edgequake 와 동일 정책.
+    if os.environ.get("KBP_VL_DISABLE_REASONING", "1").lower() not in ("0", "false", "off", ""):
+        payload["reasoning"] = {"enabled": False}
     return _apply_guided_json(payload)
 
 
