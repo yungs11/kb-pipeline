@@ -25,6 +25,7 @@ handlers:
 """
 from __future__ import annotations
 
+import re
 import time
 
 import httpx
@@ -35,6 +36,14 @@ _TENANT_ID = "00000000-0000-0000-0000-000000000002"
 #: chunk texts with this; edgequake's PassthroughStrategy splits on the same byte so
 #: the stored chunks match the upstream chunker's chunks exactly.
 PASSTHROUGH_SEP = chr(0x1E)
+
+#: 〈MODAL …〉 open 마커(U+3008/U+3009). 청킹 원자화 후 역할이 끝나므로 적재 직전 스트립한다.
+_MODAL_OPEN_RE = re.compile(r"〈MODAL[^〉]*〉")
+
+
+def _strip_modal(s: str) -> str:
+    """원자경계 마커(〈MODAL…〉·〈/MODAL〉)만 제거, 내부(제목+raw table HTML+각주)는 보존."""
+    return _MODAL_OPEN_RE.sub("", s.replace("〈/MODAL〉", ""))
 
 
 class EdgequakeClient:
@@ -363,6 +372,9 @@ class EdgequakeClient:
         returning the stable ``{document_id, chunk_count, status}`` shape where
         ``status`` is ``"indexed"`` on a terminal-OK success and ``"failed"`` otherwise.
         """
+        # 저장 공통싱크: /insert·/ingest 양쪽 edgequake 적재를 여기서 커버 — 마커 스트립
+        # (마커는 청킹 원자화 전용, 저장물엔 남기지 않음). 내부 내용(제목+표+각주)은 보존.
+        chunk_texts = [_strip_modal(c) for c in chunk_texts]
         content = PASSTHROUGH_SEP.join(chunk_texts)
         res = self.submit_document(content, workspace_id=workspace_id,
                                    tenant_id=tenant_id, filename=title,

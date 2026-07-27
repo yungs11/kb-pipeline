@@ -8,8 +8,23 @@ surfacing the real selection rationale (method_selected/scores/methods_compared)
 """
 from fastapi.testclient import TestClient
 
-from service.app import app, get_adaptive_chunk
+from service.app import app, get_adaptive_chunk, _strip_modal
+from service.edgequake import _strip_modal as _strip_modal_eq
 from service.adaptive_chunk import MODAL_ATOMIC_MARKERS
+
+
+def test_strip_modal_removes_only_markers_preserving_content():
+    """_strip_modal 은 원자경계 마커만 제거하고 내부(제목+raw table HTML+각주)는 보존한다.
+    facade 두 지점(app/edgequake)의 헬퍼가 동일 동작이어야 한다."""
+    s = '〈MODAL id="T1" type="table"〉제목\n<table><tr><td>x</td></tr></table>※각주〈/MODAL〉'
+    expected = "제목\n<table><tr><td>x</td></tr></table>※각주"
+    assert _strip_modal(s) == expected
+    assert _strip_modal_eq(s) == expected               # 두 헬퍼 동일 동작
+    # 마커 없는 평문은 무변경.
+    assert _strip_modal("plain text") == "plain text"
+    # 여러 마커.
+    two = "〈MODAL id=\"a\"〉A〈/MODAL〉 mid 〈MODAL id=\"b\"〉B〈/MODAL〉"
+    assert _strip_modal(two) == "A mid B"
 
 
 class FakeAdaptiveChunk:
@@ -19,11 +34,12 @@ class FakeAdaptiveChunk:
         self.calls = []
 
     def chunk(self, *, text, doc_name, atomic_markers,
-              page_spans=None, pages=None,
+              page_spans=None, pages=None, blocks=None,
               methods=None, skip_scoring=False, llm_regex_pattern=None):
         self.calls.append({"text": text, "doc_name": doc_name,
                            "atomic_markers": atomic_markers,
                            "page_spans": page_spans, "pages": pages,
+                           "blocks": blocks,
                            "methods": methods, "skip_scoring": skip_scoring,
                            "llm_regex_pattern": llm_regex_pattern})
         # adaptive_chunk R1 shape (runner.run_chunk): chunks carry chunk_text/chunk_pages.
@@ -60,13 +76,15 @@ def test_chunk_normalizes_response_and_passes_modal_markers():
     assert j["methods_compared"][0]["selected"] is True
 
     # chunks normalized: chunk_text->text, chunk_pages->pages; index/titles preserved.
+    # 응답 text 는 표시싱크라 마커 스트립됨(〈MODAL…〉TBL〈/MODAL〉 → "TBL"). 내부 내용 보존.
     assert j["chunks"] == [
         {"chunk_index": 0, "text": "alpha", "titles_context": "## H", "pages": [1]},
-        {"chunk_index": 1, "text": "〈MODAL id=\"x\"〉TBL〈/MODAL〉",
+        {"chunk_index": 1, "text": "TBL",
          "titles_context": "## H2", "pages": [2]},
     ]
 
     # the enriched content + modal atomic markers were forwarded to the hub.
+    # 청킹 INPUT(call["text"]) 은 마커 유지 — 원자화에 필요(스트립은 응답/저장싱크만).
     assert len(fake.calls) == 1
     call = fake.calls[0]
     assert call["text"] == body["enriched_content"]
@@ -81,6 +99,37 @@ def test_chunk_normalizes_response_and_passes_modal_markers():
     assert call["methods"] is None
     assert call["skip_scoring"] is False
     assert call["llm_regex_pattern"] is None
+
+    app.dependency_overrides.clear()
+
+
+def test_chunk_response_strips_modal_markers_but_keeps_content():
+    """표시싱크 배선: 마커든 chunk_text → /chunk 응답 text 는 마커 0, 내부(제목+표+각주)
+    보존. 청킹 INPUT(call["text"]) 은 마커 유지 — 미래 수정이 마커 재노출 못하게 고정."""
+    fake = FakeAdaptiveChunk()
+
+    def _resp(**kw):
+        fake.calls.append(kw)
+        return {
+            "method_selected": "recursive", "scores": {}, "methods_compared": [],
+            "chunks": [
+                {"chunk_index": 0,
+                 "chunk_text": '〈MODAL id="T1" type="table"〉제목줄\n<table><tr><td>y</td></tr></table>※각주줄〈/MODAL〉',
+                 "chunk_pages": [1], "titles_context": None},
+            ],
+        }
+
+    fake.chunk = _resp  # type: ignore[assignment]
+    app.dependency_overrides[get_adaptive_chunk] = lambda: fake
+    c = TestClient(app)
+    body = {"enriched_content": '〈MODAL id="T1" type="table"〉제목줄〈/MODAL〉', "doc_name": "d"}
+    r = c.post("/chunk", json=body)
+    assert r.status_code == 200
+    text = r.json()["chunks"][0]["text"]
+    assert "〈MODAL" not in text and "〈/MODAL〉" not in text
+    assert "제목줄" in text and "<table><tr><td>y</td></tr></table>" in text and "※각주줄" in text
+    # 청킹 INPUT 은 마커 유지(원자화용).
+    assert fake.calls[0]["text"] == body["enriched_content"]
 
     app.dependency_overrides.clear()
 

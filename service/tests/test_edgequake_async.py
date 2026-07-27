@@ -250,6 +250,36 @@ def test_insert_chunks_skip_graph_propagates_to_submit_body():
     assert "metadata" not in bodies[0]
 
 
+def test_insert_chunks_strips_modal_markers_from_stored_content():
+    """저장싱크: 마커든 chunk_texts → edgequake 로 넘기는 content 에 〈MODAL〉 리터럴 0,
+    내부 내용(제목+표+각주)은 보존. /insert·/ingest 양경로 공통 choke."""
+    bodies = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/api/v1/documents":
+            import json
+            bodies.append(json.loads(request.content))
+            return httpx.Response(201, json={
+                "document_id": DOC, "status": "pending", "task_id": "t", "track_id": "t",
+            })
+        if request.method == "GET" and request.url.path == f"/api/v1/documents/{DOC}":
+            return httpx.Response(200, json={"id": DOC, "status": "completed", "chunk_count": 2})
+        raise AssertionError(f"unexpected {request.method} {request.url.path}")
+
+    eq = _client_with(handler)
+    eq.insert_chunks(
+        workspace_id=WS, tenant_id=TENANT, title="t",
+        chunk_texts=['〈MODAL id="T1" type="table"〉제목\n<table><tr><td>x</td></tr></table>※각주〈/MODAL〉',
+                     "plain chunk"],
+        poll_interval=0,
+    )
+    content = bodies[0]["content"]
+    assert "〈MODAL" not in content and "〈/MODAL〉" not in content
+    # 내부 내용은 보존.
+    assert "제목" in content and "<table><tr><td>x</td></tr></table>" in content
+    assert "※각주" in content and "plain chunk" in content
+
+
 def test_document_phase_maps_status_to_phase():
     """document_phase maps the live document status into a coarse UI phase."""
     cases = [

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import re
 import time
 from typing import Callable
 
@@ -79,6 +80,52 @@ def _gather_after_window(blocks: list[dict], i: int, consumed: set[int]) -> list
         out.append((j, blocks[j].get("text", "")))
         j += 1
     return out
+
+
+# --- heuristic title/footnote absorption (LLM-free, pure) ---------------------
+# enrich_modals=False & wrap_modals=True 경로(shipped 기본)는 LLM 을 안 부르므로 제목/각주
+# 흡수를 길이·prefix 휴리스틱으로 판정한다. tokenizer 불요 — 순수 함수라 단위테스트 가능.
+
+#: 제목형 prefix: [단위…/서식…/별표…/제 N…  (대괄호·소괄호 optional).
+_TITLE_PREFIX_RE = re.compile(r"^[\[\(]?(단위|서식|별표|제\s*\d)")
+#: 항목번호형 prefix: ①..⑳ / ㄱ..ㅎ / 숫자 뒤에 . 또는 ) — 예 "① 항목", "1) ...".
+_TITLE_ITEMNUM_RE = re.compile(r"^[①-⑳ㄱ-ㅎ\d]+[.)]")
+#: 각주형 prefix.
+_FOOTNOTE_PREFIX = ("※", "*", "주)", "[단위", "(단위")
+
+
+def _heuristic_title(before: list[tuple[int, str]]) -> int:
+    """직전 **1블록**이 제목형이면 tc=1, 아니면 0 (nearest-first 이므로 before[0]).
+
+    제목형 = 짧음(<=40자) OR 끝이 '#'(서식) OR 제목/서식 prefix OR 항목번호 prefix.
+    긴 산문 단락은 제목이 아님(0). LLM 없이 길이·prefix 로만 판정한다.
+    """
+    if not before:
+        return 0
+    text = (before[0][1] or "").strip()
+    if not text:
+        return 0
+    if (len(text) <= 40 or text.endswith("#")
+            or _TITLE_PREFIX_RE.match(text) or _TITLE_ITEMNUM_RE.match(text)):
+        return 1
+    return 0
+
+
+def _heuristic_footnote(after: list[tuple[int, str]]) -> int:
+    """직후로 **연속으로** 각주 prefix(※·*·주)·[단위·(단위)로 시작하는 블록 개수 = fc."""
+    fc = 0
+    for _, t in after:
+        if (t or "").lstrip().startswith(_FOOTNOTE_PREFIX):
+            fc += 1
+        else:
+            break
+    return fc
+
+
+#: oversize 안전상한(문자). bge-m3 윈도우 8192tok, ~2.3char/tok → 6000tok≈13800자.
+#: 조립될 span 전체(title+summary+payload+footnote) 추정치가 이보다 크면 bare 로 강등해
+#: atomic 원자화로 못 쪼개지는 ContextWindowExceeded 를 방지한다(초과 오판=bare 안전측).
+_OVERSIZE_CHARS = 13800
 
 
 # --- boundary LLM response parser (pure) --------------------------------------
@@ -200,7 +247,9 @@ def _assemble(
             continue
         if i in decisions:
             d = decisions[i]
-            if wrap_modals:
+            # per-decision bare(oversize 가드): wrap_modals=True 여도 이 table 은 마커 없이
+            # payload 만 emit — 원자화하면 bge-m3 윈도우 초과로 못 쪼개져 적재실패하기 때문.
+            if wrap_modals and not d.get("bare", False):
                 title = "\n".join(blocks[j].get("text", "") for j in d["title_idxs"])
                 footnote = "\n".join(blocks[j].get("text", "") for j in d["footnote_idxs"])
                 seg = _wrap(
@@ -208,10 +257,9 @@ def _assemble(
                     title=title, footnote=footnote,
                 )
             else:
-                # 모달 비활성: 〈MODAL〉 래핑 없이 OpenDataLoader 원본 payload 를 그대로 통과.
-                # 제목/각주는 흡수 0(tc=fc=0)이라 인접 text 블록으로 남고, atomic 마커가 없으니
-                # recursive 청커가 제목·표·각주를 자연스럽게 한 청크로 묶는다(표가 제목/각주에서
-                # 떨어져 나가 청크가 깨지던 문제 해소).
+                # 모달 비활성(wrap_modals=False) 또는 oversize bare: 〈MODAL〉 래핑 없이
+                # OpenDataLoader 원본 payload 를 그대로 통과. 제목/각주는 흡수 0(tc=fc=0)이라
+                # 인접 text 블록으로 남는다(무손실). decision 은 유지되므로 table drop 없음.
                 seg = d["payload"]
             segments.append(seg)
             seg_page_idx.append(int(blocks[i].get("page_idx", 0) or 0))
@@ -232,16 +280,22 @@ def _enrich_core(
     max_workers: int,
     timing_sink: dict | None = None,
     enrich_modals: bool = True,
+    wrap_modals: bool = True,
 ) -> tuple[dict[int, dict], set[int], list[str]]:
     """Phase A–C 공통 코어 — ``(decisions, consumed, modal_ids)`` 를 반환.
 
     enrich / enrich_with_spans 가 공유한다. 모달 식별·LLM 병렬 호출·충돌 해소까지 수행하고
     Phase D 조립은 호출자가 ``_assemble`` 로 한다. modal_ids 는 문서순(흡수되지 않은 모달).
 
-    ``enrich_modals=False`` 면 **모달 LLM 을 호출하지 않고**(Phase B 스킵) 각 모달을
-    요약 없음·흡수 0(``summary=""``, ``tc=fc=0``)으로 강등한다 — 즉 OpenDataLoader 원본
-    payload 를 그대로 ``〈MODAL〉…〈/MODAL〉`` 로 감싸 통과시킨다(원자성·page_spans 유지,
-    LLM 0 회). LLM 실패 폴백과 byte-동일한 경로다.
+    ``enrich_modals`` 와 ``wrap_modals`` 는 **분리**된 스위치다:
+      * ``enrich_modals=False`` → **모달 LLM 을 호출하지 않는다**(Phase B 스킵). 요약은 빈
+        문자열, 제목/각주 흡수는 LLM 대신 휴리스틱(``_heuristic_title/_footnote``)으로 판정.
+      * ``wrap_modals`` → Phase C **consume**(제목/각주를 모달 안으로 흡수)과 _assemble 의
+        마커 래핑을 켠다/끈다. **False 면** consume 을 스킵해 제목/각주가 일반 text 블록으로
+        남고(무손실) _assemble 이 마커 없이 payload 만 통과한다. **단 decisions 는 항상
+        채운다**(빈 idxs 로라도) — 안 채우면 _assemble 이 table 을 drop(데이터 유실).
+      * oversize(조립 span 추정 > ``_OVERSIZE_CHARS``)면 tc/fc 를 0 으로 강제하고 그 decision 에
+        ``bare=True`` 를 세워, wrap_modals=True 여도 마커 없이 payload 만 emit(적재실패 방지).
     """
     if max_workers < 1:
         raise ValueError(f"max_workers must be >= 1, got {max_workers}")
@@ -302,10 +356,15 @@ def _enrich_core(
 
     modal_wall_ms = 0.0
     if not enrich_modals:
-        # 모달 LLM 비활성(KBP_MODAL_ENRICH=0): LLM 0 회 — 각 모달을 요약 없음·흡수 0 으로
-        # 강등해 OpenDataLoader 원본 payload 를 그대로 〈MODAL〉 로 감싼다(원자성 유지).
+        # 모달 LLM 비활성(KBP_MODAL_ENRICH=0): LLM 0 회. 요약은 빈 문자열. 제목/각주 흡수는
+        # wrap_modals=True 면 휴리스틱(길이·prefix)으로, False 면 흡수 0(Phase C 게이트).
         for m in modals:
-            m["summary"], m["tc"], m["fc"] = "", 0, 0
+            m["summary"] = ""
+            if wrap_modals:
+                m["tc"] = _heuristic_title(m["before"])
+                m["fc"] = _heuristic_footnote(m["after"])
+            else:
+                m["tc"], m["fc"] = 0, 0
     elif modals:
         workers = min(max_workers, len(modals))  # max_workers>=1 검증됨; modals 비어있지 않음
         _b0 = time.perf_counter()
@@ -331,27 +390,42 @@ def _enrich_core(
             "per_call_ms": sorted((round(ms, 1) for _, ms in _call_ms), reverse=True)[:20],
         })
 
+    # A-guard(oversize): 조립될 span 전체(흡수 title+summary+payload+footnote) 추정치가
+    # _OVERSIZE_CHARS 초과면 tc/fc=0 강제(흡수·마커 없이 제목/각주 무손실) + bare 표시.
+    # 휴리스틱·LLM 경로 공통 — 임의 미래문서(다페이지 대형표)의 임베딩 초과를 막는다.
+    for m in modals:
+        title_est = sum(len(t) for _, t in m["before"][:m["tc"]])
+        foot_est = sum(len(t) for _, t in m["after"][:m["fc"]])
+        span_est = len(m["summary"]) + len(m["body"]) + title_est + foot_est
+        m["bare"] = span_est > _OVERSIZE_CHARS
+        if m["bare"]:
+            m["tc"], m["fc"] = 0, 0
+
     # Phase C — 충돌 해소(문서순; 앞 모달 우선, 모달에서 연속, consumed 만나면 중단).
+    # consume(제목/각주 흡수)만 wrap_modals 게이트 — decisions 는 **항상** 채워야 table 이
+    # _assemble 에서 drop(데이터 유실)되지 않는다.
     consumed: set[int] = set()
     decisions: dict[int, dict] = {}
     modal_ids: list[str] = []
     for m in modals:
         title_idxs: list[int] = []
-        for idx, _ in m["before"][:m["tc"]]:
-            if idx in consumed:
-                break
-            title_idxs.append(idx)
         footnote_idxs: list[int] = []
-        for idx, _ in m["after"][:m["fc"]]:
-            if idx in consumed:
-                break
-            footnote_idxs.append(idx)
-        consumed.update(title_idxs)
-        consumed.update(footnote_idxs)
+        if wrap_modals:
+            for idx, _ in m["before"][:m["tc"]]:
+                if idx in consumed:
+                    break
+                title_idxs.append(idx)
+            for idx, _ in m["after"][:m["fc"]]:
+                if idx in consumed:
+                    break
+                footnote_idxs.append(idx)
+            consumed.update(title_idxs)
+            consumed.update(footnote_idxs)
         decisions[m["i"]] = {
             "modal_id": m["modal_id"], "modal_type": m["type"], "payload": m["body"],
             "summary": m["summary"],
             "title_idxs": sorted(title_idxs), "footnote_idxs": sorted(footnote_idxs),
+            "bare": m["bare"],
         }
 
     # modal_ids: 문서순으로 (흡수되지 않은) 모달만 — _assemble 출력 순서와 일치.
@@ -371,6 +445,7 @@ def enrich(
     vision_llm: Callable[[str, str], str] | None,
     max_workers: int = 8,
     enrich_modals: bool = True,
+    wrap_modals: bool = True,
 ) -> tuple[str, list[str]]:
     """Enrich blocks into a single content string + ordered modal ids.
 
@@ -389,9 +464,9 @@ def enrich(
     """
     decisions, consumed, modal_ids = _enrich_core(
         blocks, text_llm=text_llm, vision_llm=vision_llm, max_workers=max_workers,
-        enrich_modals=enrich_modals,
+        enrich_modals=enrich_modals, wrap_modals=wrap_modals,
     )
-    segments, _ = _assemble(blocks, decisions, consumed, wrap_modals=enrich_modals)
+    segments, _ = _assemble(blocks, decisions, consumed, wrap_modals=wrap_modals)
     return _SEGMENT_JOIN.join(segments), modal_ids
 
 
@@ -403,6 +478,7 @@ def enrich_with_spans(
     max_workers: int = 8,
     timing_sink: dict | None = None,
     enrich_modals: bool = True,
+    wrap_modals: bool = True,
 ) -> tuple[str, list[str], list[dict]]:
     """``enrich`` 와 동일하게 조립하되, page 별 char-span 도 함께 산출한다(spec 5.1.4).
 
@@ -424,9 +500,9 @@ def enrich_with_spans(
     """
     decisions, consumed, modal_ids = _enrich_core(
         blocks, text_llm=text_llm, vision_llm=vision_llm, max_workers=max_workers,
-        timing_sink=timing_sink, enrich_modals=enrich_modals,
+        timing_sink=timing_sink, enrich_modals=enrich_modals, wrap_modals=wrap_modals,
     )
-    segments, seg_page_idx = _assemble(blocks, decisions, consumed, wrap_modals=enrich_modals)
+    segments, seg_page_idx = _assemble(blocks, decisions, consumed, wrap_modals=wrap_modals)
     enriched = _SEGMENT_JOIN.join(segments)
 
     # 페이지별 [min char_start, max char_end) 를 running offset 으로 누적.

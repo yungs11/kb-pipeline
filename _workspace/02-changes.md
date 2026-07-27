@@ -4,6 +4,22 @@
 
 ---
 
+## 0-C. 표(table) 원자 보존 — 〈MODAL〉 wrap + page 방법 marker-aware 제외 (4레포, 2026-07-27)
+
+**문제**: 대형 문서에서 청커가 `<table>` HTML 을 청크 경계에서 `<td` 중간에 쪼개 렌더 깨짐 + 검색 시 행 손실. 실측(소장 46p): table 포함 청크의 **55%(22/40)가 쪼개짐**. test_doc(신탁 3p, 3/8)보다 훨씬 심각. 가중치 튜닝(bi.40)으로는 불가 — 모든 청킹 방법이 대량 쪼갬.
+
+**해법(MODAL wrap, LLM 0회)**: 파서가 table 을 `〈MODAL type="table"〉[직전제목]<table>…</table>[직후각주]〈/MODAL〉` 원자 마커로 감싼다(U+3008/U+3009). 청커가 `MODAL_ATOMIC_MARKERS` 로 이 스팬을 통째 보존. **실측: 소장 table 쪼갬 22→0**(recursive_1100 = 86청크, split 0). LLM summary 없이도 마커 유효 → 비용 0.
+- **wrap_modals 분리**: 기존엔 마커 wrap 이 LLM enrich(`KBP_MODAL_ENRICH`)에 하드 커플. 신규 env `KBP_MODAL_WRAP`(기본 "1"=on)로 분리 — wrap 은 항상, LLM summary 는 별도. (`kb_pipeline/modal.py` `_enrich_core`/`enrich`/`enrich_with_spans` 에 `wrap_modals` 스레딩, `_assemble` per-decision `bare` 플래그.)
+- **휴리스틱 제목/각주 흡수(LLM 0)**: 직전 1블록이 제목형(≤40자·`#`끝·`단위/서식/별표/제N`·항목번호)이면 흡수, 직후 `※/*/주)/[단위/(단위` 연속블록을 각주로 흡수. Phase C consume 은 `wrap_modals=True` 게이트(off 시 무손실 불변, decision 은 항상 유지 = drop 방지).
+- **oversize 가드**: 조립 span(제목+표+각주) >~13800자(≈6000토큰, bge-m3 8192 마진)면 `bare=True` → 마커 없이 emit(쪼갬 허용). 다페이지 대형표 ContextWindowExceeded 방지.
+- **마커 스트립(백엔드 2지점, 프론트 무수정)**: facade `service/edgequake.py insert_chunks`(적재 공통싱크 — /insert·/ingest 커버) + `service/app.py /chunk 응답`(chunks_meta 표시사본 커버). `_strip_modal` = `〈MODAL…〉`·`〈/MODAL〉` 만 제거, 내부(제목+표+각주) 보존. 청킹 입력(`text=`)은 마커 유지. **실측: 저장/표시 청크 마커 0**.
+
+**후속 버그 발견·수정 — PageSplitter × marker-aware 비호환**: MODAL wrap 이 활성화한 기존 잠복 버그. marker-aware 경로(`service/runner.py`)는 gap 마다 선택된 splitter 를 개별 실행하는데, `PageSplitter.split(doc)` 은 `doc`(gap) 인자를 무시하고 `self.parsed.pages`(전체 문서 페이지)를 반환(`splitters/page.py:64`) → **gap 수 × 전체 페이지 중복 → 청크 폭증(소장 26마커→1832청크)**. **수정**: marker-aware(has_atomic=True)일 때 specs 에서 `page` 방법 제외(`gap_specs`), page 는 "전체 문서 페이지 경계" 기반이라 gap 단위 실행과 구조적 비호환. selected_spec 조회도 gap_specs 로 통일. (adaptive_chunk `service/runner.py`, 유닛 117 pass.)
+
+**부수 수정**: 앞선 정식 BI 배선(0-D 참조) 잔재 — `service/tests/test_chunk_endpoint.py` 의 `FakeAdaptiveChunk.chunk()` 에 `blocks` kwarg 누락으로 5개 red → `blocks=None` 추가.
+
+**검증**: 파싱 단위 소장 enriched 마커 26=table 26=modal_spans 26. recursive_1100 = 86청크 쪼갬 0. facade `/chunk` 응답 마커 0. 유닛 parse-svc/facade 83 pass + adaptive 117 pass. **비고**: 큰 문서 auto 청킹은 스코어링(coref/임베딩) 때문에 수분 소요(정상, job_timeout 3600). **미완**: full end-to-end 적재→검색→렌더 원샷 재확인(세션 전환으로 서비스 다운, 조각별로는 검증됨), 4레포 커밋.
+
 ## 0-B. 그룹 기반 KB 접근제어 + Postgres 통합 (설계 확정·계획, 2026-07-04)
 
 **요구**: KB 생성 시 **그룹 하나**를 지정하고, 그 그룹 멤버만 해당 KB 를 읽기/검색. 그룹엔 유저 N명(계속 추가 가능),
@@ -220,3 +236,21 @@ knowledge_base plan `23_plan_chunk_method_selection.md` §B 반영. adaptive_chu
 **불변식 유지**: 표 `<table>` HTML 보존 / 모달 U+3008·U+3009(blockify 경유) / page_idx 1-based / 청크 KB당 단일우주(blocks 만, 청킹=facade `/chunk`) / in-process(mineru 라이브러리 import, VLM 만 원격).
 
 **검증**: 로컬 단위검증 35 passed(triage 10·gate 11·mineru_lane 4·routing 5·기존 pdf 5). 회귀 0(기존 red 5건=minio auto-create + 모달 `KBP_MODAL_ENRICH` 는 baseline 동일, MinerU 무관). 실 MinerU end-to-end 는 배포서버 스택검증 잔여(로컬 Intel Mac 미설치).
+
+## 9. 동의어/구어 검색 실패 근본원인 수정 — 리랭커 (2026-07-21)
+
+> 증상: edgequake 가 구어/동의어 쿼리("이사하는데 휴가 나오나?")에서 문서의 "거주지 이전시 : 1일"을 못 찾는데 raganything(rerank 없는 순수 벡터)은 성공. 격리실험(동일 9청크·bge-m3·122b LLM 을 raganything 워크스페이스에 적재)으로 임베딩/청킹/LLM 차이 아님을 배제.
+
+**근본원인(edgequake 디버그 로그로 확정)**: naive 벡터 회수는 정상 — 정답 청크 포함 **11개 후보 회수(recall 문제 아님)**. 진짜 관문은 `sota_engine/mod.rs`의 하드코딩 `min_rerank_score=0.1`. 리랭커가 **긴 다주제 청크**(제4조 청원휴가에 배우자출산·정기검진·거주지이전 혼재)의 "이사" 관련성을 희석 평가 → 정답 0.05, "휴가" 키워드만 든 노이즈(빈 표헤더·지름신 flowchart) 0.28~0.35. 정답이 0.1 컷에 탈락, naive 가 노이즈 3개만 반환. 후보 총 **579토큰** vs 예산 **10000토큰** → 필터링 자체가 불필요(다운스트림 truncation 이 토큰예산으로 이미 캡). 리랭커는 **재정렬**만 하면 됨.
+
+**수정(2개, 둘 다 필요)**:
+- **9a 리랭커 교체**(`crates/edgequake-api/src/state/mod.rs` `create_bm25_reranker()`): env(`EDGEQUAKE_RERANK_BASE_URL/MODEL/API_KEY`) 있으면 neural `HttpReranker`(litellm `/v1/rerank`, Qwen3-Reranker-0.6B, Standard 포맷), 없으면 BM25 폴백. BM25 는 어휘 겹침 없는 동의어 청크에 0.0 부여 → 컷. 재정렬 품질용.
+- **9b 임계값 env화**(`crates/edgequake-query/src/sota_engine/mod.rs`): `min_rerank_score` 를 `EDGEQUAKE_MIN_RERANK_SCORE` env 로(기본 0.1 유지, `min_score`의 `EDGEQUAKE_MIN_ENTITY_SCORE` 패턴 그대로). 배포는 **0.0** → 리랭커가 **필터가 아닌 재정렬 전용**. 실제 관문 해제.
+
+**배포 env**: `docker-compose.yml`(edgequake env: RERANK_* + `EDGEQUAKE_MIN_RERANK_SCORE: "0.0"` + `RUST_LOG: ${EQ_RUST_LOG:-info}`), `service/scripts/start_dedicated_edgequake.sh`(호스트 바이너리 레인 동일 env). **API키는 `.env`(gitignore)만, 하드코딩 금지**(사용자 제약).
+
+**검증**: 컨테이너 `kbp-edgequake-1`(:8081, facade→`edgequake:8081`) 재빌드·교체 후 — 리랭커 로그 `Using HTTP neural reranker … Qwen3-Reranker-0.6B` 확인, `EDGEQUAKE_MIN_RERANK_SCORE=0.0` 반영. "이사하는데 휴가 나오나?" → **naive 정답**(3→11 소스, "청원휴가·거주지 이전·1일"), **hybrid 정답**("거주지 이전시 : 1일" 원문+제4조 인용, 무회귀). 리랭커 배포 정상성도 별도 확인(깨끗한 문장엔 정답 0.744 vs 노이즈 0.14).
+
+**참고(빌드)**: edgequake `docker/Dockerfile` 에 cargo 캐시 마운트(registry+target) 추가했으나, 이번 빌드는 `FROM rust:bookworm` 이 툴체인을 1.95.0 으로 플로팅해 target 캐시 무효화(전량 재컴파일 91분). 캐시 이득 보려면 rust 베이스 태그 핀(`rust:1.xx-bookworm`) 필요 — 미결.
+
+**불변식 유지**: BGE-M3 1024d / 청크 KB당 단일우주 / 단일 Postgres+RLS. 리랭커는 검색 정렬 단계만 변경(적재·청킹 불변).

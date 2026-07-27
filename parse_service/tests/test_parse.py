@@ -32,11 +32,14 @@ def _no_render(_file_bytes):
     return []
 
 
-def test_run_parse_emits_timing_metrics():
+def test_run_parse_emits_timing_metrics(monkeypatch):
     """P2 모니터링: run_parse 가 timing_metrics(parse/modal/render 단계 + 모달 LLM 분해 +
-    카운터)를 additive 로 낸다 — 집계자가 파서 내부 단계 소요를 읽는다."""
+    카운터)를 additive 로 낸다 — 집계자가 파서 내부 단계 소요를 읽는다.
+
+    모달 LLM 분해(calls/by_type)를 검증하려면 enrich=on 이어야 한다(기본 off 는 LLM 0회)."""
     import parse_service.app as svc
 
+    monkeypatch.setenv("KBP_MODAL_ENRICH", "1")  # LLM 호출 분해 검증 → enrich on
     md = "## Heading\n\nbody text\n\n| a | b |\n| - | - |\n| 1 | 2 |\n"
     out = svc.run_parse(
         b"bytes", "doc.pdf",
@@ -55,11 +58,14 @@ def test_run_parse_emits_timing_metrics():
     assert isinstance(ml["wall_ms"], float)
 
 
-def test_run_parse_computes_enriched_and_modal_spans():
+def test_run_parse_computes_enriched_and_modal_spans(monkeypatch):
     """The core run_parse: parse→blockify→modal, with modal_spans located by
-    exact char offset in the enriched content (id/type/char_range)."""
+    exact char offset in the enriched content (id/type/char_range).
+
+    표 요약(TABLE_DESC)이 span 안에 있어야 하므로 enrich=on(기본 off 는 요약 생략)."""
     import parse_service.app as svc
 
+    monkeypatch.setenv("KBP_MODAL_ENRICH", "1")  # 요약(TABLE_DESC) 검증 → enrich on
     # A fake page parser that yields markdown with one text para and one pipe table.
     md = "## Heading\n\nbody text\n\n| a | b |\n| - | - |\n| 1 | 2 |\n"
     # Deterministic table description (no real LLM).
@@ -110,11 +116,14 @@ def test_run_parse_strips_pua_garbage():
     assert "휴가결근 신청서" in out["enriched_content"]
 
 
-def test_modal_span_covers_absorbed_title_and_footnote():
-    """제목·각주 흡수 후에도 modal_spans char_range 가 확장 span 전체를 가리킨다."""
+def test_modal_span_covers_absorbed_title_and_footnote(monkeypatch):
+    """제목·각주 흡수 후에도 modal_spans char_range 가 확장 span 전체를 가리킨다.
+
+    LLM 이 tc/fc 를 JSON 으로 판정하는 경로 검증 → enrich=on."""
     import json
     import parse_service.app as svc
 
+    monkeypatch.setenv("KBP_MODAL_ENRICH", "1")  # LLM tc/fc 판정 경로 → enrich on
     # text 단락 + 파이프표 + text 각주.
     md = "캡션줄\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\n각주줄\n"
 

@@ -210,10 +210,14 @@ def run_parse(file_bytes: bytes, filename: str, *,
     # 모달 LLM 동시호출 상한. 프록시(LiteLLM/Cloudflare) 과부하로 인한 524 를 줄이려고
     # 기본 3 으로 낮춘다(KBP_MODAL_MAX_WORKERS 로 조정; 524 잦으면 2/1 로).
     max_workers = max(1, int(os.environ.get("KBP_MODAL_MAX_WORKERS", "3")))
-    # 모달 LLM(표/이미지 검색요약 + 제목/각주 흡수) 토글. 기본 off — OpenDataLoader 원본
-    # payload 를 그대로 〈MODAL〉 로 통과시켜 LLM 0 회(속도↑). 〈MODAL〉 원자성·page_spans 는
-    # 유지되므로 청킹/페이지 지표엔 무영향(검색은 표 의미요약만 손실). KBP_MODAL_ENRICH=1 로 재활성.
+    # 모달 LLM(표/이미지 검색요약) 토글. 기본 off — LLM 0 회(속도↑). off 여도 아래 wrap 이
+    # 켜져 있으면 표는 〈MODAL〉 로 원자화되고 제목/각주는 휴리스틱으로 흡수된다(요약만 손실).
+    # KBP_MODAL_ENRICH=1 로 재활성하면 표/이미지 의미요약 + LLM 제목/각주 판정이 붙는다.
     enrich_modals = os.environ.get("KBP_MODAL_ENRICH", "0") != "0"
+    # 모달 wrap(〈MODAL〉 원자 마커) 토글 — enrich 와 **분리**. 기본 on: 표를 마커로 원자화해
+    # 청커가 <td> 중간에서 쪼개지 않게 한다(마커는 facade 적재 직전 스트립). KBP_MODAL_WRAP=0
+    # 이면 bare 통과(마커 없음 → 청커가 자연 그룹핑, 하위호환).
+    wrap_modals = os.environ.get("KBP_MODAL_WRAP", "1") != "0"
     modal_sink: dict = {}
     try:
         _t = time.perf_counter()
@@ -258,7 +262,8 @@ def run_parse(file_bytes: bytes, filename: str, *,
         enriched, _modal_ids, page_spans = enrich_with_spans(
             blocks, text_llm=text_llm, vision_llm=vision_llm, max_workers=max_workers,
             timing_sink=modal_sink,  # 모달 LLM(표/이미지 분석) 단계 분해
-            enrich_modals=enrich_modals,  # 기본 off → 원본 payload 통과(LLM 0회)
+            enrich_modals=enrich_modals,  # 기본 off → LLM 0회(요약 생략)
+            wrap_modals=wrap_modals,      # 기본 on → 표를 〈MODAL〉 마커로 원자화
         )
         modal_ms = (time.perf_counter() - _t) * 1000.0
     except ParserError:
@@ -282,6 +287,16 @@ def run_parse(file_bytes: bytes, filename: str, *,
     return {
         "enriched_content": enriched,
         "n_blocks": len(blocks),
+        # 정식 BI 배선(A): 파서가 이미 구조화한 table 블록을 청킹까지 노출한다.
+        # element key 통일 {category/content/page_number}. 빈 본문 table 은 제외
+        # (score_bi degrade 방지 — 폴백보다 나쁜 bi=None 회피). table_body 는 무변형
+        # 노출해야 enriched 내 table HTML 과 byte 정렬 → score_bi 위치탐색 적중.
+        "table_blocks": [
+            {"category": "table", "content": b.get("table_body") or "",
+             "page_number": b.get("page_idx")}
+            for b in blocks
+            if b.get("type") == "table" and (b.get("table_body") or "").strip()
+        ],
         "modal_spans": _modal_spans(enriched),
         "chunk_needed": True,
         "docs_id": docs_id,

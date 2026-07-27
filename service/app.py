@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 
 from fastapi import (FastAPI, UploadFile, File, Form, Depends, BackgroundTasks,
                      Body, Header, HTTPException)
@@ -29,6 +30,15 @@ logger = logging.getLogger("kb_pipeline.service")
 
 #: shinhan_trust default tenant (구 service/ingest.py 에서 이동 — Phase 2d).
 _TENANT_ID = "00000000-0000-0000-0000-000000000002"
+
+#: 〈MODAL …〉 open 마커(U+3008/U+3009). /chunk 응답 text 는 표시사본(chunks_meta)으로
+#: 저장되므로 마커를 스트립한다(청킹 INPUT 은 마커 유지 — 원자화용).
+_MODAL_OPEN_RE = re.compile(r"〈MODAL[^〉]*〉")
+
+
+def _strip_modal(s: str) -> str:
+    """원자경계 마커(〈MODAL…〉·〈/MODAL〉)만 제거, 내부(제목+raw table HTML+각주)는 보존."""
+    return _MODAL_OPEN_RE.sub("", s.replace("〈/MODAL〉", ""))
 
 
 def _safe_basename(name: str) -> str:
@@ -117,6 +127,7 @@ def chunk(enriched_content: str = Body(..., embed=True),
           doc_name: str = Body("", embed=True),
           page_spans: list | None = Body(None, embed=True),
           pages: list | None = Body(None, embed=True),
+          table_blocks: list | None = Body(None, embed=True),
           methods: list | None = Body(None, embed=True),
           skip_scoring: bool = Body(False, embed=True),
           llm_regex_pattern: str | None = Body(None, embed=True),
@@ -143,15 +154,19 @@ def chunk(enriched_content: str = Body(..., embed=True),
     runs its default auto behavior (every method competes, then scored/selected) —
     byte-identical to the legacy request (regression).
     """
+    # 정식 BI 배선(C): table_blocks(facade contract) → adaptive 는 blocks 로 이름 바뀜
+    # (ChunkRequest.blocks). end-to-end 로 table_blocks 이름을 쓰지 말 것.
     res = ac.chunk(text=enriched_content, doc_name=doc_name,
                    atomic_markers=MODAL_ATOMIC_MARKERS,
                    page_spans=page_spans, pages=pages,
+                   blocks=table_blocks,
                    methods=methods, skip_scoring=skip_scoring,
                    llm_regex_pattern=llm_regex_pattern)
     chunks = [
         {
             "chunk_index": ch.get("chunk_index"),
-            "text": ch.get("chunk_text", ""),
+            # 표시싱크: kb-backend 가 이 응답 text 를 chunks_meta 표시사본으로 저장 → 마커 스트립.
+            "text": _strip_modal(ch.get("chunk_text", "")),
             "titles_context": ch.get("titles_context"),
             "pages": ch.get("chunk_pages") or [],
         }

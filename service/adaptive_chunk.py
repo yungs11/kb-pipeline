@@ -40,7 +40,7 @@ _FAIL = ("failed", "cancelled")
 
 class AdaptiveChunkClient:
     def __init__(self, base_url: str, timeout: float = 600.0,
-                 poll_timeout: float = 1800.0, poll_interval: float = 3.0):
+                 poll_timeout: float = 3600.0, poll_interval: float = 3.0):
         self.base = base_url.rstrip("/")
         self.http = httpx.Client(timeout=timeout)
         self.poll_timeout = poll_timeout
@@ -50,6 +50,7 @@ class AdaptiveChunkClient:
               atomic_markers: list | None = None,
               page_spans: list | None = None,
               pages: list | None = None,
+              blocks: list | None = None,
               methods: list | None = None,
               skip_scoring: bool = False,
               llm_regex_pattern: str | None = None) -> dict:
@@ -101,6 +102,10 @@ class AdaptiveChunkClient:
             body["page_spans"] = page_spans
         if pages is not None:
             body["pages"] = pages
+        # 정식 BI 배선(C): table 원자 블록 [{category, content, page_number}] → adaptive
+        # ChunkRequest.blocks(정식 score_bi 입력). None 이면 미포함 → auto 경로 byte-동일.
+        if blocks is not None:
+            body["blocks"] = blocks
         r = self.http.post(
             f"{self.base}/chunk/jobs",
             json=body,

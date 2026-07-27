@@ -298,5 +298,156 @@ def test_spans_page_zero_explicit_kept_distinct():
             assert sliced == "two-page"
 
 
+# =============================================================================
+# A: wrap_modals / enrich_modals 분리 + 휴리스틱 흡수(LLM 0) + oversize 가드
+# =============================================================================
+
+_heuristic_title = modal._heuristic_title
+_heuristic_footnote = modal._heuristic_footnote
+
+
+def test_heuristic_title_patterns():
+    # before 는 nearest-first → before[0] 가 직전 블록.
+    assert _heuristic_title([(0, "[단위:원]")]) == 1     # 단위 prefix
+    assert _heuristic_title([(0, "서식1-1#")]) == 1       # 끝 '#'
+    assert _heuristic_title([(0, "별표 3")]) == 1         # 별표 prefix
+    assert _heuristic_title([(0, "제1조")]) == 1          # 제 N prefix
+    assert _heuristic_title([(0, "① 신청항목")]) == 1     # 항목번호(원문자)
+    assert _heuristic_title([(0, "1) 개요")]) == 1        # 항목번호(숫자))
+    assert _heuristic_title([(0, "짧은 제목")]) == 1      # len<=40
+    long_prose = "이 문단은 표와 무관한 매우 긴 산문 단락으로 제목이 결코 아니며 계속 이어진다 " * 3
+    assert _heuristic_title([(0, long_prose)]) == 0      # 긴 산문=비제목
+    assert _heuristic_title([]) == 0
+    assert _heuristic_title([(0, "   ")]) == 0
+
+
+def test_heuristic_footnote_patterns():
+    after = [(0, "※상기 금액은..."), (1, "* 부가세 별도"), (2, "본문 재개")]
+    assert _heuristic_footnote(after) == 2               # 연속 2개, 3번째서 중단
+    assert _heuristic_footnote([(0, "주) 비고"), (1, "(단위: 천원)")]) == 2
+    assert _heuristic_footnote([(0, "[단위:원]")]) == 1
+    assert _heuristic_footnote([(0, "일반 본문")]) == 0
+    assert _heuristic_footnote([]) == 0
+
+
+def test_enrich_off_wrap_on_absorbs_without_llm():
+    """shipped 기본 경로(enrich off & wrap on): 마커 + 휴리스틱 흡수, text_llm 0 호출."""
+    calls = []
+
+    def recording_llm(prompt, payload):
+        calls.append((prompt, payload))
+        return "SHOULD_NOT_BE_USED"
+
+    blocks = [
+        {"type": "text", "text": "[단위:원]"},           # 제목형 → 흡수
+        {"type": "table", "table_body": "<table>T</table>"},
+        {"type": "text", "text": "※각주 설명"},          # 각주형 → 흡수
+        {"type": "text", "text": "다음 본문"},           # 각주 prefix 아님 → 별도
+    ]
+    enriched, ids = enrich(blocks, text_llm=recording_llm, vision_llm=None,
+                           enrich_modals=False, wrap_modals=True)
+    assert calls == []                                   # LLM 0 호출
+    assert enriched.count(OPEN_PREFIX) == 1 and enriched.count(CLOSE) == 1
+    span = enriched[enriched.index(OPEN_PREFIX):enriched.index(CLOSE)]
+    assert "[단위:원]" in span and "※각주 설명" in span and "<table>T</table>" in span
+    assert "SHOULD_NOT_BE_USED" not in enriched          # summary 빈문자열
+    assert enriched.count("[단위:원]") == 1               # 흡수분 외부중복 0
+    assert enriched.count("※각주 설명") == 1
+    assert "다음 본문" in enriched[enriched.index(CLOSE):]  # 흡수 안 됨
+    assert ids == ["T1"]
+
+
+def test_wrap_off_enrich_off_no_markers_lossless():
+    """escape 조합(wrap off & enrich off): 마커 0, 전 텍스트/payload 무손실."""
+    blocks = [
+        {"type": "text", "text": "제목줄"},
+        {"type": "table", "table_body": "<table>Z</table>"},
+        {"type": "text", "text": "※각주"},
+    ]
+    enriched, ids = enrich(blocks, text_llm=None, vision_llm=None,
+                           enrich_modals=False, wrap_modals=False)
+    assert OPEN_PREFIX not in enriched and CLOSE not in enriched
+    assert "제목줄" in enriched and "<table>Z</table>" in enriched and "※각주" in enriched
+    assert ids == ["T1"]                                 # decision 유지(drop 아님)
+
+
+def test_wrap_off_enrich_on_consume_gated_title_survives():
+    """진짜 실패모드(wrap off & enrich on, LLM tc/fc>0): mock 호출됨 AND 제목/각주 verbatim
+    생존. consume 이 게이트 안 되면 흡수돼 bare payload 만 남아 사라진다(데이터 유실)."""
+    calls = []
+
+    def absorb_llm(prompt, payload):
+        calls.append(1)
+        return '{"summary": "SUM", "title_count": 1, "footnote_count": 1}'
+
+    blocks = [
+        {"type": "text", "text": "캡션"},
+        {"type": "table", "table_body": "<table>Q</table>"},
+        {"type": "text", "text": "각주"},
+    ]
+    enriched, ids = enrich(blocks, text_llm=absorb_llm, vision_llm=None,
+                           enrich_modals=True, wrap_modals=False)
+    assert calls == [1]                                  # enrich on → mock 호출됨
+    assert OPEN_PREFIX not in enriched                   # wrap off → 마커 0
+    assert "캡션" in enriched and "각주" in enriched      # consume 게이트 → verbatim 생존
+    assert "<table>Q</table>" in enriched
+    assert "SUM" not in enriched                         # bare payload 만 emit
+    assert enriched.count("캡션") == 1 and enriched.count("각주") == 1
+
+
+def test_oversize_boundary_just_under_wraps():
+    """조립 span 추정이 임계 이하면 정상 래핑(마커)."""
+    body = "<td>" + "x" * (modal._OVERSIZE_CHARS - 20) + "</td>"
+    assert len(body) <= modal._OVERSIZE_CHARS
+    blocks = [{"type": "table", "table_body": body}]
+    enriched, ids = enrich(blocks, text_llm=None, vision_llm=None,
+                           enrich_modals=False, wrap_modals=True)
+    assert enriched.startswith(OPEN_PREFIX) and enriched.endswith(CLOSE)
+    assert body in enriched
+    assert ids == ["T1"]
+
+
+def test_oversize_boundary_just_over_bare_lossless():
+    """임계 초과면 bare(마커 0·흡수 0·decision 유지·무손실) — 적재실패 방지."""
+    body = "<td>" + "x" * (modal._OVERSIZE_CHARS + 100) + "</td>"
+    assert len(body) > modal._OVERSIZE_CHARS
+    blocks = [
+        {"type": "text", "text": "짧은 제목"},           # 제목형이나 oversize 라 흡수 0
+        {"type": "table", "table_body": body},
+    ]
+    enriched, ids = enrich(blocks, text_llm=None, vision_llm=None,
+                           enrich_modals=False, wrap_modals=True)
+    assert OPEN_PREFIX not in enriched and CLOSE not in enriched
+    assert body in enriched                              # payload 무손실
+    assert "짧은 제목" in enriched                        # 흡수 안 됨 → 별도 세그먼트
+    assert ids == ["T1"]                                 # decision 유지(drop 아님)
+
+
+def test_enrich_with_spans_wrap_on_page_spans_align():
+    """shipped 경로(enrich_with_spans, wrap on): 마커 삽입 + 흡수 후에도 page_spans 정합."""
+    blocks = [
+        {"type": "text", "text": "인트로 페이지1", "page_idx": 1},
+        {"type": "text", "text": "[단위:원]", "page_idx": 2},        # 제목 흡수
+        {"type": "table", "table_body": "<table>P</table>", "page_idx": 2},
+        {"type": "text", "text": "※각주 설명", "page_idx": 2},        # 각주 흡수
+    ]
+    enriched, ids, spans = enrich_with_spans(
+        blocks, text_llm=None, vision_llm=None,
+        enrich_modals=False, wrap_modals=True,
+    )
+    assert ids == ["T1"]
+    assert OPEN_PREFIX in enriched
+    by_page = {s["page_number"]: s for s in spans}
+    assert set(by_page) == {1, 2}
+    s1, s2 = by_page[1], by_page[2]
+    assert "인트로 페이지1" in enriched[s1["char_start"]:s1["char_end"]]
+    sub2 = enriched[s2["char_start"]:s2["char_end"]]
+    assert OPEN_PREFIX in sub2 and CLOSE in sub2
+    assert "[단위:원]" in sub2 and "※각주 설명" in sub2
+    assert s1["char_start"] == 0
+    assert s1["char_end"] <= s2["char_start"]
+    assert s2["char_end"] == len(enriched)               # enriched 총길이와 span 합치 일치
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))
