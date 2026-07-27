@@ -67,11 +67,12 @@
 - 문서 ID 폴백 = `sha256(file_bytes).hexdigest()[:16]`(orchestrator 동일 식 → MinIO 키 일치). 파일명 정규화 = `tools.safe_basename`(경로 탈출 차단, 구 `parsing._safe_basename` 이동). 비표시문자 제거 = PUA(U+E000–U+F8FF).
 - **VL OCR 계약(in-process, `parsers/ocr/vl_api.py`)**: OpenAI 호환 chat/completions(`MODEL_API_URL`/`MODEL_API_KEY`/`MODEL_NAME`), guided-json(`GUIDED_JSON_MODE=response_format` OpenRouter 호환), 응답 스키마 `elements[].{category(table|figure),content{html,markdown,text}}`. 동시성 `KBP_VL_MAX_CONCURRENT`(기본 3), 페이지 실패 비치명. 순수 텍스트 figure 는 text 블록으로 재분류(markdown 유실 방지).
 
-> **⚠️ OCR 실제 origin = `MODEL_API_URL`(원격 VL), `:18050` 아님 — `KBP_OCR_URL` 은 dead vestige (2026-07-27 코드 대조 확정)**
-> 흔한 오해: parse-svc `healthz` 가 `{"deps":{"ocr":"http://localhost:18050"}}`(`app.py:359`) 를 표시하고 `run_parse` 가 `ocr_url=KBP_OCR_URL`(`app.py:379`) 를 라우터→PDF/OCR 파서로 스레딩하므로 "파싱이 :18050 을 탄다"고 착각하기 쉽다. **실제로는 안 탄다.** 최종 소비자 `ocr_elements_sync`(`parsers/ocr/__init__.py:88`)·`_ocr_elements_for_page`(`parsers/pdf/__init__.py:43-50`) 가 **`ocr_url` 인자를 받기만 하고 vl_api 호출에 전달하지 않는다**(`_whole_file_elements` 는 `return ocr_elements_sync(fb, fn)` — ocr_url 무시). 실 OCR HTTP 는 `vl_api.py:243,263` 이 **`MODEL_API_URL`**(현재 `https://openrouter.ai/api/v1/chat/completions`, qwen3-vl) 로 직접 친다. 즉 Phase 2c 파서 일원화(:18050 HTTP 제거)는 코드상 완료됐고, `KBP_OCR_URL`/`healthz.deps.ocr`/파서들의 `ocr_url` 파라미터는 **제거되지 않고 남은 죽은 배선**이다(호출은 하지만 결과에 영향 없음).
-> - 로컬 `:18050`(`trust-backend-document-parser-1`, docker `0.0.0.0:18050→8000`)은 **별개 스택(dify/trust-backend)** 컨테이너로, 이 파이프라인 파싱과 무관하다. 그 컨테이너의 `health.components.vl_api` 역시 그 스택의 원격 VL 이지 kb-pipeline 것이 아니다.
-> - **OCR 장애 진단 지점**: `MODEL_API_URL`(OpenRouter). `:18050` healthz 초록은 kb-pipeline OCR 정상성의 근거가 **아니다**. (별개로 청킹 auto 스코어링·검색·적재 임베딩은 `litellm.ax-demo.com` bge-m3 — 또 다른 origin.)
-> - 정리 TODO(비긴급): `KBP_OCR_URL`/`ocr_url` 파라미터·`healthz.deps.ocr` 제거로 착시 원천 삭제.
+> **⚠️ OCR 실제 origin = 원격 VL(`MODEL_API_URL`) + 스캔 게이트웨이(`KBP_PADDLE_OCR_GATEWAY_URL`), `:18050` 아님 — `KBP_OCR_URL` 은 dead (2026-07-27 코드 대조 확정, 제거됨)**
+> 흔한 오해: parse-svc `healthz` 가 (구) `{"deps":{"ocr":"http://localhost:18050"}}` 를 표시하고 `run_parse` 가 `ocr_url` 을 라우터→PDF/OCR 파서로 스레딩하므로 "파싱이 :18050 을 탄다"고 착각하기 쉽다. **실제로는 안 탄다.** 최종 소비자 `ocr_elements_sync`(`parsers/ocr/__init__.py:88`, `prompt_override` 만 받음)·`_ocr_elements_for_page`(`parsers/pdf/__init__.py:43-50`, 3번째 인자는 diagram 프롬프트 override 이지 URL 아님) 가 **`ocr_url` 을 전혀 소비하지 않는다**. excel 도 `excel_url 은 하위호환용 무시 파라미터`(`parsers/excel/__init__.py:46` 주석).
+> - **실 OCR 경로 2개**: (a) pptx·단일이미지·스캔폴백 = **in-process VL**(`vl_api.py:243,263` → `MODEL_API_URL`, 현재 `openrouter.ai/.../chat/completions`, qwen3-vl). (b) 스캔/혼합 PDF 본류 = **paddle_gw 게이트웨이**(`KBP_PADDLE_OCR_GATEWAY_URL` = `api-doc.ys-helperai.com/ocr/paddleocr_vl`, gate.py 가 스캔 판정 시 위임). 이 둘이 live origin.
+> - **정리 완료(2026-07-27)**: `scripts/parse-svc.env` 의 `KBP_OCR_URL`/`KBP_EXCEL_URL` 삭제, `healthz.deps` 를 `{"vl_ocr": MODEL_API_URL}` 로 정정(`app.py:359`), `run_parse(ocr_url="", excel_url="")` 로 dead 값 표식(`app.py:379`). 파서 시그니처의 `ocr_url`/`excel_url` 파라미터 자체는 테스트 대량 의존이라 하위호환 유지(무시 인자).
+> - 로컬 `:18050`(`trust-backend-document-parser-1`, docker `0.0.0.0:18050→8000`)은 **별개 스택(dify/trust-backend)** 컨테이너로 이 파이프라인과 무관. 그 컨테이너 healthz 초록은 kb-pipeline OCR 정상성 근거가 **아니다**.
+> - **OCR 장애 진단 지점**: `MODEL_API_URL`(OpenRouter) + `KBP_PADDLE_OCR_GATEWAY_URL`. (별개로 청킹 auto 스코어링·검색·적재 임베딩은 `litellm.ax-demo.com` bge-m3 — 또 다른 origin.)
 
 ### 3.2 Blockify — `hybrid_to_blocks()` / `elements_to_blocks()`
 

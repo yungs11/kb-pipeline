@@ -356,7 +356,9 @@ def _lazy_minio() -> Any | None:
 
 @app.get("/healthz")
 def healthz():
-    return {"status": "ok", "deps": {"ocr": os.environ.get("KBP_OCR_URL")}}
+    # OCR 실제 origin 은 VL(`MODEL_API_URL`) — in-process(Phase 2c, :18050 HTTP 제거).
+    # 구 `KBP_OCR_URL`(:18050) 은 dead vestige 라 표시하지 않는다(착시 방지, 01-architecture §3).
+    return {"status": "ok", "deps": {"vl_ocr": os.environ.get("MODEL_API_URL")}}
 
 
 @app.post("/parse")
@@ -376,8 +378,9 @@ async def parse(file: UploadFile = File(...), filename: str = Form(...),
         out = run_parse(
             data, safe_name,
             text_llm=_lazy_text_llm(), vision_llm=None,
-            ocr_url=os.environ.get("KBP_OCR_URL", "http://localhost:18050"),
-            excel_url=os.environ.get("KBP_EXCEL_URL", "http://localhost:18055"),
+            # ocr_url/excel_url 은 Phase 2c/2e in-process 전환 후 소비자(vl_api·excel_rag)가
+            # 무시하는 dead 파라미터 — 시그니처 하위호환만 유지(실 OCR=MODEL_API_URL). 01-architecture §3.
+            ocr_url="", excel_url="",
             docs_id=docs_id or None,
             minio=_lazy_minio(),
         )
