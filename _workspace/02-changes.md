@@ -18,6 +18,8 @@
 
 **부수 수정**: 앞선 정식 BI 배선(0-D 참조) 잔재 — `service/tests/test_chunk_endpoint.py` 의 `FakeAdaptiveChunk.chunk()` 에 `blocks` kwarg 누락으로 5개 red → `blocks=None` 추가.
 
+**후속 개선 — overlap 에서 MODAL 원자 청크 제외(adaptive_chunk, 2026-07-27)**: `apply_overlap` 이 표 원자성 위해 꼬리를 표 시작까지 확장(`_expand_start_out_of_table`) → 원자 table 청크의 꼬리=표 전체 → 다음 청크에 표 통째 복제(실측 소장: 원본 26 → 청크 `<table>` 등장 **47**, 복제 21). 임베딩/검색 인덱스 중복 낭비. **수정**: `Chunk.atomic` 플래그(default False, `_chunk_to_dict` 미노출 → API 불변) → runner 원자 세그먼트 조립(marker-aware+skip_scoring 양경로) `atomic=True` → `apply_overlap` 이 `cur.atomic or prev.atomic` 경계면 prepend 스킵. 비원자↔비원자 overlap 은 불변(산문 검색문맥 보존). cur.atomic 스킵은 트레이드오프 아닌 **기존 원자성 계약 회복**(production 기본 overlap=100 에서 "MODAL청크=표1개"가 이미 깨져있었음). 검증: 유닛 141 pass, 소장 skip_scoring E2E overlap=100 `<table>` 47→**26**(복제 0). bare/미종결마커 표는 범위 밖(pre-existing). opus5 3라운드 검증 READY. 커밋 `81fce5b`.
+
 **검증**: 파싱 단위 소장 enriched 마커 26=table 26=modal_spans 26. recursive_1100 = 86청크 쪼갬 0. facade `/chunk` 응답 마커 0. 유닛 parse-svc/facade 83 pass + adaptive 117 pass. **비고**: 큰 문서 auto 청킹은 스코어링(coref/임베딩) 때문에 수분 소요(정상, job_timeout 3600). **미완**: full end-to-end 적재→검색→렌더 원샷 재확인(세션 전환으로 서비스 다운, 조각별로는 검증됨), 4레포 커밋.
 
 ## 0-B. 그룹 기반 KB 접근제어 + Postgres 통합 (설계 확정·계획, 2026-07-04)
