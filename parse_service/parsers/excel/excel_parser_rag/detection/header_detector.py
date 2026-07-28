@@ -12,6 +12,7 @@ detect_headers(region, canvas, config):
 
 from __future__ import annotations
 
+import copy
 import re
 from typing import Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
@@ -19,7 +20,7 @@ from openpyxl.utils import range_boundaries
 
 from ..config import ParserConfig
 from ..markerutil import is_marker_cell
-from ..textutil import compact, infer_numbering_level, one_line
+from ..textutil import compact, infer_numbering_level, is_spine_column, one_line
 
 if TYPE_CHECKING:
     from ..canvas.cell_node import CellNode
@@ -29,6 +30,11 @@ if TYPE_CHECKING:
 _HEADER_SCORE_MIN = 1.8
 _STYLE_GATE_MIN = 0.5   # bold/배경색/가운데정렬 등 스타일 신호 최소값
 _MAX_PRE_ROWS = 8       # 헤더 시작 전 스킵 가능한 희소 메타 행 수
+_DATA_BREAK_MIN = 0.5   # numeric(날짜/숫자) 과반 = 데이터신호 → 시작된 헤더밴드 종료
+_W_FILTER = 0.8         # autofilter 첫 행 가산점 (center/text 항과 동일 크기, override 아님)
+
+# 콜론(:／：)으로 끝나는 라벨 셀 — 메타 key-value 행 감지용
+_COLON_LABEL_RE = re.compile(r".+[:：]\s*$")
 
 # 합의/수신/비고 류 — metadata_cols 로 분리할 헤더명 (compact 비교)
 _METADATA_HEADER_TERMS = {"합의", "수신", "비고", "참고", "참조", "근거", "관련근거", "관련규정"}
@@ -39,6 +45,15 @@ _ITEM_HEADER_TERMS = ("사항", "항목", "구분", "내용", "업무", "분류"
 _HEADERLESS_TYPES = {"code_mapping_table", "form", "key_value_block", "note_block", "report_section"}
 
 _NUMERIC_RE = re.compile(r"^-?[\d,]+(?:\.\d+)?%?$")
+
+# spine 후보에서 제외할 버전열 헤더 패턴 (kordoc _VERSION_KEY 이식 — chunking/hierarchy_tree.py).
+# 분류 시점엔 헤더 미확정이라 min_depth=3 이 주 방어, 여긴 검출단계 이중 방어층.
+_VERSION_KEY_RE = re.compile(r"버전|version|\bver\.?\b|개정|리비전|revision|rev\.?", re.I)
+
+# 날짜 '문자열' (타입 date 가 아닌 텍스트 날짜 — "2026.05.04", "2026-5-4", "2026/05/04", "2026. 5. 4.")
+# 사용자 스펙 §9-1: 날짜 문자열은 text 가 아니라 value. 4자리 연도 앵커로 버전문자열("1.2.3") 오탐 차단.
+# 공백은 매치 전에 compact() 가 제거하므로 정규식에 \s 불필요.
+_DATE_TEXT_RE = re.compile(r"^\d{4}[.\-/]\d{1,2}[.\-/]\d{1,2}\.?$")
 
 
 # --- 공용 헬퍼 -------------------------------------------------------------------
@@ -53,9 +68,58 @@ def _cell_text(cell: Optional["CellNode"]) -> str:
 
 
 def _is_numeric(cell: Optional["CellNode"], text: str) -> bool:
-    if cell is not None and cell.data_type in ("int", "float"):
+    # 날짜(로더는 datetime/date/time 을 전부 'date' 로 방출)도 값으로 인식 —
+    # "시작일자: 2026-05-04" 같은 메타행이 텍스트 헤더로 오탐되는 것을 차단.
+    if cell is not None and cell.data_type in ("int", "float", "date"):
         return True
-    return bool(_NUMERIC_RE.match(compact(text)))
+    t = compact(text)
+    return bool(_NUMERIC_RE.match(t)) or bool(_DATE_TEXT_RE.match(t))
+
+
+def _is_meta_kv_row(canvas: "SheetCanvas", row: int, cols: List[int]) -> bool:
+    """콜론라벨(`작성자:` 등) + 희소 채움 = 메타 key-value 행.
+
+    A(날짜=value)가 날짜 있는 메타행을 해결하므로 B 는 날짜 없는 텍스트 메타행
+    (`작성자: 홍길동` 등)을 방어한다. 정상 헤더 라벨(`구분:` 등)은 채움 비율이
+    높아(>=0.5) 미발동 — 희소성 조건이 이중 가드.
+    """
+    n = len(cols)
+    filled = colon = 0
+    for c in cols:
+        t = _cell_text(canvas.cells.get((row, c)) or canvas.get_cell(row, c))
+        if not t:
+            continue
+        filled += 1
+        if _COLON_LABEL_RE.match(t):
+            colon += 1
+    return filled > 0 and colon >= 1 and (filled / float(n)) < 0.5
+
+
+def _is_axis_sequence_row(canvas: "SheetCanvas", row: int, cols: List[int]) -> bool:
+    """행의 숫자 셀들이 step==1 단조 증가 수열이면 축(axis) 헤더 — 간트 연도/일자 타임라인.
+
+    범위(v3 — 정밀도 우선, 검증관 실측 반영):
+    - int/float 수열의 step == 1 만 축으로 인정 (연도 2024,2025,…(엑셀 float 2024.0 포함) / 일자 1,2,…).
+      금액 100/200/300(step 100) 등 등차 데이터·역순(2026,2025,…)은 배제.
+    - ★date 타입은 판정하지 않는다(무조건 False 경로): 로더가 datetime.time 도 'date' 로
+      방출해 뺄셈이 TypeError(워크북 전체 파싱 중단 위험) + 골든 105 에 date-축 실례 0건
+      + 주간 마일스톤 데이터행([task, 1/1, 1/8, 1/15]) 등간격 오탐면. 이득 0 인 위험 분기 삭제.
+    - 수열 길이 >= 3, 그리고 행의 채워진 셀 중 수열 참여 셀이 과반.
+    """
+    nums = []
+    filled = 0
+    for c in cols:
+        cell = canvas.cells.get((row, c))
+        text = _cell_text(cell)
+        if not text:
+            continue
+        filled += 1
+        if cell is not None and cell.data_type in ("int", "float"):
+            nums.append(float(cell.raw_value))
+    if len(nums) < 3 or filled == 0 or len(nums) * 2 <= filled:
+        return False
+    diffs = {round(b - a, 6) for a, b in zip(nums, nums[1:])}
+    return diffs == {1.0}   # step==1 단조 증가만 (연도/일자 축)
 
 
 def _merge_span_cols(cell: "CellNode", canvas: "SheetCanvas") -> Tuple[int, int]:
@@ -104,6 +168,19 @@ def _title_rows(region: "Region") -> Set[int]:
         return set()
     rows = {r for r in range(int(r0), int(r1) + 1) if region.min_row <= r <= region.max_row}
     return rows
+
+
+def _autofilter_first_row(canvas: "SheetCanvas", region: "Region") -> Optional[int]:
+    """auto_filter_ref 첫 행. 파싱 실패/리전 밖이면 None."""
+    ref = getattr(canvas, "auto_filter_ref", None)
+    if not ref:
+        return None
+    try:
+        _c0, r0, _c1, _r1 = range_boundaries(ref)
+    except Exception:
+        return None
+    r0 = int(r0)
+    return r0 if region.min_row <= r0 <= region.max_row else None
 
 
 # --- row metrics / header score (SoT §11.2) --------------------------------------
@@ -188,6 +265,17 @@ def _detect_header_rows(
     headers: List[int] = []
     best = 0.0
 
+    # autofilter 첫 행(range_boundaries 의 상단 행) — style 동일 가중 가산점 대상.
+    # 파싱 실패/미존재 시 None. filter 첫 행은 밴드 전체가 아니라 leaf 헤더행을 가리킨다.
+    filter_header_row: Optional[int] = None
+    ref = getattr(canvas, "auto_filter_ref", None)
+    if ref:
+        try:
+            _c0, r0, _c1, _r1 = range_boundaries(ref)
+            filter_header_row = int(r0)
+        except Exception:
+            filter_header_row = None
+
     r = region.min_row
     while r <= region.max_row:
         if r in title_rows:
@@ -203,12 +291,34 @@ def _detect_header_rows(
             pre.add(r)
             r += 1
             continue
+        # 메타 key-value 행은 밴드 시작 전에만 pre 로 divert (밴드 내 오발동 차단)
+        if not headers and _is_meta_kv_row(canvas, r, cols):
+            pre.add(r)
+            r += 1
+            continue
         if m.get("numbering_ratio", 0.0) > 0 or m.get("marker_ratio", 0.0) > 0:
             break  # 본문 시작 (항목 번호/마커 등장)
-        score = _header_score(m)
+        if headers and m.get("numeric", 0.0) >= _DATA_BREAK_MIN:
+            # 데이터신호(날짜/숫자 과반) = 시작된 헤더밴드의 종료.
+            # 단, step==1 축 수열(간트 연도/일자 leaf)이면 밴드에 편입하고 종료한다.
+            # 밴드 시작 전엔 미발동(메타행은 A/B 가 divert) — 게이트 없으면 WBS 헤더 전멸.
+            if _is_axis_sequence_row(canvas, r, cols):
+                headers.append(r)   # 축 leaf 헤더 — 밴드에 편입하고 밴드 종료
+                break               # 축 행은 leaf: 그 아래는 본문 (shadow_cont 종료와 동일 원칙)
+            break  # 기존 Change-C: 데이터신호 = 밴드 종료
+        # autofilter 첫 행 가산: 데이터틱하지도(numeric>=0.5) 메타도 아닐 때만
+        # (stale/전시트 ref 가 데이터·배너 행을 승격시키는 것 차단)
+        is_filter = (
+            filter_header_row is not None
+            and r == filter_header_row
+            and m.get("numeric", 0.0) < _DATA_BREAK_MIN
+            and not _is_meta_kv_row(canvas, r, cols)
+        )
+        score = _header_score(m) + (_W_FILTER if is_filter else 0.0)
+        eff_style = m["style_signal"] + (_STYLE_GATE_MIN if is_filter else 0.0)
         strong = (
             score >= _HEADER_SCORE_MIN
-            and m["style_signal"] >= _STYLE_GATE_MIN
+            and eff_style >= _STYLE_GATE_MIN
             and m["filled"] >= 2
         )
         # 스팬 부모헤더 아래 leaf 행: 무스타일·희소라 style gate 는 탈락하지만,
@@ -387,6 +497,54 @@ def _detect_hierarchy_cols(
         return hier
     if region.region_type in ("matrix_table", "hierarchical_matrix") and first_named is not None:
         return [first_named]
+
+    # fallback-of-fallback: hierarchical_table 인데 계층열 0개인 자기모순 해소 (Phase 2 분류
+    # 세로병합 신호의 계층열 판정 대응물). 좌측 <=5열의 본문 세로병합 비율 — 가로/블록 병합
+    # 셀은 행 배너성(그룹 요약행 통과)이라 분모에서 제외. 연속 prefix 만(우측 무병합 열에서 종료).
+    if region.region_type == "hierarchical_table":
+        hier2: List[int] = []
+        for c in cols[: min(5, len(cols))]:
+            vm = plain = 0
+            for r in range(body_start, region.max_row + 1):
+                cell = canvas.cells.get((r, c))
+                if cell is None or cell.is_empty:
+                    continue
+                if not _cell_text(cell):
+                    continue
+                o = cell.merge_orientation
+                if o == "vertical":
+                    vm += 1
+                elif o in ("horizontal", "block"):
+                    pass
+                else:
+                    plain += 1
+            if vm >= 3 and (vm + plain) > 0 and vm / (vm + plain) >= 0.5:
+                hier2.append(c)
+            elif hier2:
+                break
+        if hier2:
+            return hier2
+
+    # spine 게이트(v2): 좌측 ≤5열 body 값이 dotted-int 계층 spine(WBSID 1/1.1/1.1.1)이면 계층열.
+    # 기존 신호 ①②③·merge fallback 보다 뒤(우선순위 유지). matrix 계열은 :494 조기 return 으로
+    # 미도달(암묵 가드). +방어층: 헤더명이 버전열 패턴이면 제외(분류 시점 헤더 미확정 → depth>=3 이 주 방어).
+    spine_hier: List[int] = []
+    for c in cols[: min(5, len(cols))]:
+        header_name = " ".join(parts_by_col.get(c) or [])
+        if header_name and _VERSION_KEY_RE.search(header_name):
+            continue
+        texts: List[str] = []
+        for r in range(body_start, region.max_row + 1):
+            cell = canvas.cells.get((r, c))
+            if cell is None or cell.is_empty:
+                continue
+            t = _cell_text(cell)
+            if t and not is_marker_cell(cell, t):
+                texts.append(t)
+        if is_spine_column(texts):
+            spine_hier.append(c)
+    if spine_hier:
+        return spine_hier
     return []
 
 
@@ -455,6 +613,18 @@ def detect_headers(region: "Region", canvas: "SheetCanvas", config: ParserConfig
         header_rows, pre_rows, best = _detect_header_rows(
             region, canvas, cols, title_rows, max(1, int(config.max_header_depth))
         )
+        # autofilter 재앵커 (사용자 승인 규칙): 검출 밴드가 필터 첫 행을 놓쳤고
+        # 필터행이 밴드 '아래'인 경우에만 — 필터는 작성자의 명시적 헤더 선언(코퍼스 5/5 정확).
+        rf = _autofilter_first_row(canvas, region)
+        if rf is not None and rf not in header_rows and (not header_rows or rf > max(header_rows)):
+            rg2 = copy.copy(region)          # shallow copy — min_row 만 교체(리전 컬렉션은 read-only 사용)
+            rg2.min_row = rf
+            h2, p2, b2 = _detect_header_rows(
+                rg2, canvas, cols, title_rows, max(1, int(config.max_header_depth))
+            )
+            if h2:                            # 재검출 성공 시에만 교체 — 실패 시 원본 유지(안전판)
+                pre_rows = set(range(region.min_row, rf)) | p2   # 필터행 위 구간(구 밴드 포함) = 메타/pre
+                header_rows, best = h2, b2
         region.header_rows = header_rows
         region.features["header_detection_score"] = float(best)
         if not header_rows:

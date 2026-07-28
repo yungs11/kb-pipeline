@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from .cell_node import CellNode
 
@@ -20,6 +20,7 @@ class SheetCanvas:
     max_col: int = 0
     cells: Dict[Tuple[int, int], CellNode] = field(default_factory=dict)
     merged_ranges: List[str] = field(default_factory=list)
+    auto_filter_ref: Optional[str] = None  # 워크시트 autofilter 범위 (예: "B7:K1078")
     hidden_rows: Set[int] = field(default_factory=set)
     hidden_cols: Set[int] = field(default_factory=set)
     is_hidden_sheet: bool = False

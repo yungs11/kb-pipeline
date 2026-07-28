@@ -10,14 +10,13 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
-
-from openpyxl.utils import range_boundaries
 
 from ..chunking.chunk_schema import RagChunk
 from ..markerutil import is_ambiguous_marker_cell, is_marker_cell
 from ..parsers.base import ParseContext
-from ..parsers.hierarchy_table import item_numbering_level
+from ..parsers.hierarchy_table import is_full_width_banner, item_numbering_level
 from ..textutil import (
     compact,
     is_note_text,
@@ -34,6 +33,37 @@ if TYPE_CHECKING:
 # 전결표 계열 키워드 (SoT §14.4 contains_keywords)
 DELEGATION_KEYWORDS = ("전결", "위임전결", "합의", "수신", "전결권자")
 
+_CURRENCY_UNITS = ("천만원", "백만원", "천원", "만원", "억원", "원")
+_CURRENCY_ALT = "|".join(_CURRENCY_UNITS)
+_CONTEXT_RE = re.compile(
+    rf"단위\s*[:：]\s*(?P<unit>{_CURRENCY_ALT})"
+    rf"(?:\s*[,，]\s*(?:VAT|부가세|부가가치세)\s*"
+    rf"(?P<vat>별도|제외|포함))?",
+    re.IGNORECASE,
+)
+_NUMBER = r"[+-]?\s*\d[\d,]*(?:\.\d+)?"
+_COMPARISON = r"(?:미만|이하|초과|이상)"
+_PARTICLE = r"(?:의|을|를|은|는|이|가)"
+# 통화 뒤에는 비교어/제한된 조사/비한글 경계만 허용한다. 이로써
+# '3백만원이상'은 잡되 '3원칙', '3백만원이상한 조건'은 배제한다.
+_CURRENCY_AMOUNT_RE = re.compile(
+    rf"{_NUMBER}\s*(?:{_CURRENCY_ALT})(?="
+    rf"\s*{_COMPARISON}(?:\s*{_PARTICLE})?(?:\s|[^가-힣]|$)"
+    rf"|\s*{_PARTICLE}(?:\s|[^가-힣]|$)"
+    rf"|[^가-힣]|$)"
+)
+_THRESHOLD_RE = re.compile(rf"{_NUMBER}\s*{_COMPARISON}")
+_RANGE_RE = re.compile(
+    rf"{_NUMBER}\s*(?:~|〜|–|—|부터)\s*{_NUMBER}(?:\s*(?:까지|{_COMPARISON}))?"
+)
+_NON_MONEY_RE = re.compile(
+    rf"(?:%|퍼센트|분의)|"
+    rf"{_NUMBER}\s*(?:영업일|개월|시간|일|년|분|초|회|건|명|개|대)\s*(?:{_COMPARISON})?"
+)
+_PATH_MONEY_CUE_RE = re.compile(
+    r"(?:건당|금액|예산|경비|대금|계약|매출|매입|지출|투자|구매|취득|처분|자산|채권)"
+)
+
 
 def _cell_text(cell: "CellNode") -> str:
     """셀의 표시 텍스트 (raw 우선, 병합 logical 보조)."""
@@ -42,6 +72,122 @@ def _cell_text(cell: "CellNode") -> str:
         or one_line(cell.display_value)
         or one_line(cell.raw_value)
         or one_line(cell.logical_value)
+    )
+
+
+def _strip_balanced_outer_wrapper(value: str) -> str:
+    """문자열 전체를 감싼 동일 종류 괄호 한 겹만 제거한다."""
+    value = value.strip()
+    pairs = {"(": ")", "（": "）"}
+    closing = pairs.get(value[:1])
+    if not closing or not value.endswith(closing):
+        return value
+    opening = value[0]
+    depth = 0
+    for index, char in enumerate(value):
+        if char == opening:
+            depth += 1
+        elif char == closing:
+            depth -= 1
+            if depth < 0 or (depth == 0 and index != len(value) - 1):
+                return value
+    return value[1:-1].strip() if depth == 0 else value
+
+
+def extract_delegation_context(
+    region: "Region", canvas: "SheetCanvas"
+) -> Optional[Dict[str, str]]:
+    """헤더 앞 표 머리말에서 금액 단위/VAT 문맥을 엄격하게 추출한다.
+
+    같은 의미의 후보는 첫 원본 셀로 dedupe하고, 서로 다른 단위/VAT 후보가
+    함께 있으면 어느 쪽도 임의 상속하지 않는다.
+    """
+    if not region.header_rows:
+        return None
+    preamble_end = min(region.header_rows) - 1
+    if preamble_end < region.min_row:
+        return None
+
+    candidates: List[Dict[str, str]] = []
+    for row in range(region.min_row, preamble_end + 1):
+        for col in range(region.min_col, region.max_col + 1):
+            cell = canvas.get_cell(row, col)
+            # 병합 복제로 생긴 logical_value는 스캔하지 않고 실제 값 anchor만 본다.
+            if cell.raw_value is None:
+                continue
+            if cell.is_merged and cell.merge_anchor and cell.merge_anchor != cell.address:
+                continue
+            original = one_line(cell.raw_value)
+            if not original:
+                continue
+            canonical = _strip_balanced_outer_wrapper(original)
+            match = _CONTEXT_RE.fullmatch(canonical)
+            if not match:
+                continue
+            context: Dict[str, str] = {
+                "금액단위": match.group("unit"),
+                "원문": original,
+                "source_cell": cell.address,
+            }
+            vat = match.group("vat")
+            if vat:
+                context["VAT"] = "별도" if vat in ("별도", "제외") else "포함"
+            candidates.append(context)
+
+    if not candidates:
+        return None
+    semantic = {(c["금액단위"], c.get("VAT", "")) for c in candidates}
+    if len(semantic) != 1:
+        return None
+    return candidates[0]
+
+
+def _normalized_condition_text(value: Any) -> str:
+    text = one_line(value)
+    # soft hyphen 및 기타 제어문자는 의미 없는 편집 흔적이므로 제거한다.
+    return "".join(char for char in text if not unicodedata.category(char).startswith("C"))
+
+
+def _has_explicit_currency(value: str) -> bool:
+    return bool(_CURRENCY_AMOUNT_RE.search(value))
+
+
+def _has_bare_threshold(value: str) -> bool:
+    if _NON_MONEY_RE.search(value):
+        return False
+    return bool(_THRESHOLD_RE.search(value) or _RANGE_RE.search(value))
+
+
+def has_monetary_condition(
+    chunk: RagChunk, matrix_role_labels: set[str] | List[str] | Tuple[str, ...]
+) -> bool:
+    """delegation rule이 금액 조건을 실제로 포함하는지 보수적으로 판별한다."""
+    role_labels = {one_line(label) for label in matrix_role_labels if one_line(label)}
+    path_text = " > ".join(_normalized_condition_text(p) for p in (chunk.path or []))
+    fact_values: List[Tuple[str, str]] = []
+    for fact in chunk.facts or []:
+        predicate = one_line(fact.get("predicate"))
+        value = _normalized_condition_text(fact.get("value"))
+        if value:
+            fact_values.append((predicate, value))
+
+    # 명시 통화는 역할/비고/path 어디에 있어도 표 전역의 VAT 문맥이 필요하다.
+    if _has_explicit_currency(path_text):
+        return True
+    if any(_has_explicit_currency(value) for _, value in fact_values):
+        return True
+
+    # 통화단위 없는 threshold는 역할 fact로 범위를 제한한다.
+    if any(
+        predicate in role_labels and _has_bare_threshold(value)
+        for predicate, value in fact_values
+    ):
+        return True
+
+    # 경로의 bare threshold는 금액 의미 cue가 함께 있을 때만 인정한다.
+    return bool(
+        _PATH_MONEY_CUE_RE.search(path_text)
+        and _has_bare_threshold(path_text)
     )
 
 
@@ -129,9 +275,18 @@ class DelegationRulePlugin(ParserPlugin):
                     row_paths[row] = path
             out.append(chunk)
 
-        out.extend(
-            self._build_delegation_rows(region, canvas, ctx, row_paths, note_rows)
+        delegation_rows = self._build_delegation_rows(
+            region, canvas, ctx, row_paths, note_rows
         )
+        inherited_context = extract_delegation_context(region, canvas)
+        if inherited_context:
+            from ..chunking.sibling_merger import attach_delegation_context
+
+            matrix_role_labels = set(region.matrix_cols.values())
+            for rule in delegation_rows:
+                if has_monetary_condition(rule, matrix_role_labels):
+                    attach_delegation_context(rule, inherited_context)
+        out.extend(delegation_rows)
         # delegation_rule 만 형제 병합; 비-delegation 청크는 merge_sibling_rules 가 통과시킴.
         from ..chunking.sibling_merger import merge_sibling_rules
 
@@ -203,25 +358,6 @@ class DelegationRulePlugin(ParserPlugin):
                 return logical, col, True
         return "", None, False
 
-    def _is_section_banner_row(self, region: "Region", canvas: "SheetCanvas", row: int) -> bool:
-        """전폭(≥80%) 병합 배너 행인가.
-
-        '1. 경영 관리'(A5:H5) 같은 섹션 제목이 병합으로 모든 열에 퍼져 비고/역할 열에
-        echo 되면 '비고=배너텍스트' delegation 청크가 잘못 발행된다. 이런 행은 섹션
-        제목이므로 규칙 행으로 발행하지 않는다.
-        """
-        width = region.max_col - region.min_col + 1
-        if width < 3:
-            return False
-        for mr in canvas.merged_ranges:
-            try:
-                c0, r0, c1, r1 = range_boundaries(mr)
-            except Exception:
-                continue
-            if r0 <= row <= r1 and (c1 - c0 + 1) >= 0.8 * width:
-                return True
-        return False
-
     # -------------------------------------------------- delegation_rule 생성
     def _build_delegation_rows(
         self,
@@ -265,8 +401,8 @@ class DelegationRulePlugin(ParserPlugin):
 
             if row in note_rows or row_is_note:
                 continue  # note 행은 note chunk 가 담당
-            if self._is_section_banner_row(region, canvas, row):
-                continue  # 전폭 병합 섹션배너 — 규칙 행 아님(비고 echo 차단). stack 은 위에서 갱신됨
+            if is_full_width_banner(region, canvas, row):
+                continue  # 전폭행(섹션/삭제/개정) emit 안 함 — echo 억제(489fb8a 동작 유지)
 
             # 마커 해석 없이 모든 비계층 열(matrix+metadata)을 header:원문값 으로, 열 순서대로.
             # 빈값·병합 헤더 echo 는 스킵. ○ 는 '○' 원문 유지(정규화 '해당' 아님), 보고/금액/비고 그대로.
@@ -314,7 +450,7 @@ class DelegationRulePlugin(ParserPlugin):
             "값": kv_str,
         }
         facts: List[Dict[str, Any]] = [{"predicate": h, "value": v} for h, v in cells]
-        base = f"{ctx.document_title}의 {canvas.sheet_name} 시트에서 '{path_text}' 항목"
+        base = f"{canvas.sheet_name} 시트 '{path_text}' 항목"  # 병합(_compose_content)과 통일 — document_title 제거
         content = f"{base}: {kv_str}." if kv_str else f"{base}."
 
         return RagChunk(

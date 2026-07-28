@@ -32,6 +32,7 @@ FEATURE_KEYS = (
 class CellStyle:
     bold: bool = False
     italic: bool = False
+    strikethrough: bool = False
     font_size: Optional[float] = None
     fill_color: Optional[str] = None
     font_color: Optional[str] = None

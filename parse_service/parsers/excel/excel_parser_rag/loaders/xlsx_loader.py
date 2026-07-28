@@ -19,7 +19,13 @@ from openpyxl.worksheet.worksheet import Worksheet
 from ..canvas.cell_node import CellNode, CellStyle
 from ..canvas.sheet_canvas import SheetCanvas
 from ..config import ParserConfig
-from ..textutil import clean_text, one_line
+from ..textutil import (
+    _is_pct_format,
+    _pct_decimals,
+    clean_text,
+    mark_strikethrough,
+    one_line,
+)
 
 # 사실상 "배경 없음"으로 취급하는 RGB 값
 _NO_FILL_RGB = {"FFFFFFFF", "00000000", "FFFFFF", "000000"}
@@ -82,6 +88,7 @@ def _extract_style(cell: Any) -> CellStyle:
     return CellStyle(
         bold=bool(font.bold) if font is not None else False,
         italic=bool(font.italic) if font is not None else False,
+        strikethrough=bool(font.strike) if font is not None else False,
         font_size=font_size,
         fill_color=_extract_fill_color(cell),
         font_color=_color_to_hex(font.color) if font is not None else None,
@@ -96,8 +103,13 @@ def _extract_style(cell: Any) -> CellStyle:
     )
 
 
-def _format_value(value: Any) -> str:
-    """raw value → 사람이 읽는 표시 문자열 (정규화 전)."""
+def _format_value(value: Any, number_format: Optional[str] = None) -> str:
+    """raw value → 사람이 읽는 표시 문자열 (정규화 전).
+
+    number_format 이 퍼센트 서식('0.0%' 등)이고 값이 숫자(bool 제외)면 엑셀 표시값
+    (0.3995→'40.0%')으로 렌더한다. 날짜(data_only=True 라 datetime 객체)와 % 는 충돌하지
+    않으므로 기존 날짜/bool/float 분기는 무변경.
+    """
     if value is None:
         return ""
     if isinstance(value, bool):
@@ -110,6 +122,8 @@ def _format_value(value: Any) -> str:
         return value.isoformat()
     if isinstance(value, datetime.time):
         return value.isoformat()
+    if isinstance(value, (int, float)) and _is_pct_format(number_format):
+        return f"{value * 100:.{_pct_decimals(number_format)}f}%"
     if isinstance(value, float):
         if value.is_integer():
             return str(int(value))
@@ -190,6 +204,7 @@ def build_sheet_canvas(
                 continue
 
     canvas.merged_ranges = [str(rng) for rng in ws.merged_cells.ranges]
+    canvas.auto_filter_ref = ws.auto_filter.ref if (ws.auto_filter and ws.auto_filter.ref) else None
 
     max_row, max_col, truncated = _used_range(ws, config)
     if truncated:
@@ -207,7 +222,9 @@ def build_sheet_canvas(
             if formula_text:
                 canvas.contains_formula = True
 
-            display = clean_text(_format_value(raw_value))
+            style = _extract_style(cell)
+            display = clean_text(_format_value(raw_value, cell.number_format))
+            display = mark_strikethrough(display, style.strikethrough)
             node = CellNode(
                 sheet=ws.title,
                 row=row,
@@ -218,7 +235,7 @@ def build_sheet_canvas(
                 formula=formula_text,
                 data_type=_detect_data_type(raw_value, formula_text),
                 is_empty=(raw_value is None or display == ""),
-                style=_extract_style(cell),
+                style=style,
                 hidden_row=row in canvas.hidden_rows,
                 hidden_col=col in canvas.hidden_cols,
             )

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, TYPE_CHECKING
 
-from ..textutil import marker_label_ko, one_line
+from ..textutil import marker_label_ko, one_line, row_content
 
 if TYPE_CHECKING:
     from ..chunking.chunk_schema import RagChunk
@@ -114,14 +114,8 @@ def build_content_text(chunk: "RagChunk", region: "Region", ctx: "ParseContext")
         return base
 
     if ct == "table_row":
-        sentences = _field_sentences(fields)
-        subject = path_text or title
-        if sentences:
-            return (
-                f"{doc}의 {sheet} 시트에서 '{subject}' 항목은 다음 값을 가진다: "
-                f"{sentences}. 원본 위치는 {chunk.range}이다."
-            )
-        return f"{doc}의 {sheet} 시트에서 '{subject}' 항목 행이다. 원본 위치는 {chunk.range}이다."
+        clean_path = [one_line(p) for p in chunk.path if one_line(p)]
+        return row_content(doc, sheet, clean_path, _ordered_fields(fields), title=title)
 
     if ct == "hierarchy_node":
         subject = path_text or title
@@ -163,6 +157,13 @@ def build_content_text(chunk: "RagChunk", region: "Region", ctx: "ParseContext")
         code = _first_of(fields, "약어", "코드", "code")
         meaning = _first_of(fields, "의미", "정식명", "meaning", "설명")
         if not code:
+            pairs = fields.get("매핑")  # 병합 fields — 방어적 조립(빈문자열 드롭 방지)
+            if isinstance(pairs, list) and pairs:
+                lines = "; ".join(
+                    f"{one_line(m.get('약어'))}: {one_line(m.get('의미'))}"
+                    for m in pairs if one_line(m.get("약어"))
+                )
+                return f"{doc} 약어 매핑: {lines}" if lines else ""
             return ""
         return f"{doc}에서 코드 또는 약어 '{code}'의 의미는 '{meaning}'이다."
 
@@ -186,7 +187,7 @@ def build_content_text(chunk: "RagChunk", region: "Region", ctx: "ParseContext")
     if ct == "delegation_rule":
         subject = path_text or _first_of(fields, "항목") or title
         kv = _stringify(fields.get("값"))
-        base = f"{doc}의 {sheet} 시트에서 '{subject}' 항목"
+        base = f"{sheet} 시트 '{subject}' 항목"  # _make_rule_chunk·_compose_content 와 통일
         return f"{base}: {kv}." if kv else f"{base}."
 
     if ct == "unsupported_artifact":

@@ -16,6 +16,7 @@ DEFAULT_CHUNK_PROFILES = [
     "code_mapping",
     "note",
     "total_row",
+    "sibling_rule",
 ]
 
 
@@ -56,6 +57,8 @@ class ParserConfig:
     document_title: Optional[str] = None  # 미지정 시 자동 추출
     delegation_merge_max_chars: int = 1100  # delegation_rule 형제 병합 한도(문자). 0=비활성
     numbering_merge_max_chars: int = 1100   # kordoc 십진번호(WBS) 병합 한도(문자). 0=비활성
+    sibling_rule_max_chars: int = 1100      # 계층 table_row 형제묶음(sibling_rule) part 한도(문자). 0=비활성
+    code_mapping_merge_max_chars: int = 1100  # code_mapping 리전당 병합 한도(문자). 0=비활성(낱개 롤백)
     row_content_max_chars: int = 3000       # table_row content_text 상한(문자). 넓은 행 짤림 방지
     row_embedding_max_chars: int = 4000     # table_row core/embedding_text 상한(문자, BGE-M3 8192토큰 내)
 

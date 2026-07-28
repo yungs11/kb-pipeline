@@ -13,10 +13,12 @@ from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from ..markerutil import is_marker_cell
 from ..textutil import (
+    _SPINE_VALUE_RE,
     compact,
     infer_numbering_level,
     is_marker_value,
     is_note_text,
+    is_spine_column,
     one_line,
 )
 
@@ -306,8 +308,13 @@ def _left_hierarchy_score(
         if len(items) < 3:
             continue
         hits = sum(1 for _cell, t in items if infer_numbering_level(t) is not None)
+        # dotted-int spine 열(WBSID 1/1.1/1.1.1)은 infer_numbering_level=None(소수 오탐 방지의
+        # 의도적 배제)이라 hits=0 → 열-단위 게이팅으로 spine 이면 spine 매치 수를 hits 로 인정.
+        texts = [t for _cell, t in items]
+        if is_spine_column(texts):
+            hits = max(hits, sum(1 for t in texts if _SPINE_VALUE_RE.match(t.strip())))
         vmerged = sum(1 for cell, _t in items if cell.merge_orientation == "vertical")
-        score = hits / float(len(items)) + 0.3 * (vmerged / float(len(items)))
+        score = hits / float(len(items)) + 0.5 * (vmerged / float(len(items)))
         best = max(best, min(1.0, score))
     return best
 

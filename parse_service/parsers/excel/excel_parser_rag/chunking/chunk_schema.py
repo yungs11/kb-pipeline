@@ -19,6 +19,7 @@ CHUNK_TYPES = (
     "note",
     "total_row",
     "delegation_rule",       # DelegationRulePlugin (SoT §14.4)
+    "sibling_rule",          # 계층 table_row 형제묶음 파생 (sibling_rule.py)
     "unsupported_artifact",
 )
 

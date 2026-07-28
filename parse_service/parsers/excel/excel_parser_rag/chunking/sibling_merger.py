@@ -5,7 +5,7 @@ max_chars 를 넘지 않는 선에서 하나로 묶는다. 단일 행 그룹은 
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..textutil import PARSER_VERSION, one_line, range_a1, stable_id
 from .chunk_schema import RagChunk
@@ -50,13 +50,58 @@ def _line(c: RagChunk) -> str:
     return f"- {leaf}: {kv}" if kv else f"- {leaf}"
 
 
+def _context_line(context: Dict[str, Any]) -> str:
+    unit = one_line(context.get("금액단위"))
+    vat = one_line(context.get("VAT"))
+    suffix = f"이며 VAT {vat}" if vat else ""
+    return f"[적용 기준: 아래 금액은 {unit} 단위{suffix}]"
+
+
+def _chunk_context(chunk: RagChunk) -> Optional[Dict[str, Any]]:
+    value = (chunk.metadata or {}).get("inherited_context")
+    if not isinstance(value, dict):
+        value = (chunk.fields or {}).get("적용기준")
+    return dict(value) if isinstance(value, dict) and value.get("금액단위") else None
+
+
+def _context_key(context: Dict[str, Any]) -> Tuple[str, str]:
+    return (one_line(context.get("금액단위")), one_line(context.get("VAT")))
+
+
+def _group_context(group: List[RagChunk]) -> Tuple[Optional[Dict[str, Any]], bool]:
+    contexts = [context for chunk in group if (context := _chunk_context(chunk))]
+    keys = {_context_key(context) for context in contexts}
+    if len(keys) > 1:
+        return None, True
+    return (contexts[0] if contexts else None), False
+
+
+def attach_delegation_context(chunk: RagChunk, context: Dict[str, Any]) -> None:
+    """단일 delegation_rule에 구조화 문맥과 임베딩용 문장을 한 번 부착한다."""
+    inherited = dict(context)
+    fields = dict(chunk.fields or {})
+    metadata = dict(chunk.metadata or {})
+    fields["적용기준"] = inherited
+    metadata["inherited_context"] = inherited
+    line = _context_line(inherited)
+    if line not in (chunk.content_text or "").splitlines():
+        chunk.content_text = f"{chunk.content_text}\n{line}" if chunk.content_text else line
+    chunk.fields = fields
+    chunk.metadata = metadata
+
+
 def _compose_content(group: List[RagChunk]) -> str:
     first = group[0]
     sheet = one_line(first.sheet)
     parent = " > ".join(one_line(p) for p in first.path[:-1] if one_line(p))
     subject = parent or one_line(first.title) or sheet
     header = f"{sheet} 시트 '{subject}' 항목군의 전결 기준:"
-    return header + "\n" + "\n".join(_line(c) for c in group)
+    context, _ = _group_context(group)
+    lines = [header]
+    if context:
+        lines.append(_context_line(context))
+    lines.extend(_line(c) for c in group)
+    return "\n".join(lines)
 
 
 def _build_merged(group: List[RagChunk], part_index: int, part_total: int) -> RagChunk:
@@ -98,6 +143,7 @@ def _build_merged(group: List[RagChunk], part_index: int, part_total: int) -> Ra
     def _any_flag(flag: str) -> bool:
         return any((c.metadata or {}).get(flag) for c in group)
 
+    context, context_conflict = _group_context(group)
     meta: Dict[str, Any] = {
         "region_id": _region_id(first),
         "merged": True,
@@ -114,6 +160,10 @@ def _build_merged(group: List[RagChunk], part_index: int, part_total: int) -> Ra
         "ambiguous_marker": _any_flag("ambiguous_marker"),
         "came_from_merged_cell": _any_flag("came_from_merged_cell"),
     }
+    if context:
+        meta["inherited_context"] = dict(context)
+    if context_conflict:
+        meta["inherited_context_conflict"] = True
     # score_quality 가 '존재 시'에만 감점하는 신호(confidence.py:114-125) → 참일 때만 키 세팅
     for flag in ("contains_hidden_rows", "contains_hidden_cols", "contains_hidden",
                  "path_uncertain", "missing_row_label", "missing_column_axis"):
@@ -122,6 +172,13 @@ def _build_merged(group: List[RagChunk], part_index: int, part_total: int) -> Ra
 
     new_id = stable_id(first.source_file, first.sheet, "delegation_rule", rng,
                        *parent_path, str(part_index))
+    fields: Dict[str, Any] = {
+        "경로": " > ".join(parent_path),
+        "항목들": [_leaf(c) for c in group],
+    }
+    if context:
+        fields["적용기준"] = dict(context)
+
     return RagChunk(
         id=new_id,
         source_file=first.source_file,
@@ -131,7 +188,7 @@ def _build_merged(group: List[RagChunk], part_index: int, part_total: int) -> Ra
         region_type=first.region_type,
         title=first.title,
         path=parent_path,
-        fields={"경로": " > ".join(parent_path), "항목들": [_leaf(c) for c in group]},
+        fields=fields,
         facts=facts,
         content_text=_compose_content(group),
         keywords=keywords[:30],
@@ -162,7 +219,12 @@ def merge_sibling_rules(chunks: List[RagChunk], *, max_chars: int = 1100) -> Lis
         subgroups = pack(list(run), measure=lambda g: len(_compose_content(g)), max_chars=max_chars)
         for g, part_index, part_total in assign_parts(subgroups, multi_only=True):
             if len(g) == 1:
-                out.append(g[0])  # 단일 행 → 원본 그대로 (불변)
+                single = g[0]
+                # max_chars는 병합 pack cap이다. 원자 청크는 자르지 않고 초과를 명시한다.
+                if _chunk_context(single) and len(single.content_text) > max_chars:
+                    single.metadata = dict(single.metadata or {})
+                    single.metadata["content_exceeds_merge_cap"] = True
+                out.append(single)  # 단일 행 → 원본 그대로
             else:
                 out.append(_build_merged(g, part_index, part_total))
         run.clear()

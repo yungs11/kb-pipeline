@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Tuple, TYPE_CHECKING
 from openpyxl.utils import get_column_letter
 
 from ..chunking.chunk_schema import RagChunk
-from ..textutil import is_note_text, is_total_text, one_line
+from ..textutil import is_note_text, is_total_text, one_line, row_content
 from .base import BaseRegionParser, ParseContext
 
 if TYPE_CHECKING:
@@ -134,11 +134,9 @@ class FlatTableParser(BaseRegionParser):
             chunk.path = [p for p in (chunk.title, first_label) if p]
             chunk.fields = dict(fields)
             chunk.facts = [{"predicate": k, "value": v} for k, v in fields.items()]
-            sentences = ", ".join(f"{k}는 {v}" for k, v in fields.items())
-            chunk.content_text = (
-                f"{ctx.document_title}의 {canvas.sheet_name} 시트에서 "
-                f"'{' > '.join(chunk.path)}' 항목은 다음 값을 가진다: {sentences}. "
-                f"원본 위치는 {chunk.range}이다."
+            chunk.content_text = row_content(
+                ctx.document_title, canvas.sheet_name, chunk.path,
+                list(fields.items()), title=chunk.title or "",
             )
             chunk.metadata["is_total"] = is_total
             chunk.quality = {"confidence": self.total_confidence if is_total else self.row_confidence}
@@ -151,6 +149,15 @@ class FlatTableParser(BaseRegionParser):
         chunks.extend(footer_chunks)
 
         chunks.insert(0, self._table_summary(region, canvas, ctx, headers, data_rows, note_count))
+
+        # flat 형제묶음 파생 — 같은 (region_id, 부모=path[:-1]) 연속 table_row 묶음(원본 유지, append).
+        # config 접근은 hierarchy 훅 동형(ctx.config — parse 시그니처에 config 없음: NameError 방지).
+        from ..chunking.sibling_rule import build_flat_siblings
+
+        cfg = getattr(ctx, "config", None)
+        mx = getattr(cfg, "sibling_rule_max_chars", 1100)
+        if mx > 0:
+            chunks.extend(build_flat_siblings(chunks, mx))
         return chunks
 
     # --- 내부 ---------------------------------------------------------------

@@ -9,7 +9,6 @@
 - canvas.feature_extractor.extract_cell_features(canvas) -> None
 - detection.region_detector.detect_regions(canvas, config) -> list[Region]
 - detection.title_detector.attach_title(region, canvas, config) -> None
-- detection.title_detector.extract_document_title(canvases, config) -> str
 - classification.region_classifier.classify_region(region, canvas, config) -> None
 - detection.header_detector.detect_headers(region, canvas, config) -> None
 - detection.footer_detector.detect_footers(region, canvas, config) -> None
@@ -40,7 +39,7 @@ from .detection.footer_detector import detect_footers
 from .detection.header_detector import detect_headers
 from .detection.region import Region
 from .detection.region_detector import detect_regions
-from .detection.title_detector import attach_title, extract_document_title
+from .detection.title_detector import attach_title
 from .loaders.workbook_loader import load_workbook_for_parsing, should_skip_sheet
 from .loaders.xlsx_loader import build_sheet_canvas
 from .parsers.base import ParseContext
@@ -94,7 +93,8 @@ def parse_excel_for_rag(
     canvases = build_canvases(input_path, config)
     region_pairs = detect_and_classify(canvases, config)
 
-    document_title = config.document_title or extract_document_title(canvases, config) or input_path.stem
+    # 문서제목은 파일명 stem — 시트 내 제목 추측 폐기(오검출 클래스 소멸), config 오버라이드만 유지
+    document_title = config.document_title or input_path.stem
     code_map = build_code_map(
         [(r, c) for r, c in region_pairs if r.region_type == "code_mapping_table"]
     )

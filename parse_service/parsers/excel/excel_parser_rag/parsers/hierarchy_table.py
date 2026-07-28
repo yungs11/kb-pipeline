@@ -10,12 +10,20 @@ from __future__ import annotations
 
 import re
 from collections import Counter, OrderedDict
-from typing import Any, Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, TYPE_CHECKING
 
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import get_column_letter, range_boundaries
 
 from ..chunking.chunk_schema import RagChunk
-from ..textutil import infer_numbering_level, is_note_text, is_total_text, one_line
+from ..textutil import (
+    _SPINE_VALUE_RE,
+    infer_numbering_level,
+    is_note_text,
+    is_spine_column,
+    is_total_text,
+    one_line,
+    row_content,
+)
 from .base import BaseRegionParser, ParseContext
 from .flat_table import body_rows_of, cell_text, flatten_headers, merged_text, region_row_text
 
@@ -42,6 +50,85 @@ def item_numbering_level(value: Any) -> Optional[int]:
 # ---------------------------------------------------------------------------
 # 계층 헬퍼
 # ---------------------------------------------------------------------------
+
+def marker_style(text: str) -> Optional[str]:
+    """마커의 '종류'(스타일)를 반환. 레벨이 아니라 종류 — 종류가 바뀌면 계층이 한 단계 깊어진다.
+
+    고정 레벨맵(item_numbering_level)과 달리 임의 마커를 임의 깊이로 처리한다. 무마커(평문
+    카테고리)·기호(○)는 None. 입력은 NFKC 정규화됨(cell_text) 가정 — 유니코드 로마자/원문자는
+    ascii 로 온다(ⅱ→ii, Ⅰ→I, ①→"1"[점없음→None]). item_numbering_level 인식 마커는 전부 커버
+    (parity — 불릿/대문자라틴/paren-latin/제N장 포함)해 조상소실을 막는다.
+    """
+    t = (text or "").strip()
+    if not t:
+        return None
+    if re.match(r"^제\s*\d+\s*[장조절편관]", t):    # 제1장/제2조/제3절 — parity(level0)
+        return "je"
+    if re.match(r"^\d+[-.]\d+[.)\s]", t):        # 5-1. / 1.1  (trailing punct/space)
+        return "dec"
+    if re.match(r"^\(\d+\)", t):                 # (1)
+        return "pnum"
+    if re.match(r"^\([가-힣]\)", t):              # (가)
+        return "pkor"
+    if re.match(r"^\([a-zA-Z]\)", t):            # (a)/(A) — parity(level3)
+        return "platin"
+    if re.match(r"^\d+[.)](?!\d)", t):           # 1. / 1)  — (?!\d)로 '3.5백만원' 값 배제
+        return "num"
+    if t[0] in "가나다라마바사아자차카타파하" and re.match(r"^[가-힣][.)]", t):  # 가.
+        return "kor"
+    if re.match(r"^[IVXLCDM]+[.)]", t):          # I./V./X. (로마 대문자)
+        return "uroman"
+    if re.match(r"^[ivxlcdm]+[.)]", t):          # i)/ii)/iii) (NFKC→ascii)
+        return "lroman"
+    if re.match(r"^[A-Z][.)]", t):               # A./B. — parity(level1)
+        return "ulatin"
+    if re.match(r"^[a-z][.)]", t):               # a)
+        return "alpha"
+    if re.match(r"^[-·•▪]\s", t):                # - · • ▪ — parity(level5)
+        return "bullet"
+    return None
+
+
+class SectionStack:
+    """전폭 섹션배너 행들의 계층. marker_style 전환으로 nesting(번호섹션 형제, 새 스타일 딥)."""
+
+    def __init__(self):
+        self._chain: List[Tuple[Optional[str], str]] = []
+
+    def push(self, text: str) -> None:
+        t = (text or "").strip()
+        if not t:
+            return
+        st = marker_style(t)
+        ch = self._chain
+        if st is not None:
+            styles = [s for s, _ in ch]
+            if st in styles:
+                i = styles.index(st); del ch[i:]; ch.append((st, t))
+            else:
+                ch.append((st, t))
+        else:
+            ch.clear(); ch.append((None, t))  # predicate 상 도달 안 함(marker≠None) — 안전 fallback
+
+    @property
+    def path(self) -> List[str]:
+        return [t for _, t in self._chain]
+
+
+def is_full_width_banner(region, canvas, row) -> bool:
+    """region 폭의 ≥80% 를 가로지르는 단일 행 병합인가(geometric). 섹션/echo 판정은 호출부."""
+    width = region.max_col - region.min_col + 1
+    if width < 3:
+        return False
+    for mr in canvas.merged_ranges:
+        try:
+            c0, r0, c1, r1 = range_boundaries(mr)
+        except Exception:
+            continue
+        if r0 <= row <= r1 and (c1 - c0 + 1) >= 0.8 * width:
+            return True
+    return False
+
 
 class HierarchyTracker:
     """항목 번호 패턴(우선) + 컬럼 위치(fallback) 으로 hierarchy stack 을 유지한다.
@@ -101,32 +188,51 @@ class ColHierarchyTracker:
     """계층열마다 독립 번호 sub-stack 을 유지하고 path 를 열순 concat 으로 만든다.
 
     HierarchyTracker(단일 전역 스택)와 달리, 깊은 열의 항목이 얕은 열 항목을 pop 하지 못한다
-    → 세로 병합된 좌측 계층열 셀이 그 span 의 부모로 유지된다(SoT §13.4 보강). 열 내부에서만
-    item_numbering_level 로 sibling 정리. 얕은 열이 갱신되면 그보다 깊은 열 체인은 무효화한다.
+    → 세로 병합된 좌측 계층열 셀이 그 span 의 부모로 유지된다(SoT §13.4 보강). 열 내부 깊이는
+    marker_style 전환으로 산정: 새 스타일=한 단계 깊어짐, 같은 스타일=형제, 기존 스타일 재등장=
+    그 레벨로 복귀. 얕은 열이 갱신되면 그보다 깊은 열 체인은 무효화한다.
 
-    가정: 무번호 카테고리는 번호 항목보다 얕은(왼쪽) 열에 있다(무번호 push 는 그 열 체인을
-    리셋한다). 한 열에 '번호들 뒤 무번호 항목'이 섞이면 그 열의 번호 조상이 소실될 수 있다.
+    가정: 무마커 카테고리는 마커 항목보다 얕은(왼쪽) 열에 있다(무마커 push 는 그 열 체인을
+    리셋한다). 같은 스타일이 한 열에서 더 깊은 레벨로 재등장하면 얕은 레벨로 붕괴(→ doc_guard 안내).
     """
 
-    def __init__(self, hierarchy_cols: Sequence[int]):
+    def __init__(self, hierarchy_cols: Sequence[int], spine_cols: Set[int] = frozenset()):
         self.cols = sorted(hierarchy_cols)
-        self.chains: Dict[int, List[Tuple[int, str]]] = {c: [] for c in self.cols}
+        self.spine_cols = set(spine_cols)
+        self.chains: Dict[int, List[Tuple[Optional[str], str]]] = {c: [] for c in self.cols}
 
     def push(self, col: int, text: str) -> List[str]:
         if col not in self.chains:
             return self.path
-        lv = item_numbering_level(text)
-        ch = self.chains[col]
-        if lv is not None:
-            while ch and ch[-1][0] >= lv:
+        t = (text or "").strip()
+        # spine 열(dotted-int WBSID): dot-경계 prefix 체인 의미론.
+        if col in self.spine_cols and _SPINE_VALUE_RE.match(t):
+            ch = self.chains[col]
+            # 부모 = dot-경계 prefix (1.1.1 의 부모 1.1). prefix 아닌 항목 pop 후 append.
+            # ('1.1.1'+'.' 은 '1.1.10' 의 prefix 아님 → 2자리 세그 경계 정확).
+            while ch and not t.startswith(ch[-1][1] + "."):
                 ch.pop()
-            ch.append((lv, text))
-        else:
+            ch.append(("spine", t))
+            for c in self.cols:
+                if c > col:
+                    self.chains[c].clear()  # 얕은 열 갱신 → 깊은 열 무효화
+            return self.path
+        st = marker_style(text)
+        ch = self.chains[col]
+        if st is not None:
+            styles = [s for s, _ in ch]
+            if st in styles:            # 기존 스타일 재등장 → 그 레벨로 복귀(형제)
+                i = styles.index(st)
+                del ch[i:]
+                ch.append((st, text))
+            else:                       # 새 스타일 → 한 단계 깊어짐
+                ch.append((st, text))
+        else:                           # 무마커(카테고리) = 그 열 대표값(리셋)
             ch.clear()
-            ch.append((0, text))  # 무번호(카테고리) = 그 열의 대표값(교체)
+            ch.append((None, text))
         for c in self.cols:
             if c > col:
-                self.chains[c].clear()  # 얕은 열 갱신 → 깊은 열 컨텍스트 무효화
+                self.chains[c].clear()  # 얕은 열 갱신 → 깊은 열 무효화
         return self.path
 
     @property
@@ -134,6 +240,15 @@ class ColHierarchyTracker:
         out: List[str] = []
         for c in self.cols:
             out.extend(text for _, text in self.chains[c])
+        return out
+
+    def labeled_path(self, labels: Dict[int, str]) -> List[Tuple[str, str]]:
+        """path 와 동일 순서로 (헤더라벨, 값) 튜플 리스트. 라벨 없는 열은 ''."""
+        out: List[Tuple[str, str]] = []
+        for c in self.cols:
+            label = labels.get(c) or ""
+            for _s, t in self.chains[c]:
+                out.append((label, t))
         return out
 
     @property
@@ -256,12 +371,23 @@ class HierarchyTableParser(BaseRegionParser):
     def parse(self, region: "Region", canvas: "SheetCanvas", ctx: ParseContext) -> List[RagChunk]:
         headers = flatten_headers(region, canvas)
         hier_cols = list(region.hierarchy_cols) or [region.min_col]
+        # 계층열 라벨 — use_region_cols=False 원시 헤더 스캔(값열 headers dict 과 역할 분리)
+        raw_names = flatten_headers(region, canvas, use_region_cols=False)
+        hier_labels = {c: raw_names.get(c) or "" for c in hier_cols}
         meta_cols = {int(c): str(n) for c, n in region.metadata_cols.items()}
         value_cols = [
             c for c in range(region.min_col, region.max_col + 1)
             if c not in hier_cols
         ]
-        tracker = HierarchyTracker(hier_cols)
+        # spine 재판정 — hier_cols 각 열의 body 값이 dotted-int spine(WBSID)이면 prefix-체인 의미론.
+        # 검출(_detect_hierarchy_cols)과 동일 헬퍼·동일 body 산정(body_rows_of)으로 detection-parse 일치.
+        spine_cols: Set[int] = set()
+        for c in hier_cols:
+            col_texts = [cell_text(canvas.get_cell(r, c)) for r in body_rows_of(region, canvas)]
+            if is_spine_column([t for t in col_texts if t]):
+                spine_cols.add(c)
+        tracker = ColHierarchyTracker(hier_cols, spine_cols=spine_cols)
+        self._spine_cols = spine_cols  # Test 3 detection-parse 일치 단언용(내부 상태 노출)
         sections = SectionCollector()
         body_chunks: List[RagChunk] = []
         stats = {"rows": 0, "nodes": 0, "notes": 0, "totals": 0}
@@ -269,7 +395,7 @@ class HierarchyTableParser(BaseRegionParser):
         for r in body_rows_of(region, canvas):
             if not canvas.row_has_content(r, region.min_col, region.max_col):
                 continue
-            item_text, item_col, from_merge = detect_item_text(canvas, r, hier_cols, tracker)
+            item_text, _item_col, from_merge = detect_item_text(canvas, r, hier_cols, tracker)
 
             if item_text and is_note_text(item_text):
                 body_chunks.append(self._note_chunk(region, canvas, ctx, r, item_text, tracker.path))
@@ -284,13 +410,26 @@ class HierarchyTableParser(BaseRegionParser):
                 stats["totals"] += 1
                 continue
 
+            # 다중열: 이 행의 모든 계층열 raw 값을 얕은→깊은 순서로 각 열 체인에 push.
+            # 병합 continuation(빈 raw)·note·total 은 push 안 함(부모 붕괴 방지).
+            # spine_leaf: 이 행이 spine 열에 실제 dotted-int 값을 push 하는가 —
+            # ColHierarchyTracker.push 의 spine 가드(`col in spine_cols and _SPINE_VALUE_RE.match`)와
+            # 동일 조건 복제(tracker 내부 판정은 외부로 안 나오므로 sibling_rule 신호용 재판정).
+            row_spine_leaf = False
+            for c in sorted(hier_cols):
+                t = cell_text(canvas.get_cell(r, c))
+                if t and not is_note_text(t) and not is_total_text(t):
+                    tracker.push(c, t)
+                    if c in spine_cols and _SPINE_VALUE_RE.match(t):
+                        row_spine_leaf = True
             path = tracker.path
-            if item_text:
-                path = tracker.push(item_text, item_col if item_col is not None else hier_cols[0])
 
             if values:
                 body_chunks.append(
-                    self._row_chunk(region, canvas, ctx, r, path, values, from_merge)
+                    self._row_chunk(
+                        region, canvas, ctx, r, path, values, from_merge,
+                        tracker.labeled_path(hier_labels), row_spine_leaf,
+                    )
                 )
                 stats["rows"] += 1
                 sections.add_data_row(tracker.top, r, axes=list(values.keys()))
@@ -312,6 +451,13 @@ class HierarchyTableParser(BaseRegionParser):
         chunks: List[RagChunk] = [self._table_summary(region, canvas, ctx, headers, stats)]
         chunks.extend(body_chunks)
         chunks.extend(sections.build_chunks(self, region, canvas, ctx))
+        # sibling_rule 파생 — 같은 (region, plain path) 연속 table_row 묶음(원본 유지, append).
+        # HierarchyTableParser 한정 훅(MatrixTableParser 금지 — DelegationRulePlugin 내부호출 blast).
+        from ..chunking.sibling_rule import build_sibling_rules
+
+        config = getattr(ctx, "config", None)
+        max_chars = getattr(config, "sibling_rule_max_chars", 1100) if config is not None else 1100
+        chunks.extend(build_sibling_rules(body_chunks, max_chars))
         return chunks
 
     # --- 내부 ---------------------------------------------------------------
@@ -343,18 +489,23 @@ class HierarchyTableParser(BaseRegionParser):
         path: List[str],
         values: Dict[str, str],
         from_merge: bool,
+        labeled_path: List[Tuple[str, str]],
+        spine_leaf: bool = False,
     ) -> RagChunk:
         chunk = self.new_chunk(region, canvas, ctx, "table_row", min_row=row, max_row=row)
         path_text = " > ".join(path) if path else (chunk.title or "")
         chunk.path = list(path)
         chunk.fields = {"항목": path[-1] if path else "", "경로": path_text, **values}
         chunk.facts = [{"predicate": k, "value": v} for k, v in values.items()]
-        sentences = ", ".join(f"{k}는 {v}" for k, v in values.items())
-        chunk.content_text = (
-            f"{ctx.document_title}의 {canvas.sheet_name} 시트에서 '{path_text}' 항목은 "
-            f"다음 값을 가진다: {sentences}. 원본 위치는 {chunk.range}이다."
+        # content 만 계층열 헤더라벨 렌더링(chunk.path/fields["경로"] 는 plain 유지)
+        chunk.content_text = row_content(
+            ctx.document_title, canvas.sheet_name, labeled_path,
+            list(values.items()), title=chunk.title or "",
         )
         chunk.metadata["came_from_merged_cell"] = from_merge
+        # spine_leaf 행(자기 WBSID 를 path leaf 로 push): sibling_rule 이 부모 그룹핑하도록 신호.
+        if spine_leaf:
+            chunk.metadata["spine_leaf"] = True
         chunk.quality = {"confidence": self.row_confidence}
         return chunk
 
@@ -403,7 +554,7 @@ class HierarchyTableParser(BaseRegionParser):
         chunk.path = list(path) + [item_text]
         chunk.fields = {"항목": item_text, **values}
         chunk.facts = [{"predicate": k, "value": v} for k, v in values.items()]
-        sentences = ", ".join(f"{k}는 {v}" for k, v in values.items())
+        sentences = ", ".join(f"{k}: {v}" for k, v in values.items())
         chunk.content_text = (
             f"{ctx.document_title}의 {canvas.sheet_name} 시트에서 '{item_text}' 행은 합계 행이다"
             + (f": {sentences}." if sentences else ".")

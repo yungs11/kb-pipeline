@@ -12,7 +12,15 @@ import re
 from typing import Any, Dict, List, Tuple, TYPE_CHECKING
 
 from ..chunking.chunk_schema import RagChunk
-from ..textutil import compact, infer_numbering_level, is_note_text, looks_like_code, one_line
+from ..chunking.hierarchy_pack import pack
+from ..textutil import (
+    compact,
+    infer_numbering_level,
+    is_note_text,
+    looks_like_code,
+    one_line,
+    stable_id,
+)
 from .base import BaseRegionParser, ParseContext
 from .flat_table import cell_text
 
@@ -127,26 +135,94 @@ class CodeMappingParser(BaseRegionParser):
     mapping_confidence = 0.78
 
     def parse(self, region: "Region", canvas: "SheetCanvas", ctx: ParseContext) -> List[RagChunk]:
-        chunks: List[RagChunk] = []
+        # 낱개 쌍 수집: 동일 (약어,의미) 중복만 제거하고, 다른 의미의 같은 약어는 보존
+        # (개정 전/후 대조 블록의 상충 매핑을 게이트가 읽을 수 있도록 리스트로 유지).
+        pairs: List[Dict[str, Any]] = []
         seen: set = set()
         for m in extract_mappings(region, canvas):
             key = (m["code"], m["meaning"])
-            if key in seen:  # 동일 매핑 중복 제거 (다른 의미의 같은 코드는 유지)
+            if key in seen:
                 continue
             seen.add(key)
-            chunk = self.new_chunk(
-                region, canvas, ctx, "code_mapping",
-                min_row=m["row"], max_row=m["row"],
-                min_col=m["code_col"], max_col=m["meaning_col"],
+            pairs.append(m)
+        if not pairs:
+            return []
+
+        title = region.title or "약어 매핑"
+        config = getattr(ctx, "config", None)
+        max_chars = getattr(config, "code_mapping_merge_max_chars", 1100) if config is not None else 1100
+
+        if max_chars <= 0:
+            # 롤백 스위치: 기존 낱개 청크 동작 유지
+            return [self._single_chunk(region, canvas, ctx, title, m) for m in pairs]
+
+        # 리전당 병합: content 길이가 cap 을 넘으면 part 로 분할
+        subgroups = pack(
+            pairs,
+            measure=lambda g: len(self._compose(ctx, canvas, region, title, g)),
+            max_chars=max_chars,
+        )
+        total = len(subgroups)
+        return [
+            self._merged_chunk(region, canvas, ctx, title, g, idx, total)
+            for idx, g in enumerate(subgroups, start=1)
+        ]
+
+    # ------------------------------------------------------------------ helpers
+    @staticmethod
+    def _compose(ctx: ParseContext, canvas: "SheetCanvas", region: "Region",
+                 title: str, group: List[Dict[str, Any]]) -> str:
+        """병합 content_text: '{doc} > {sheet} > {title?} 약어 매핑:\n- 약어: 의미' 형태."""
+        header_bits = [one_line(ctx.document_title), one_line(canvas.sheet_name), one_line(region.title)]
+        header = " > ".join(b for b in header_bits if b) + " 약어 매핑:"
+        lines = [f"- {m['code']}: {m['meaning']}" for m in group]
+        return header + "\n" + "\n".join(lines)
+
+    def _single_chunk(self, region: "Region", canvas: "SheetCanvas", ctx: ParseContext,
+                      title: str, m: Dict[str, Any]) -> RagChunk:
+        chunk = self.new_chunk(
+            region, canvas, ctx, "code_mapping",
+            min_row=m["row"], max_row=m["row"],
+            min_col=m["code_col"], max_col=m["meaning_col"],
+        )
+        chunk.title = title
+        chunk.path = [title, m["code"]]
+        chunk.fields = {"약어": m["code"], "의미": m["meaning"]}
+        chunk.facts = [{"predicate": "약어의미", "value": m["meaning"]}]
+        chunk.content_text = (
+            f"{ctx.document_title}에서 코드 또는 약어 '{m['code']}'의 의미는 '{m['meaning']}'이다."
+        )
+        chunk.quality = {"confidence": self.mapping_confidence}
+        return chunk
+
+    def _merged_chunk(self, region: "Region", canvas: "SheetCanvas", ctx: ParseContext,
+                      title: str, group: List[Dict[str, Any]],
+                      part_index: int, part_total: int) -> RagChunk:
+        r0 = min(m["row"] for m in group)
+        r1 = max(m["row"] for m in group)
+        c0 = min(m["code_col"] for m in group)
+        c1 = max(m["meaning_col"] for m in group)
+        chunk = self.new_chunk(
+            region, canvas, ctx, "code_mapping",
+            min_row=r0, max_row=r1, min_col=c0, max_col=c1,
+        )
+        chunk.title = title
+        chunk.path = [title]
+        mapping = [{"약어": m["code"], "의미": m["meaning"]} for m in group]
+        # 매핑은 리스트 — 중복 약어(다른 의미)도 별도 항목으로 보존(dict-collapse 금지).
+        chunk.fields = {"약어수": len(mapping), "매핑": mapping}
+        chunk.facts = [
+            {"predicate": "약어의미", "subject": m["code"], "value": m["meaning"]} for m in group
+        ]
+        # content_text 를 반드시 직접 설정(비면 chunk_factory 가 드롭).
+        chunk.content_text = self._compose(ctx, canvas, region, title, group)
+        chunk.quality = {"confidence": self.mapping_confidence}
+        chunk.metadata.update({"merged": True, "merged_count": len(mapping)})
+        if part_total > 1:
+            chunk.metadata.update({"part_index": part_index, "part_total": part_total})
+            # 분할 시 id 에 part_index 를 포함해 청크 고유성 보장(sibling_rule 규칙).
+            chunk.id = stable_id(
+                ctx.source_file, canvas.sheet_name, "code_mapping",
+                chunk.range, *chunk.path, str(part_index),
             )
-            title = region.title or "약어 매핑"
-            chunk.title = title
-            chunk.path = [title, m["code"]]
-            chunk.fields = {"약어": m["code"], "의미": m["meaning"]}
-            chunk.facts = [{"predicate": "약어의미", "value": m["meaning"]}]
-            chunk.content_text = (
-                f"{ctx.document_title}에서 코드 또는 약어 '{m['code']}'의 의미는 '{m['meaning']}'이다."
-            )
-            chunk.quality = {"confidence": self.mapping_confidence}
-            chunks.append(chunk)
-        return chunks
+        return chunk

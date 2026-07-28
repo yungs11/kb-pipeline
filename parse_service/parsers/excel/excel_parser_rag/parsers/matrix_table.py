@@ -28,10 +28,19 @@ from ..textutil import (
     is_total_text,
     marker_label_ko,
     one_line,
+    row_content,
 )
 from .base import BaseRegionParser, ParseContext
 from .flat_table import body_rows_of, cell_text, flatten_headers, merged_text, region_row_text
-from .hierarchy_table import ColHierarchyTracker, HierarchyTracker, SectionCollector, detect_item_text
+from .hierarchy_table import (
+    ColHierarchyTracker,
+    HierarchyTracker,
+    SectionCollector,
+    SectionStack,
+    detect_item_text,
+    is_full_width_banner,
+    marker_style,
+)
 
 if TYPE_CHECKING:
     from ..canvas.sheet_canvas import SheetCanvas
@@ -83,7 +92,11 @@ class MatrixTableParser(BaseRegionParser):
     # ------------------------------------------------------------------ parse
     def parse(self, region: "Region", canvas: "SheetCanvas", ctx: ParseContext) -> List[RagChunk]:
         hier_cols, matrix_cols, meta_cols = self._resolve_axes(region, canvas)
+        # 계층열 라벨 — use_region_cols=False 원시 헤더 스캔(matrix_cols dict 과 역할 분리)
+        raw_names = flatten_headers(region, canvas, use_region_cols=False)
+        hier_labels = {c: raw_names.get(c) or "" for c in hier_cols}
         tracker = ColHierarchyTracker(hier_cols)
+        section_stack = SectionStack()
         sections = SectionCollector()
         body_chunks: List[RagChunk] = []
         stats = {"fact_rows": 0, "facts": 0, "nodes": 0, "notes": 0, "totals": 0, "ambiguous": 0}
@@ -91,6 +104,17 @@ class MatrixTableParser(BaseRegionParser):
         for r in body_rows_of(region, canvas):
             if not canvas.row_has_content(r, region.min_col, region.max_col):
                 continue
+
+            if is_full_width_banner(region, canvas, r):
+                txt = detect_item_text(canvas, r, hier_cols, tracker)[0]
+                if not (txt and (is_note_text(txt) or is_total_text(txt))):
+                    # note/total 이 아니면: 섹션(marker) push + skip, 아니면(삭제/개정) skip(echo 억제)
+                    if txt and marker_style(txt) is not None:
+                        section_stack.push(txt)
+                        tracker = ColHierarchyTracker(hier_cols)  # 새 섹션 → 열 체인 리셋
+                    continue  # 배너/echo 행 emit 안 함
+                # note/total 전폭 → 아래 정상 note/total 로 fall-through
+
             item_text, item_col, from_merge = detect_item_text(canvas, r, hier_cols, tracker)
 
             # --- note 행 (SoT §16): 현재 path 에 attach. 병합 marker 상속 금지 ---
@@ -98,7 +122,7 @@ class MatrixTableParser(BaseRegionParser):
                 values = self._collect_values(canvas, r, matrix_cols, allow_merged=False)
                 meta_values = self._collect_meta(canvas, r, meta_cols, allow_merged=False)
                 body_chunks.append(
-                    self._note_chunk(region, canvas, ctx, r, item_text, tracker.path, values, meta_values)
+                    self._note_chunk(region, canvas, ctx, r, item_text, section_stack.path + tracker.path, values, meta_values)
                 )
                 stats["notes"] += 1
                 sections.touch(tracker.top, r)
@@ -110,7 +134,7 @@ class MatrixTableParser(BaseRegionParser):
             # --- 합계 행 ---
             if item_text and is_total_text(item_text):
                 body_chunks.append(
-                    self._total_chunk(region, canvas, ctx, r, item_text, values, meta_values, tracker.path)
+                    self._total_chunk(region, canvas, ctx, r, item_text, values, meta_values, section_stack.path + tracker.path)
                 )
                 stats["totals"] += 1
                 continue
@@ -121,12 +145,16 @@ class MatrixTableParser(BaseRegionParser):
                 t = cell_text(canvas.get_cell(r, c))
                 if t and not is_note_text(t) and not is_total_text(t):
                     tracker.push(c, t)
-            path = tracker.path
+            path = section_stack.path + tracker.path
 
             if values or meta_values:
                 meta_fields = self._meta_fields(meta_values, ctx)
+                labeled_path = section_stack.path + tracker.labeled_path(hier_labels)
                 body_chunks.append(
-                    self._row_chunk(region, canvas, ctx, r, path, values, meta_values, meta_fields, from_merge)
+                    self._row_chunk(
+                        region, canvas, ctx, r, path, values, meta_values, meta_fields, from_merge,
+                        labeled_path,
+                    )
                 )
                 for v in values:
                     body_chunks.append(
@@ -305,6 +333,7 @@ class MatrixTableParser(BaseRegionParser):
         meta_values: List[Dict[str, str]],
         meta_fields: Dict[str, Any],
         from_merge: bool,
+        labeled_path: List[Any],
     ) -> RagChunk:
         chunk = self.new_chunk(region, canvas, ctx, self.row_chunk_type, min_row=row, max_row=row)
         path_text = " > ".join(path) if path else (chunk.title or f"행 {row}")
@@ -318,11 +347,13 @@ class MatrixTableParser(BaseRegionParser):
             for v in values
         ] + [{"predicate": m["name"], "value": m["value"]} for m in meta_values]
 
-        segments = [f"'{v['header']}'은(는) '{self._value_label(v)}'" for v in values]
-        segments += [f"{m['name']}은(는) '{m['value']}'" for m in meta_values]
-        chunk.content_text = (
-            f"{ctx.document_title}의 {canvas.sheet_name} 시트에서 '{path_text}' 항목: "
-            + ", ".join(segments) + "이다."
+        # _value_label(마커 의미 라벨) 보존 — 콜론 kv 로 나열
+        pairs = [(v["header"], self._value_label(v)) for v in values]
+        pairs += [(m["name"], m["value"]) for m in meta_values]
+        # content 만 계층열 헤더라벨 렌더링(chunk.path/fields["경로"] 는 plain 유지)
+        chunk.content_text = row_content(
+            ctx.document_title, canvas.sheet_name, labeled_path, pairs,
+            title=chunk.title or f"행 {row}",
         )
         chunk.metadata["is_decision_row"] = True
         chunk.metadata["has_special_values"] = bool(meta_values)
@@ -392,7 +423,7 @@ class MatrixTableParser(BaseRegionParser):
             chunk.fields.setdefault(v["header"], v["value"])
         chunk.fields.update(self._meta_fields(meta_values, ctx))
         chunk.facts = [{"predicate": v["header"], "value": v["value"]} for v in values]
-        sentences = ", ".join(f"{v['header']}는 {v['value']}" for v in values)
+        sentences = ", ".join(f"{v['header']}: {v['value']}" for v in values)
         chunk.content_text = (
             f"{ctx.document_title}의 {canvas.sheet_name} 시트에서 '{item_text}' 행은 합계 행이다"
             + (f": {sentences}." if sentences else ".")

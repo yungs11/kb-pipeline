@@ -2,7 +2,8 @@
 
 - attach_title(region, canvas, config): region 위쪽 5행 이내 또는 region 상단의
   제목 후보(가로 병합 + bold/큰 글씨/제목 어휘)를 찾아 region.title / title_range 설정.
-- extract_document_title(canvases, config): 문서 대표 제목 추출 (첫 시트 우선).
+
+문서 대표 제목은 파일명 stem 을 쓴다(pipeline) — 시트 내 제목 추측은 폐기됨.
 """
 
 from __future__ import annotations
@@ -153,22 +154,3 @@ def attach_title(region: "Region", canvas: "SheetCanvas", config: ParserConfig) 
     _score, _row, cell, text = best
     region.title = text
     region.title_range = cell.merge_range or cell.address
-
-
-def extract_document_title(canvases: List["SheetCanvas"], config: ParserConfig) -> str:
-    """모든 캔버스 상단에서 문서 대표 제목 추출 (첫 시트 우선)."""
-    if config.document_title:
-        return config.document_title
-    for canvas in canvases:
-        if not canvas.cells:
-            continue
-        best: Optional[Tuple[float, str]] = None
-        max_scan = min(8, canvas.max_row)
-        for row in range(1, max_scan + 1):
-            for cell, text in _anchor_texts(canvas, row, 1, canvas.max_col):
-                s = _title_score(cell, text, canvas.max_col or 1, canvas)
-                if s >= _TITLE_SCORE_MIN and (best is None or s > best[0]):
-                    best = (s, text)
-        if best is not None:
-            return best[1]
-    return ""
