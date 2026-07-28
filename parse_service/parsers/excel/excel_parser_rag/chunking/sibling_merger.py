@@ -53,8 +53,8 @@ def _line(c: RagChunk) -> str:
 def _context_line(context: Dict[str, Any]) -> str:
     unit = one_line(context.get("금액단위"))
     vat = one_line(context.get("VAT"))
-    suffix = f"이며 VAT {vat}" if vat else ""
-    return f"[적용 기준: 금액은 {unit} 단위{suffix}]"
+    suffix = f", VAT {vat}" if vat else ""
+    return f"[적용 기준: 단위가 생략된 금액은 {unit} 단위{suffix}]"
 
 
 def _chunk_context(chunk: RagChunk) -> Optional[Dict[str, Any]]:
