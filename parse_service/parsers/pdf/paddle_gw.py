@@ -6,7 +6,7 @@
 
 문서 통짜 대신 **페이지별 호출**(이미지 1장 multipart)로: ① page_number 계약 보존
 (page_spans/페이지이미지/chunks_meta), ② 병렬 가속(GPU continuous batching).
-실측(신탁 3p 스캔): 게이트웨이 48s vs MinerU pipeline(CPU) 181s vs hybrid 166s. 한국어·표 HTML 정상.
+스캔 PDF의 layout·VL 인식·표 조립은 외부 GPU 게이트웨이가 전담한다.
 
 실패 정책: 페이지 단위 비치명(빈 blocks) — 전 페이지 실패 시 blocks 전무가 되고,
 parse() 의 빈결과 검사가 ODL/in-process VL 폴백으로 잡는다(사용자 결정: 폴백은 in-process VL).

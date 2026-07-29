@@ -1,6 +1,4 @@
-"""PDF 문서수준 라우팅 — triage 버킷 집계로 ODL / MinerU(pipeline·hybrid) 결정.
-
-설계: docs/superpowers/specs/2026-07-13-mineru-pdf-integration-design.md §3.1·§4.3
+"""PDF 문서수준 라우팅 — triage 버킷 집계로 ODL / VL / Paddle gateway 결정.
 
 실측 근거(2026-07-14, 신탁/약관 문서 페이지별 triage 신호 덤프):
 - 디지털 페이지(네이티브 텍스트 있음)는 triage 싼 신호(char_count/image_coverage)로
@@ -12,10 +10,9 @@
 - 차트/그림 페이지 비율 ≥ KBP_GATE_VL_RATIO(0.5) — **스캔 여부 무관** → **vl** 레인
     (페이지별 in-process VL(qwen) — 차트/순서도 중심 문서는 페이지 전체를 VL 이 읽는 게 최선).
 - 스캔 페이지 존재(OCR_NEEDED, 위 비율 미달) → **paddle_gw**(PaddleOCR-VL 게이트웨이, GPU 전체
-    파이프라인). 실측(신탁 3p): 48s vs MinerU pipeline(CPU) 181s. 실패 시 ODL/in-process VL 폴백.
+    파이프라인). 실패 시 ODL/in-process VL 폴백.
 - 그 외(디지털 텍스트, 차트 소수) → ODL(기존 빠른 경로; 다이어그램 페이지는 VL 서술 보충).
 
-MinerU 레인(pipeline/hybrid)은 코드 잔존하나 게이트가 라우팅하지 않음(휴면 — 재활성화 가능).
 paddle_gw 는 KBP_PADDLE_OCR_GATEWAY_URL, vl 은 MODEL_API_URL(in-process VL) 필요.
 """
 from __future__ import annotations
@@ -33,14 +30,12 @@ _VL_RATIO = float(os.environ.get("KBP_GATE_VL_RATIO", "0.5"))
 
 @dataclass(frozen=True)
 class RouteDecision:
-    lane: str                 # "odl" | "vl" | "paddle_gw" | "mineru"(휴면)
-    backend: str | None       # mineru 전용("pipeline"|"hybrid-http-client"), 그 외 None
-    parse_method: str | None  # mineru 전용("ocr"|"auto"), 그 외 None
+    lane: str                 # "odl" | "vl" | "paddle_gw"
     # 다이어그램(순서도/차트) 페이지 번호(1-based) — ODL 레인이 페이지 단위 VL 서술 보충에 사용.
     diagram_pages: tuple = ()
 
 
-_ODL = RouteDecision(lane="odl", backend=None, parse_method=None)
+_ODL = RouteDecision(lane="odl")
 
 
 def decide_route(pdf_bytes: bytes) -> RouteDecision:
@@ -60,16 +55,14 @@ def decide_route(pdf_bytes: bytes) -> RouteDecision:
     # ① 차트/그림 페이지 비율이 높으면 — 스캔 여부 무관 — 문서 전체 VL 레인(페이지별 in-process VL).
     #    차트/순서도 중심 문서는 페이지 전체를 VL 이 읽는 게 최선(2026-07-15 결정, hybrid 대체).
     if n_llm > 0 and (n_llm / total) >= _VL_RATIO:
-        return RouteDecision(lane="vl", backend=None, parse_method=None)
+        return RouteDecision(lane="vl")
 
     # ② 스캔 페이지(네이티브 텍스트 없음)가 하나라도 있으면 → PaddleOCR-VL 게이트웨이(GPU).
     #    layout+VL+표 조립 전부 게이트웨이 서버 — parse-svc 로컬 의존 0. 실패 시 ODL/VL 폴백.
     #    diagram_pages 전달 — 게이트웨이는 순서도를 이미지 참조로만 내므로(서술 없음)
     #    paddle_gw 레인도 해당 페이지에 VL 서술을 보충한다(2026-07-15, 소유권 p4 실측).
     if n_ocr > 0:
-        return RouteDecision(lane="paddle_gw", backend=None, parse_method=None,
-                             diagram_pages=diagram_pages)
+        return RouteDecision(lane="paddle_gw", diagram_pages=diagram_pages)
 
     # ③ 디지털 텍스트(+차트/다이어그램 소수) → ODL. 다이어그램 페이지는 ODL 레인이 VL 서술 보충.
-    return RouteDecision(lane="odl", backend=None, parse_method=None,
-                         diagram_pages=diagram_pages)
+    return RouteDecision(lane="odl", diagram_pages=diagram_pages)

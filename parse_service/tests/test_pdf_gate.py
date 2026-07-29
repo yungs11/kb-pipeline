@@ -1,4 +1,4 @@
-"""PDF 문서수준 게이트 — triage 버킷 집계로 ODL / MinerU(pipeline·hybrid) 라우팅."""
+"""PDF 문서수준 게이트 — triage 버킷 집계로 ODL / VL / Paddle gateway 라우팅."""
 import pytest
 from parse_service.parsers.pdf import gate
 from parse_service.parsers.pdf.triage import PageSignals, Bucket
@@ -13,31 +13,31 @@ def _sig(bucket):
 T, L, O, S = Bucket.TEXT_ONLY, Bucket.LLM_NEEDED, Bucket.OCR_NEEDED, Bucket.SKIP
 
 
-@pytest.mark.parametrize("buckets,lane,backend,method", [
+@pytest.mark.parametrize("buckets,lane", [
     # 순수 디지털 텍스트 → ODL
-    ([T, T], "odl", None, None),
-    ([T, S], "odl", None, None),
-    ([S], "odl", None, None),
-    ([], "odl", None, None),
+    ([T, T], "odl"),
+    ([T, S], "odl"),
+    ([S], "odl"),
+    ([], "odl"),
     # 차트/그림 페이지 비율 ≥0.5 → VL 레인 (스캔 여부 무관 — 2026-07-15 결정)
-    ([L, L], "vl", None, None),
-    ([T, L], "vl", None, None),                         # 1/2 = 0.5 ≥ 0.5
-    ([L], "vl", None, None),
-    ([O, L], "vl", None, None),                         # 스캔+차트 혼합도 비율 충족 시 VL
-    ([O, L, L], "vl", None, None),                      # 2/3 ≥ 0.5
+    ([L, L], "vl"),
+    ([T, L], "vl"),                         # 1/2 = 0.5 ≥ 0.5
+    ([L], "vl"),
+    ([O, L], "vl"),                         # 스캔+차트 혼합도 비율 충족 시 VL
+    ([O, L, L], "vl"),                      # 2/3 ≥ 0.5
     # 스캔 페이지 존재(OCR_NEEDED, 차트비율 미달) → paddle_gw(게이트웨이)
-    ([O, O], "paddle_gw", None, None),
-    ([O, S], "paddle_gw", None, None),
-    ([T, O], "paddle_gw", None, None),                  # 혼합(디지털+스캔)
-    ([O, T, L], "paddle_gw", None, None),               # 차트 1/3 < 0.5 → 스캔 우선
+    ([O, O], "paddle_gw"),
+    ([O, S], "paddle_gw"),
+    ([T, O], "paddle_gw"),                  # 혼합(디지털+스캔)
+    ([O, T, L], "paddle_gw"),               # 차트 1/3 < 0.5 → 스캔 우선
     # 차트 소수(<0.5) + 스캔 없음 → ODL(텍스트 위주; 그림은 modal-enrich VL)
-    ([T, T, L], "odl", None, None),                     # 1/3 < 0.5
-    ([T, T, T, L], "odl", None, None),                  # 1/4 < 0.5
+    ([T, T, L], "odl"),                     # 1/3 < 0.5
+    ([T, T, T, L], "odl"),                  # 1/4 < 0.5
 ])
-def test_decide_route(monkeypatch, buckets, lane, backend, method):
+def test_decide_route(monkeypatch, buckets, lane):
     monkeypatch.setattr(gate, "triage_document", lambda b: [_sig(x) for x in buckets])
     d = gate.decide_route(b"%PDF")
-    assert (d.lane, d.backend, d.parse_method) == (lane, backend, method)
+    assert d.lane == lane
 
 
 def test_triage_exception_falls_back_to_odl(monkeypatch):
@@ -45,7 +45,7 @@ def test_triage_exception_falls_back_to_odl(monkeypatch):
         raise RuntimeError("corrupt page iteration")
     monkeypatch.setattr(gate, "triage_document", boom)
     d = gate.decide_route(b"%PDF")
-    assert (d.lane, d.backend, d.parse_method) == ("odl", None, None)
+    assert d.lane == "odl"
 
 
 def test_odl_route_carries_diagram_pages(monkeypatch):

@@ -1,11 +1,10 @@
-"""PDF 도메인 파서 — OpenDataLoader(도구) 페이지별 md → blocks. 스캔 페이지는 OCR 보충."""
+"""PDF 도메인 파서 — ODL/VL/Paddle gateway 라우팅. 스캔 페이지는 OCR 보충."""
 from __future__ import annotations
 
 import logging
 import re
 
 from parse_service.parsers import RouteResult, ParserError
-from parse_service.parsers.pdf.mineru_lane import run_mineru
 from parse_service.tools import ToolError
 from parse_service.tools.opendataloader import convert_pdf_to_page_markdowns
 
@@ -93,7 +92,7 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
             log.warning("vl 레인 빈 결과 — ODL 폴백 (%s)", filename)
     elif decision is not None and decision.lane == "paddle_gw":
         # 스캔 문서: PaddleOCR-VL 게이트웨이(GPU 전체 파이프라인). 실패/빈결과 → ODL 레인
-        # (스캔 페이지는 그 안의 in-process VL 보충으로 처리 — MinerU 폴백 없음, 2026-07-15 결정).
+        # (스캔 페이지는 그 안의 in-process VL 보충으로 처리).
         try:
             from parse_service.parsers.pdf.paddle_gw import run_paddle_gateway
             pages = run_paddle_gateway(file_bytes, filename)
@@ -106,17 +105,6 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
                                           decision.diagram_pages, ocr_url, replace=True)
                 return RouteResult(kind="pages", chunk_needed=True, pages=pages)
             log.warning("paddle_gw 빈 결과 — ODL/VL 폴백 (%s)", filename)
-    elif decision is not None and decision.lane == "mineru":
-        try:
-            pages = run_mineru(file_bytes, filename, decision.parse_method,
-                               decision.backend)
-        except Exception:  # noqa: BLE001 — MinerU 실패는 비치명, ODL/VL 폴백
-            log.exception("MinerU 레인(%s) 실패 — ODL/VL 폴백 (%s)",
-                          decision.backend, filename)
-        else:
-            if pages and any(p.get("blocks") for p in pages):
-                return RouteResult(kind="pages", chunk_needed=True, pages=pages)
-            log.warning("MinerU 빈 결과 — ODL/VL 폴백 (%s)", filename)
     diagram_pages = tuple(getattr(decision, "diagram_pages", ()) or ()) if decision else ()
     return _odl_lane(file_bytes, filename, ocr_url=ocr_url, diagram_pages=diagram_pages)
 
