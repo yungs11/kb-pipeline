@@ -270,6 +270,7 @@ class DelegationRulePlugin(ParserPlugin):
             if row is not None:
                 if chunk.chunk_type == "note":
                     note_rows.add(row)
+                    self._normalize_note_content(chunk, canvas)
                 path = self._item_path(chunk)
                 if path and len(path) >= len(row_paths.get(row, [])):
                     row_paths[row] = path
@@ -312,6 +313,17 @@ class DelegationRulePlugin(ParserPlugin):
             fields["전결권자"] = col_axis
         fields.setdefault("열축의미", "전결권자")
         chunk.fields = fields
+
+    @staticmethod
+    def _normalize_note_content(chunk: RagChunk, canvas: "SheetCanvas") -> None:
+        """위임전결 note의 주어를 delegation_rule과 같은 시트+항목 경로로 통일한다."""
+        note_text = one_line((chunk.fields or {}).get("주석"))
+        if not note_text:
+            return
+        sheet = one_line(chunk.sheet) or one_line(canvas.sheet_name)
+        related = " > ".join(one_line(p) for p in (chunk.path or []) if one_line(p))
+        related = related or one_line(chunk.title) or sheet
+        chunk.content_text = f"{sheet} 시트 '{related}' 관련 주석: {note_text}"
 
     # ----------------------------------------------------------------- helpers
     @staticmethod
