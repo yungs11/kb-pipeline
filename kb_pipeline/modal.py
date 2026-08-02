@@ -258,6 +258,28 @@ def _ctx_copy_before(before: list[tuple[int, str]], blocks: list[dict] | None = 
     return _join_before(_ctx_before_blocks(before, blocks))
 
 
+def _next_is_modal(blocks: list[dict] | None, idx: int) -> bool:
+    """``idx`` 블록 **바로 다음**(빈 블록 건너뛰고)이 모달(표/이미지/수식)이면 True.
+
+    표 사이에 낀 짧은 블록은 앞 표의 각주가 아니라 **다음 표의 라벨**이다. 실측(스캔
+    레인 신탁지침): ``<표T4> 서식1# <표T5> (단위:백만원) <표T6> 서식1-1# <표T7> 서식2#
+    <표T8>`` — 라벨이 앞 표의 뒤 문맥으로도 복사돼 문서에 3회씩 등장했다. 제목
+    (``text_level``)으로 막을 수도 있지만 스캔 레인은 헤딩이 아예 없어(게이트웨이
+    markdown 에 ``#`` 0개) 무력하다. 이 규칙은 **구조만 보므로 모든 레인에서 작동**한다.
+    """
+    if not blocks:
+        return False
+    j = idx + 1
+    while j < len(blocks):
+        b = blocks[j] or {}
+        if not _is_text(b):
+            return b.get("type") in ("table", "image", "equation")
+        if (b.get("text") or "").strip():
+            return False                        # 실질 텍스트가 먼저 나옴
+        j += 1                                  # 빈/공백 블록은 건너뜀
+    return False
+
+
 def _ctx_after_blocks(
     after: list[tuple[int, str]], blocks: list[dict] | None = None
 ) -> list[tuple[int, str, bool]]:
@@ -285,6 +307,8 @@ def _ctx_after_blocks(
     ):
         if is_heading:
             break                               # 다음 섹션 제목 — 포함하지 않고 중단
+        if _next_is_modal(blocks, idx):
+            break               # 다음 표의 라벨 — 이 표의 각주가 아니다(제외하고 중단)
         li = bool(blocks and (blocks[idx] or {}).get("list_markers"))
         if len(s) > budget:
             # 예산 초과 → **각주 블록만** 온전한 문장까지 발췌해 살린다. 각주가 아닌

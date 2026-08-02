@@ -827,5 +827,39 @@ def test_bullet_body_after_table_is_copied_not_moved():
     assert enriched.count("상위권 시장지위 유지 여부") == 2   # 사본 + 원본
 
 
+def test_label_between_two_tables_is_not_prev_tables_footnote():
+    """표 사이에 낀 라벨은 앞 표의 뒤 문맥에서 제외 — 다음 표의 라벨이다.
+
+    실측(스캔 레인 신탁지침): `<표> 서식1# <표> (단위:백만원) <표>` 구조에서 라벨이
+    앞 표의 AFTER 로도 복사돼 문서에 3회씩 등장했다. text_level 이 없는 레인에서도
+    막히도록 **구조**(다음 블록이 표인가)로 판정한다.
+    """
+    blocks = [
+        {"type": "table", "table_body": "<table>A</table>", "page_idx": 1},
+        {"type": "text", "text": "서식1#", "page_idx": 1},
+        {"type": "table", "table_body": "<table>B</table>", "page_idx": 1},
+    ]
+    enriched, ids = enrich(blocks, text_llm=None, vision_llm=None,
+                           enrich_modals=False, wrap_modals=True)
+    assert ids == ["T1", "T2"]
+    assert enriched.count("서식1#") == 2          # 원본 + T2 앞문맥(사본). T1 뒤문맥 제외
+    t1 = enriched[:enriched.index("T2")]
+    assert "서식1#" not in t1[t1.index(OPEN_PREFIX):t1.index(CLOSE)]
+
+
+def test_footnote_followed_by_body_still_moves():
+    """다음이 표가 아니라 본문이면 각주 판정·이동은 그대로(회귀 방지)."""
+    blocks = [
+        {"type": "table", "table_body": "<table>A</table>", "page_idx": 1},
+        {"type": "text", "text": "주1) 지급여력비율은 연결기준이다.", "page_idx": 1},
+        {"type": "text", "text": "다음 절의 본문 문장이 이어진다.", "page_idx": 1},
+    ]
+    enriched, _ = enrich(blocks, text_llm=None, vision_llm=None,
+                         enrich_modals=False, wrap_modals=True)
+    assert enriched.count("주1) 지급여력비율은") == 1     # 이동(원본 소멸)
+    span = enriched[enriched.index(OPEN_PREFIX):enriched.index(CLOSE)]
+    assert "주1) 지급여력비율은" in span
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))
