@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import re
 import time
 from typing import Callable
 
@@ -92,11 +93,31 @@ def _gather_after_window(blocks: list[dict], i: int, consumed: set[int]) -> list
 # 문맥을 **글자수 규칙으로 복사**한다. 제목/각주 패턴 판정은 하지 않는다(오탐 제거).
 # 복사이므로 원본 블록은 그대로 남는다 — 페이지 오귀속·유실이 구조적으로 불가능.
 
-#: 표 '앞' 문맥으로 복사할 최대 길이 — 표에 가까운 '끝'에서 100자.
-_CTX_COPY_BEFORE_CHARS = 100
-#: 표 '뒤' 문맥으로 복사할 최대 길이 — 표에 가까운 '앞'에서 200자.
-#: 각주·단서가 표 뒤에 여러 줄로 붙는 경우가 많아 앞(100)보다 넉넉히 잡는다.
+#: 표 '앞' 문맥으로 복사할 최대 길이 — 표에 가까운 '끝'에서 200자.
+_CTX_COPY_BEFORE_CHARS = 200
+#: 표 '뒤' 문맥으로 가져올 최대 길이 — 표에 가까운 '앞'에서 200자.
 _CTX_COPY_AFTER_CHARS = 200
+
+#: 각주로 인정하는 시작 표기. **포함 여부가 아니라 '이동 vs 복사' 판단에만** 쓴다.
+#: 실측(KIS): 뒤 문맥으로 가져오는 블록 9개 중 3개가 각주가 아니었다 — 다음 섹션 제목
+#: (``Key Monitoring Indicators``, text_level 미부여라 제목경계가 못 잡음)과 본문 서술
+#: (``동사의 신용등급은 …``). 이동하면 그 본문이 원래 자리에서 사라지므로, **각주 표기가
+#: 확실한 블록만 이동**하고 나머지는 복사해 원본을 보존한다.
+_FOOTNOTE_MARKS = ("※", "*", "주)", "주1)", "주2)", "주3)", "주4)", "주5)", "†", "‡")
+
+
+#: ``주 1)`` / ``1)`` / ``(1)`` / ``[1]`` 형태의 번호형 각주 표기.
+_FOOTNOTE_NUM_RE = re.compile(r"^(주\s*\d+\)|\(\d+\)|\[\d+\]|\d+\)\s)")
+
+
+def _looks_like_footnote(text: str) -> bool:
+    """각주 표기로 시작하면 True — 이동해도 안전한 블록인지 판정."""
+    s = (text or "").lstrip()
+    if s.startswith(_FOOTNOTE_MARKS):
+        return True
+    # `주1)`·`주 1)`·`1)`·`(1)` 처럼 번호가 낀 각주 표기.
+    return bool(_FOOTNOTE_NUM_RE.match(s))
+
 
 
 def _nonblank_cands(
@@ -123,34 +144,39 @@ def _nonblank_cands(
 
 def _ctx_before_blocks(
     before: list[tuple[int, str]], blocks: list[dict] | None = None,
-    page_idx: int | None = None,
 ) -> list[tuple[int, str]]:
     """표 앞 문맥으로 **복사**할 블록들 — ``[(블록인덱스, 텍스트)]`` (nearest-first).
 
-    - 예산(``_CTX_COPY_BEFORE_CHARS``)까지 누적. 복사라 원본을 안 건드리므로 마지막(가장
-      먼) 블록은 **잘라도** 된다.
-    - **페이지 경계에서 중단**(``page_idx`` 주어질 때): 표와 다른 페이지의 블록은 다른
-      영역이다. 실측(휴가규정) — 표는 p5, 그 앞 ``제1조 (시행일)…`` 부칙 조문은 p4 라
-      경계가 없으면 무관한 개정이력이 표 문맥으로 딸려왔다. 조밀한 문서(KIS)는 한 페이지에
-      표가 여러 개라 페이지가 안 바뀌어 **발동하지 않는다**(무해) — 순이득.
-    - 제목(``text_level``) 경계는 앞쪽엔 **쓰지 않는다**: 뒤쪽 제목은 *다음* 섹션 것이라
-      차단해야 하지만 앞쪽 제목은 *이 표의* 제목이라 가져와야 한다. 실측에서 표 직전
-      ``(개정 2025.09.01.)`` 에도 text_level 이 붙어 제목에서 멈추면 진짜 제목을 놓쳤고,
-      KIS 는 표 직전이 본문인 경우가 절반이라 '본문에서 중단' 도 문맥 0 을 만든다.
+    규칙(사용자 확정): **글자수(200)가 최우선**, 페이지 경계는 조건이 아니다.
+
+    - 예산(``_CTX_COPY_BEFORE_CHARS``)까지 누적한다. 복사라 원본을 안 건드리므로 마지막
+      (가장 먼) 블록은 **잘라도** 된다.
+    - **페이지 경계로는 안 끊는다**: 표가 페이지 최상단이면 이전 페이지에서 계속 긁는다
+      (이전 규칙은 이 경우 문맥 0 이었다). 복사라 페이지 오귀속이 생기지 않는다.
+    - **제목(``text_level``)을 만나면 제목까지 포함하고 중단**한다 — 섹션 머리를 넘어가면
+      다른 절 내용이 딸려오기 때문. 뒤쪽과 방향이 반대다(뒤쪽 제목은 *다음* 섹션 것이라
+      **제외**하고 중단, 앞쪽 제목은 *이 표의* 제목이라 **포함**하고 중단).
+    - ⚠️ 단, **연속된 제목 뭉치는 통째로** 가져온다: 실측(휴가규정)에서 표 직전이
+      ``(개정 2025.09.01.)``(text_level 4) 이고 그 위가 진짜 제목
+      ``가정의례와 관련된 청원휴가 허가기준``(level 3) 이라, 첫 제목에서 바로 멈추면
+      진짜 제목을 놓친다. 그래서 '제목 다음 후보가 제목이 아닐 때' 중단한다
+      = 제목 뭉치 **위의 본문**에서 멈춘다.
     - Phase C 가 '앞 모달이 이미 이동시킨(consumed) 블록'을 추가로 걸러낸다.
     """
     budget = _CTX_COPY_BEFORE_CHARS
     out: list[tuple[int, str]] = []
     pairs = [(i, t) for i, t in before if (t or "").strip()]
-    for (idx, _raw), (s, _is_heading) in zip(pairs, _nonblank_cands(before, blocks)):
+    cands = _nonblank_cands(before, blocks)
+    for n, ((idx, _raw), (s, is_heading)) in enumerate(zip(pairs, cands)):
         if budget <= 0:
             break
-        if page_idx is not None and blocks and (blocks[idx] or {}).get("page_idx") != page_idx:
-            break                               # 페이지 경계 — 다른 영역
         if len(s) > budget:
             s = s[-budget:]                     # 표에 가까운 쪽(끝)만 남긴다
         out.append((idx, s))
         budget -= len(s) + 1
+        nxt = cands[n + 1] if n + 1 < len(cands) else None
+        if is_heading and not (nxt and nxt[1]):
+            break                               # 제목 뭉치 끝 — 그 위 본문은 다른 절
     return out
 
 
@@ -163,12 +189,8 @@ def _ctx_copy_before(before: list[tuple[int, str]], blocks: list[dict] | None = 
     """표 앞 문맥 — 표에서 거슬러 올라가며 **예산(``_CTX_COPY_BEFORE_CHARS``)만 채운다**.
 
     - 여러 블록을 누적한다(1블록만 쓰면 예산이 남아도 멈춰 진짜 제목을 놓침 — 실측 회귀).
-    - **제목 경계는 쓰지 않는다(방향이 반대라 역효과)**: 뒤쪽 제목은 *다음* 섹션 것이라
-      차단해야 하지만, 앞쪽 제목은 *이 표의* 제목이라 오히려 가져와야 한다. 실측(휴가규정)
-      에서 표 직전 ``(개정 2025.09.01.)`` 에도 ``text_level`` 이 붙어 있어, 제목에서 멈추면
-      바로 위의 진짜 제목 ``가정의례와 관련된 청원휴가 허가기준`` 을 놓쳤다. KIS 도 동일
-      (표 직전 ``등급변동추이(IFSR)`` 가 본문 표시 → 제목까지 계속 올라가야 함).
-      무관한 앞 문맥이 조금 섞이는 건 예산(100자)이 제한하며, 사용자 수용 사항.
+    - 제목을 만나면 **포함하고** 중단한다(뒤쪽은 제외하고 중단 — 방향이 반대).
+    - 페이지 경계는 보지 않는다. 무관한 앞 문맥이 섞이는 건 예산(200자)이 제한한다.
     - 예산을 넘기면 가장 먼 블록을 **끝에서부터** 잘라 채운다. 블록 사이는 ``\\n``.
     """
     return _join_before(_ctx_before_blocks(before, blocks))
@@ -176,8 +198,12 @@ def _ctx_copy_before(before: list[tuple[int, str]], blocks: list[dict] | None = 
 
 def _ctx_after_blocks(
     after: list[tuple[int, str]], blocks: list[dict] | None = None
-) -> list[tuple[int, str]]:
-    """표 뒤 문맥으로 **이동**할 블록들 — ``[(블록인덱스, 텍스트)]`` (문서순).
+) -> list[tuple[int, str, bool]]:
+    """표 뒤 문맥 블록들 — ``[(블록인덱스, 텍스트, 이동가능)]`` (문서순).
+
+    ``이동가능`` 은 각주 표기(``주)``/``※``/``*``/``1)`` 등)로 시작하는지다. True 면
+    원본을 consume(이동)하고, False 면 문맥으로 쓰되 원본을 남긴다(복사) — 실측(KIS)에서
+    뒤 문맥 9개 중 3개가 각주가 아닌 본문·제목이었고, 이동하면 원래 자리에서 사라진다.
 
     ``_ctx_copy_before`` 와 **경계 방향이 반대**다: 뒤쪽 제목은 *다음* 섹션·표의 제목이므로
     **포함하지 않고 그 직전에서 중단**한다(실측: 휴가규정 ``휴가결근 신청서``, KIS
@@ -198,7 +224,9 @@ def _ctx_after_blocks(
             break                               # 다음 섹션 제목 — 포함하지 않고 중단
         if len(s) > budget:
             break                               # 통째로 안 들어가면 중단(자르지 않음)
-        out.append((idx, s))
+        # 이동(consume)은 **각주 표기가 확실한 블록만**. 그 외(본문·제목처럼 보이는 것)는
+        # 문맥으로 쓰되 원본을 남긴다(복사) — 이동하면 그 문단이 원래 자리에서 사라진다.
+        out.append((idx, s, _looks_like_footnote(s)))
         budget -= len(s) + 1
     return out
 
@@ -456,17 +484,16 @@ def _enrich_core(
     modal_wall_ms = 0.0
     if not enrich_modals:
         # 모달 LLM 비활성(KBP_MODAL_ENRICH=0): LLM 0 회. 요약은 빈 문자열. 주변 문맥은
-        # wrap_modals=True 면 **복사**(앞 끝100자·뒤 앞200자, 제목 경계에서 중단), False 면 없음.
+        # wrap_modals=True 면 **복사**(앞뒤 각 200자, 제목 경계에서 중단), False 면 없음.
         for m in modals:
             m["summary"] = ""
             if wrap_modals:
-                # 앞: 복사(원본 유지) — 경계가 없어 무관 본문이 섞일 수 있어 이동 금지.
-                m["ctx_before_pairs"] = _ctx_before_blocks(
-                    m["before"], blocks, page_idx=(blocks[m["i"]] or {}).get("page_idx"))
+                # 앞: 항상 복사(원본 유지) — 제목 포함 후 중단, 페이지 경계는 안 봄.
+                m["ctx_before_pairs"] = _ctx_before_blocks(m["before"], blocks)
                 m["ctx_before"] = _join_before(m["ctx_before_pairs"])
-                # 뒤: 이동(consume) — 제목 경계로 '이 표의 각주'만 정확히 잡으므로 안전.
+                # 뒤: 각주 표기 블록만 이동(consume), 나머지는 복사.
                 m["ctx_after_pairs"] = _ctx_after_blocks(m["after"], blocks)
-                m["ctx_after"] = "\n".join(t for _, t in m["ctx_after_pairs"])
+                m["ctx_after"] = "\n".join(t for _, t, _mv in m["ctx_after_pairs"])
             else:
                 m["ctx_before"] = m["ctx_after"] = ""
                 m["ctx_before_pairs"] = m["ctx_after_pairs"] = []
@@ -544,11 +571,12 @@ def _enrich_core(
             # 원본에 남길 이유가 없고, 앞 모달이 선점하면 다음 표가 그 각주를 또 가져가는
             # 누출도 막힌다(실측: T2 앞문맥에 T1 각주 유입). 앞쪽(ctx_before)은 복사 유지.
             surviving: list[str] = []
-            for idx, text in m.get("ctx_after_pairs") or []:
+            for idx, text, movable in m.get("ctx_after_pairs") or []:
                 if idx in consumed:
                     break                       # 앞 모달이 이미 가져감 — 중복 방지
-                footnote_idxs.append(idx)
-                surviving.append(text)
+                if movable:
+                    footnote_idxs.append(idx)   # 각주 → 이동(원본 소멸)
+                surviving.append(text)          # 각주가 아니면 복사(원본 유지)
             if m.get("ctx_after_pairs"):
                 m["ctx_after"] = "\n".join(surviving)   # 선점분 제외하고 재조립
             # 앞쪽(복사)도 **선점분은 제외**한다. 윈도우는 Phase A 에서 consumed 무시로

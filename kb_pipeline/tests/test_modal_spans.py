@@ -312,7 +312,7 @@ def _ctx_copy_after(after, blocks=None):
 
     뒤쪽은 이제 '이동'이라 (idx, text) 쌍을 돌려주지만, 문맥 내용 검증은 문자열이 편하다.
     """
-    return "\n".join(t for _, t in _ctx_after_blocks(after, blocks))
+    return "\n".join(t for _, t, _mv in _ctx_after_blocks(after, blocks))
 BEFORE_CHARS = modal._CTX_COPY_BEFORE_CHARS      # 100
 AFTER_CHARS = modal._CTX_COPY_AFTER_CHARS        # 200
 
@@ -446,13 +446,13 @@ def test_enrich_off_wrap_on_copies_context_without_llm():
     # 복사(이동 아님) — 사본 + 원본으로 2회 등장.
     assert enriched.count("[단위:원]") == 2      # 앞: 복사 → 사본 + 원본
     # 뒤: **이동**(consume) → 원본 세그먼트가 사라지고 MODAL 안에만 1회.
-    assert enriched.count("※각주 설명") == 1
+    assert enriched.count("※각주 설명") == 1   # 각주 → 이동
     # 원본이 제 세그먼트로 살아있다(마커 밖에도 존재).
     outside = enriched[:enriched.index(OPEN_PREFIX)] + enriched[enriched.index(CLOSE):]
     assert "[단위:원]" in outside          # 앞: 원본 생존(복사)
-    assert "※각주 설명" not in outside     # 뒤: 원본 이동(consume)
-    # 뒤는 이동이라 예산 안 블록들이 MODAL 로 옮겨지고 바깥에는 남지 않는다.
-    assert "다음 본문" in span and "다음 본문" not in outside
+    assert "※각주 설명" not in outside     # 뒤: 각주 표기 → 이동(consume)
+    # 각주 표기가 아닌 블록("다음 본문")은 문맥으로 쓰되 **복사**(원본 유지).
+    assert "다음 본문" in span and "다음 본문" in outside
     assert ids == ["T1"]
 
 
@@ -461,7 +461,7 @@ def test_copy_segment_count_drops_only_moved_after_blocks():
     blocks = [
         {"type": "text", "text": "캡션"},                    # 앞: 복사 → 세그먼트 생존
         {"type": "table", "table_body": "<table>T</table>"},
-        {"type": "text", "text": "각주"},                    # 뒤: 이동 → 세그먼트 사라짐
+        {"type": "text", "text": "※ 각주"},                  # 뒤: 각주 표기 → 이동
     ]
     # ⚠️ enriched 를 JOIN 으로 split 하면 안 된다 — 복사 경로는 summary="" 라 MODAL 안에도
     # "\n\n" 이 생긴다. 세그먼트 수는 _assemble 결과로 직접 센다.
@@ -476,20 +476,28 @@ def test_copy_segment_count_drops_only_moved_after_blocks():
     n_wrap, consumed_wrap = _run(True)
     n_plain, consumed_plain = _run(False)
     assert consumed_plain == set()                  # wrap off = 이동 없음
-    assert consumed_wrap == {2}                     # 뒤 블록(각주)만 이동
+    assert consumed_wrap == {2}                     # 각주 표기 블록만 이동
     assert n_plain == 3                             # 캡션 / 표 / 각주
     assert n_wrap == 2                              # 캡션 / MODAL(표+각주) — 각주 세그먼트 소멸
+    # 각주 표기가 없는 블록은 이동하지 않는다(복사) — 세그먼트 유지.
+    plain = [dict(b) for b in blocks]; plain[2]["text"] = "다음 본문입니다"
+    d2, c2, _ = modal._enrich_core(plain, text_llm=None, vision_llm=None, max_workers=1,
+                                   enrich_modals=False, wrap_modals=True)
+    assert c2 == set()                              # 본문 → 이동 안 함
+    assert len(modal._assemble(plain, d2, c2, wrap_modals=True)[0]) == 3
 
 
-def test_ctx_before_stops_at_page_boundary():
-    """앞 문맥은 **페이지 경계에서 중단** — 다른 페이지 블록은 표의 영역이 아니다.
+def test_ctx_before_crosses_page_but_stops_at_heading():
+    """앞 문맥은 **페이지 경계를 넘어서 긁되, 섹션 제목까지만** — 200자가 최우선 규칙.
 
-    실측(휴가규정): 표는 p5, 그 앞 `제1조 (시행일)…` 부칙 조문은 p4 → 경계가 없으면
-    무관한 개정이력이 표 문맥으로 딸려왔다. 같은 페이지 블록만 복사한다.
+    표가 페이지 최상단이면 이전 페이지에 제목이 있다. 페이지로 끊으면 문맥이 0 이 되므로
+    페이지는 조건이 아니고, ``text_level`` 제목을 만나면 **그 제목을 포함하고** 멈춘다
+    (그 위는 다른 절이다). 앞은 복사이므로 페이지 오귀속이 발생하지 않는다.
     """
     blocks = [
-        {"type": "text", "text": "p1 부칙 조문", "page_idx": 1},      # 다른 페이지 — 제외
-        {"type": "text", "text": "p2 표 제목", "page_idx": 2},        # 같은 페이지 — 포함
+        {"type": "text", "text": "p1 이전 절 본문", "page_idx": 1},                     # 제목 위 — 제외
+        {"type": "text", "text": "p1 표 제목", "page_idx": 1, "text_level": 2},        # 제목 — 포함하고 중단
+        {"type": "text", "text": "p1 리드문", "page_idx": 1},                          # 이전 페이지지만 포함
         {"type": "table", "table_body": "<table>X</table>", "page_idx": 2},
     ]
     enriched, ids, spans = _assert_enrich_parity(
@@ -498,12 +506,13 @@ def test_ctx_before_stops_at_page_boundary():
     )
     assert ids == ["T1"]
     span = enriched[enriched.index(OPEN_PREFIX):enriched.index(CLOSE)]
-    assert "p2 표 제목" in span                              # 같은 페이지 → 복사됨
-    assert "p1 부칙 조문" not in span                        # 페이지 경계에서 중단
+    assert "p1 리드문" in span                               # 페이지가 달라도 복사됨
+    assert "p1 표 제목" in span                              # 제목은 포함하고 중단
+    assert "p1 이전 절 본문" not in span                     # 제목 위 = 다른 절
     by_page = {s["page_number"]: s for s in spans}
     assert set(by_page) == {1, 2}                           # 페이지 사라짐 없음
-    assert enriched.count("p1 부칙 조문") == 1               # 원본만(복사 안 됨)
-    assert enriched.count("p2 표 제목") == 2                 # 사본 + 원본(앞은 복사)
+    assert enriched.count("p1 이전 절 본문") == 1            # 원본만
+    assert enriched.count("p1 표 제목") == 2                 # 사본 + 원본(앞은 복사)
 
 
 def test_copy_adjacent_tables_no_context():
