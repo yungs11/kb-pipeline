@@ -146,10 +146,30 @@ def hybrid_to_blocks(doc: str, page_idx: int = 0) -> list[dict]:
     i = 0
     n = len(tokens)
     pending_heading_level: int | None = None
+    # 리스트 항목 기호 복원용. markdown-it 은 `- `/`* `/`1. ` 를 **구조로 소비**해 텍스트에서
+    # 지운다 → 원문의 각주 표기가 사라진다(실측 휴가규정: `- * 각 대상에…` 가 중첩 리스트로
+    # 파싱돼 `-` 와 `*` 둘 다 소실, 옆줄 `- ** 사망…` 은 `**` 가 불릿이 아니라 살아남아
+    # 같은 각주 3줄이 서로 다르게 처리됐다). 항목 텍스트 앞에 기호를 되살리고, 블록에
+    # ``list_markers`` 로 무엇을 되살렸는지 남긴다(소비자가 구조 기호와 본문을 구분 가능).
+    pending_markers: list[str] = []
 
     while i < n:
         tok = tokens[i]
         t = tok.type
+
+        if t == "list_item_open":
+            # ordered 는 항목 번호(`info`)를, bullet 은 기호(`markup`)를 쓴다.
+            info = (getattr(tok, "info", "") or "").strip()
+            markup = tok.markup or "-"
+            pending_markers.append(f"{info}{markup}" if info else markup)
+            i += 1
+            continue
+
+        if t == "list_item_close":
+            if pending_markers:
+                pending_markers.pop()       # 텍스트 없이 닫힌 항목(중첩 컨테이너 등)
+            i += 1
+            continue
 
         if t == "html_block":
             content = tok.content or ""
@@ -257,7 +277,13 @@ def hybrid_to_blocks(doc: str, page_idx: int = 0) -> list[dict]:
             # plain paragraph text
             text = _render_inline_text(tok).strip()
             if text:
-                blocks.append({"type": "text", "text": text, "page_idx": page_idx})
+                block = {"type": "text", "text": text, "page_idx": page_idx}
+                if pending_markers:
+                    # 항목 텍스트 앞에 기호 복원. 중첩(`- * …`)이면 바깥→안쪽 순서대로.
+                    block["text"] = " ".join(pending_markers) + " " + text
+                    block["list_markers"] = list(pending_markers)
+                    pending_markers.clear()
+                blocks.append(block)
             i += 1
             continue
 

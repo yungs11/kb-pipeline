@@ -771,5 +771,61 @@ def test_enrich_with_spans_wrap_on_page_spans_align():
     assert s2["char_end"] == len(enriched)               # enriched 총길이와 span 합치 일치
 
 
+def test_blockify_restores_list_markers():
+    """markdown-it 이 구조로 소비한 리스트 기호를 텍스트에 복원한다.
+
+    실측(휴가규정 p5): ODL 이 각주를 `- * 각 대상에…` 로 내보내는데 중첩 리스트로 파싱돼
+    `-` 와 `*` 가 둘 다 사라졌다. 옆줄 `- ** 사망…` 은 `**` 가 불릿이 아니라 살아남아,
+    같은 각주 3줄이 서로 다르게 처리됐다.
+    """
+    from kb_pipeline.blockify import hybrid_to_blocks
+    blocks = hybrid_to_blocks(
+        "- * 각 대상에 대해 1회만 부여한다.\n"
+        "- ** 사망 시의 휴가부여는 사망일로부터 기산한다.\n"
+        "\n- 일반 항목\n\n1. 첫째 번호\n"
+    )
+    texts = [(b["text"], b.get("list_markers")) for b in blocks]
+    assert texts[0] == ("- * 각 대상에 대해 1회만 부여한다.", ["-", "*"])   # 중첩 복원
+    assert texts[1] == ("- ** 사망 시의 휴가부여는 사망일로부터 기산한다.", ["-"])
+    assert texts[2] == ("- 일반 항목", ["-"])
+    assert texts[3] == ("1. 첫째 번호", ["1."])
+    # 리스트가 아닌 문단은 손대지 않는다(list_markers 없음).
+    plain = hybrid_to_blocks("*** 회갑을 대신하여 사용할 수 있다.")
+    assert plain[0]["text"].startswith("***") and "list_markers" not in plain[0]
+
+
+def test_footnote_judge_strips_structural_markers_but_keeps_star():
+    """리스트 기호는 벗기고 판정하되 ``*`` 는 남긴다(각주 표기이기도 함)."""
+    f = modal._looks_like_footnote
+    assert f("- * 각 대상에 대해 1회만 부여한다.", True) is True    # `-` 만 벗김 → `*` 로 각주
+    assert f("- 일반 항목", True) is False                        # 구조 기호뿐
+    assert f("1) 항목", True) is False                            # 복원된 번호 항목 ≠ 각주
+    assert f("1) 항목", False) is True                            # 리스트 아닌 번호형 각주
+    assert f("주1) 지급여력비율은", False) is True                 # 기존 각주 판정 불변
+
+
+def test_bullet_footnote_after_table_is_moved_not_copied():
+    """복원된 `- * …` 각주는 이동(consume)돼 표 밖에 중복으로 남지 않는다."""
+    from kb_pipeline.blockify import hybrid_to_blocks
+    blocks = ([{"type": "table", "table_body": "<table>X</table>", "page_idx": 1}]
+              + hybrid_to_blocks("- * 각 대상에 대해 1회만 부여한다.\n", page_idx=1))
+    enriched, ids = enrich(blocks, text_llm=None, vision_llm=None,
+                           enrich_modals=False, wrap_modals=True)
+    assert ids == ["T1"]
+    assert enriched.count("각 대상에 대해") == 1          # 이동 → 사본 1개뿐
+    span = enriched[enriched.index(OPEN_PREFIX):enriched.index(CLOSE)]
+    assert "각 대상에 대해" in span                       # 그 1개는 MODAL 안
+
+
+def test_bullet_body_after_table_is_copied_not_moved():
+    """각주가 아닌 일반 불릿 항목은 복사 — 원본이 표 밖에 남는다(본문 유실 방지)."""
+    from kb_pipeline.blockify import hybrid_to_blocks
+    blocks = ([{"type": "table", "table_body": "<table>X</table>", "page_idx": 1}]
+              + hybrid_to_blocks("- 상위권 시장지위 유지 여부\n", page_idx=1))
+    enriched, _ = enrich(blocks, text_llm=None, vision_llm=None,
+                         enrich_modals=False, wrap_modals=True)
+    assert enriched.count("상위권 시장지위 유지 여부") == 2   # 사본 + 원본
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))

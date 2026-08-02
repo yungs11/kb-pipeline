@@ -156,9 +156,26 @@ _FOOTNOTE_MARKS = ("※", "*", "주)", "주1)", "주2)", "주3)", "주4)", "주5
 _FOOTNOTE_NUM_RE = re.compile(r"^(주\s*\d+\)|\(\d+\)|\[\d+\]|\d+\)\s)")
 
 
-def _looks_like_footnote(text: str) -> bool:
-    """각주 표기로 시작하면 True — 이동해도 안전한 블록인지 판정."""
+#: 리스트 **구조** 기호(blockify 가 ``list_markers`` 와 함께 복원한 것) — 각주 판정 전에
+#: 벗겨낸다. ``*`` 는 일부러 빼놨다: 각주 표기이기도 해서 벗기면 판정 근거가 사라진다
+#: (실측 휴가규정 ``- * 각 대상에…`` → ``-`` 만 벗기고 ``*`` 로 각주 판정).
+_LIST_MARKER_RE = re.compile(r"^(?:[-+]|\d+[.)])\s+")
+
+
+def _looks_like_footnote(text: str, is_list_item: bool = False) -> bool:
+    """각주 표기로 시작하면 True — 이동해도 안전한 블록인지 판정.
+
+    ``is_list_item`` 이면 앞의 리스트 구조 기호를 먼저 벗긴다. 이 게이트가 없으면
+    복원된 번호 항목(``1) 항목``)이 번호형 각주로 오인돼 본문이 표 안으로 끌려간다.
+    반대로 리스트가 아닌 진짜 각주 문단 ``1) …`` 은 그대로 각주로 인정된다.
+    """
     s = (text or "").lstrip()
+    if is_list_item:
+        while True:
+            s2 = _LIST_MARKER_RE.sub("", s, count=1)
+            if s2 == s:
+                break
+            s = s2
     if s.startswith(_FOOTNOTE_MARKS):
         return True
     # `주1)`·`주 1)`·`1)`·`(1)` 처럼 번호가 낀 각주 표기.
@@ -268,17 +285,18 @@ def _ctx_after_blocks(
     ):
         if is_heading:
             break                               # 다음 섹션 제목 — 포함하지 않고 중단
+        li = bool(blocks and (blocks[idx] or {}).get("list_markers"))
         if len(s) > budget:
             # 예산 초과 → **각주 블록만** 온전한 문장까지 발췌해 살린다. 각주가 아닌
             # 초과 블록까지 살리면 다음 절 본문이 표 문맥으로 딸려온다(실측 KIS:
             # ``## Key Issue Update …``, ``우수한 자본적정성 …`` 가 표 뒤 문맥에 유입).
-            head = _head_to_sentence(s, budget) if _looks_like_footnote(s) else ""
+            head = _head_to_sentence(s, budget) if _looks_like_footnote(s, li) else ""
             if head:
                 out.append((idx, head, False))   # 부분 발췌라 이동 금지(원본 보존)
             break
         # 이동(consume)은 **각주 표기가 확실한 블록만**. 그 외(본문·제목처럼 보이는 것)는
         # 문맥으로 쓰되 원본을 남긴다(복사) — 이동하면 그 문단이 원래 자리에서 사라진다.
-        out.append((idx, s, _looks_like_footnote(s)))
+        out.append((idx, s, _looks_like_footnote(s, li)))
         budget -= len(s) + 1
     return out
 
