@@ -121,6 +121,33 @@ def _nonblank_cands(
     return out
 
 
+def _ctx_before_blocks(
+    before: list[tuple[int, str]], blocks: list[dict] | None = None
+) -> list[tuple[int, str]]:
+    """표 앞 문맥으로 **복사**할 블록들 — ``[(블록인덱스, 텍스트)]`` (nearest-first).
+
+    복사라 원본을 건드리지 않으므로 마지막(가장 먼) 블록은 예산에 맞춰 **잘라도** 된다.
+    Phase C 가 이 목록에서 '앞 모달이 이미 이동시킨(consumed) 블록'을 걸러낸다 — 안 그러면
+    [표1][각주][표2] 에서 표1 이 이동시킨 각주를 표2 가 다시 복사한다(실측 T2 누출).
+    """
+    budget = _CTX_COPY_BEFORE_CHARS
+    out: list[tuple[int, str]] = []
+    pairs = [(i, t) for i, t in before if (t or "").strip()]
+    for (idx, _raw), (s, _is_heading) in zip(pairs, _nonblank_cands(before, blocks)):
+        if budget <= 0:
+            break
+        if len(s) > budget:
+            s = s[-budget:]                     # 표에 가까운 쪽(끝)만 남긴다
+        out.append((idx, s))
+        budget -= len(s) + 1
+    return out
+
+
+def _join_before(pairs: list[tuple[int, str]]) -> str:
+    """nearest-first 앞 문맥 조각들을 문서순(먼 것 → 가까운 것)으로 잇는다."""
+    return "\n".join(t for _, t in reversed(pairs))
+
+
 def _ctx_copy_before(before: list[tuple[int, str]], blocks: list[dict] | None = None) -> str:
     """표 앞 문맥 — 표에서 거슬러 올라가며 **예산(``_CTX_COPY_BEFORE_CHARS``)만 채운다**.
 
@@ -133,38 +160,36 @@ def _ctx_copy_before(before: list[tuple[int, str]], blocks: list[dict] | None = 
       무관한 앞 문맥이 조금 섞이는 건 예산(100자)이 제한하며, 사용자 수용 사항.
     - 예산을 넘기면 가장 먼 블록을 **끝에서부터** 잘라 채운다. 블록 사이는 ``\\n``.
     """
-    budget = _CTX_COPY_BEFORE_CHARS
-    parts: list[str] = []                       # nearest-first 로 쌓고 마지막에 뒤집는다
-    for s, _is_heading in _nonblank_cands(before, blocks):
-        if budget <= 0:
-            break
-        if len(s) > budget:
-            s = s[-budget:]                     # 표에 가까운 쪽(끝)만 남긴다
-        parts.append(s)
-        budget -= len(s) + 1                    # +1: 블록 사이 개행
-    return "\n".join(reversed(parts))
+    return _join_before(_ctx_before_blocks(before, blocks))
 
 
-def _ctx_copy_after(after: list[tuple[int, str]], blocks: list[dict] | None = None) -> str:
-    """표 뒤 문맥 — 표에서 내려가며 **예산을 채우되 제목 직전에 멈춘다**.
+def _ctx_after_blocks(
+    after: list[tuple[int, str]], blocks: list[dict] | None = None
+) -> list[tuple[int, str]]:
+    """표 뒤 문맥으로 **이동**할 블록들 — ``[(블록인덱스, 텍스트)]`` (문서순).
 
-    ``_ctx_copy_before`` 대칭이나 **경계 방향이 반대**다: 뒤쪽의 제목은 *다음* 섹션·표의
-    제목이므로 **포함하지 않고 그 직전에서 중단**한다(실측: 휴가규정 ``휴가결근 신청서``,
-    KIS ``유사시 계열 지원가능성`` 이 표 각주로 딸려오던 문제). 각주가 여러 블록으로
-    쪼개져 있어도(``각 대상에…``/``** 사망 시의…``/``*** "2. 회갑"…``) 본문이라 다 담긴다.
+    ``_ctx_copy_before`` 와 **경계 방향이 반대**다: 뒤쪽 제목은 *다음* 섹션·표의 제목이므로
+    **포함하지 않고 그 직전에서 중단**한다(실측: 휴가규정 ``휴가결근 신청서``, KIS
+    ``유사시 계열 지원가능성`` 이 표 각주로 딸려오던 문제). 각주가 여러 블록이어도
+    (``각 대상에…``/``** 사망…``/``*** "2. 회갑"…``) 본문이라 예산 안에서 다 담긴다.
+
+    ⚠️ **통째 블록만** 담는다(앞쪽과 달리 자르지 않음): 뒤쪽은 원본을 **이동**(consume)
+    시키므로 부분만 가져가면 블록 나머지를 잃는다. 따라서 예산(``_CTX_COPY_AFTER_CHARS``)
+    은 '정확히 채우는 값'이 아니라 **상한**이고, 다음 블록이 예산을 넘으면 중단한다.
     """
     budget = _CTX_COPY_AFTER_CHARS
-    parts: list[str] = []
-    for s, is_heading in _nonblank_cands(after, blocks):   # after 는 문서순과 동일
+    out: list[tuple[int, str]] = []
+    for (idx, raw), (s, is_heading) in zip(
+        [(i, t) for i, t in after if (t or "").strip()],
+        _nonblank_cands(after, blocks),
+    ):
         if is_heading:
             break                               # 다음 섹션 제목 — 포함하지 않고 중단
-        if budget <= 0:
-            break
         if len(s) > budget:
-            s = s[:budget]                      # 표에 가까운 쪽(앞)만 남긴다
-        parts.append(s)
+            break                               # 통째로 안 들어가면 중단(자르지 않음)
+        out.append((idx, s))
         budget -= len(s) + 1
-    return "\n".join(parts)
+    return out
 
 
 #: oversize 안전상한(문자). bge-m3 윈도우 8192tok, ~2.3char/tok → 6000tok≈13800자.
@@ -424,10 +449,15 @@ def _enrich_core(
         for m in modals:
             m["summary"] = ""
             if wrap_modals:
-                m["ctx_before"] = _ctx_copy_before(m["before"], blocks)
-                m["ctx_after"] = _ctx_copy_after(m["after"], blocks)
+                # 앞: 복사(원본 유지) — 경계가 없어 무관 본문이 섞일 수 있어 이동 금지.
+                m["ctx_before_pairs"] = _ctx_before_blocks(m["before"], blocks)
+                m["ctx_before"] = _join_before(m["ctx_before_pairs"])
+                # 뒤: 이동(consume) — 제목 경계로 '이 표의 각주'만 정확히 잡으므로 안전.
+                m["ctx_after_pairs"] = _ctx_after_blocks(m["after"], blocks)
+                m["ctx_after"] = "\n".join(t for _, t in m["ctx_after_pairs"])
             else:
                 m["ctx_before"] = m["ctx_after"] = ""
+                m["ctx_before_pairs"] = m["ctx_after_pairs"] = []
             # 복사는 흡수가 아니라 tc/fc=0 (consumed 공집합 → 원본 블록 생존).
             # ⚠️ 반드시 유지 — A-guard 와 Phase C 가 읽는다(KeyError 방지).
             m["tc"], m["fc"] = 0, 0
@@ -439,6 +469,7 @@ def _enrich_core(
                 m["summary"], m["tc"], m["fc"] = summary, tc, fc
                 # LLM 경로는 흡수 그대로 — 복사 안 함. 키만 채워 하류 KeyError 방지.
                 m["ctx_before"] = m["ctx_after"] = ""
+                m["ctx_before_pairs"] = m["ctx_after_pairs"] = []
         modal_wall_ms = (time.perf_counter() - _b0) * 1000.0
 
     # 모니터링(P2): 모달 LLM(표/이미지 분석) 단계 분해 — wall(병렬) + 호출 수 + 타입별 합 +
@@ -469,10 +500,12 @@ def _enrich_core(
         base_est = len(m["summary"]) + len(m["body"]) + title_est + foot_est
         if base_est + len(m["ctx_before"]) + len(m["ctx_after"]) > _OVERSIZE_CHARS:
             m["ctx_before"] = m["ctx_after"] = ""   # 1순위: 문맥 포기(원자성 유지)
+            m["ctx_before_pairs"] = m["ctx_after_pairs"] = []
         m["bare"] = base_est > _OVERSIZE_CHARS       # 2순위: 본체만으로도 초과면 bare
         if m["bare"]:
             m["tc"], m["fc"] = 0, 0
             m["ctx_before"] = m["ctx_after"] = ""
+            m["ctx_before_pairs"] = m["ctx_after_pairs"] = []
 
     # Phase C — 충돌 해소(문서순; 앞 모달 우선, 모달에서 연속, consumed 만나면 중단).
     # consume(제목/각주 흡수)만 wrap_modals 게이트 — decisions 는 **항상** 채워야 table 이
@@ -495,6 +528,28 @@ def _enrich_core(
                 if idx in consumed:
                     break
                 footnote_idxs.append(idx)
+            # 복사 경로의 **뒤쪽은 이동**(consume) — 제목 경계로 '이 표의 각주'만 잡으므로
+            # 원본에 남길 이유가 없고, 앞 모달이 선점하면 다음 표가 그 각주를 또 가져가는
+            # 누출도 막힌다(실측: T2 앞문맥에 T1 각주 유입). 앞쪽(ctx_before)은 복사 유지.
+            surviving: list[str] = []
+            for idx, text in m.get("ctx_after_pairs") or []:
+                if idx in consumed:
+                    break                       # 앞 모달이 이미 가져감 — 중복 방지
+                footnote_idxs.append(idx)
+                surviving.append(text)
+            if m.get("ctx_after_pairs"):
+                m["ctx_after"] = "\n".join(surviving)   # 선점분 제외하고 재조립
+            # 앞쪽(복사)도 **선점분은 제외**한다. 윈도우는 Phase A 에서 consumed 무시로
+            # 수집돼 앞 모달이 이미 이동시킨 블록이 남아 있다 → 그대로 두면 [표1][각주][표2]
+            # 에서 표2 가 표1 의 각주를 다시 복사한다(실측 T2 누출). nearest-first 라
+            # 선점 블록을 만나면 거기서 중단(구멍 건너뛰기 금지).
+            kept_before: list[tuple[int, str]] = []
+            for idx, text in m.get("ctx_before_pairs") or []:
+                if idx in consumed:
+                    break
+                kept_before.append((idx, text))
+            if m.get("ctx_before_pairs"):
+                m["ctx_before"] = _join_before(kept_before)
             consumed.update(title_idxs)
             consumed.update(footnote_idxs)
         decisions[m["i"]] = {

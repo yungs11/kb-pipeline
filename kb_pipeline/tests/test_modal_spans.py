@@ -304,7 +304,15 @@ def test_spans_page_zero_explicit_kept_distinct():
 
 _nonblank_cands = modal._nonblank_cands
 _ctx_copy_before = modal._ctx_copy_before
-_ctx_copy_after = modal._ctx_copy_after
+_ctx_after_blocks = modal._ctx_after_blocks
+
+
+def _ctx_copy_after(after, blocks=None):
+    """테스트 편의: 이동 대상 블록들을 예전처럼 문자열로 합쳐 본다.
+
+    뒤쪽은 이제 '이동'이라 (idx, text) 쌍을 돌려주지만, 문맥 내용 검증은 문자열이 편하다.
+    """
+    return "\n".join(t for _, t in _ctx_after_blocks(after, blocks))
 BEFORE_CHARS = modal._CTX_COPY_BEFORE_CHARS      # 100
 AFTER_CHARS = modal._CTX_COPY_AFTER_CHARS        # 200
 
@@ -384,7 +392,7 @@ def test_ctx_copy_fills_budget_across_blocks():
     got_a = _ctx_copy_after(after)
     assert got_a.startswith("각주1 ")                      # 표에 가장 가까운 게 앞
     assert "각주2 " in got_a                               # 예산 안이면 다음 블록도
-    assert len(got_a) == AFTER_CHARS                       # 마지막 블록을 잘라 예산을 정확히 채움
+    assert len(got_a) <= AFTER_CHARS                       # 통째 블록만(이동 가능하게) → 예산은 상한
 
 
 def test_ctx_copy_before_takes_last_chars():
@@ -398,11 +406,15 @@ def test_ctx_copy_before_takes_last_chars():
     assert _ctx_copy_before([(0, "   ")]) == ""                      # 전부 공백
 
 
-def test_ctx_copy_after_takes_first_chars():
+def test_ctx_copy_after_takes_whole_blocks_within_budget():
     assert _ctx_copy_after([(0, "짧은 각주")]) == "짧은 각주"
+    # 예산 초과 블록은 **통째로 제외**(자르지 않음) — 이동이라 부분만 가져가면 나머지 유실.
     long = "다" * 500
-    got = _ctx_copy_after([(0, long)])
-    assert len(got) == AFTER_CHARS and got == long[:AFTER_CHARS]     # 앞 AFTER_CHARS 자
+    assert _ctx_copy_after([(0, long)]) == ""
+    # 예산 안이면 여러 블록을 통째로 이어 담고, 넘치는 블록에서 중단한다.
+    a, b, c = "가" * 80, "나" * 80, "다" * 80
+    got = _ctx_copy_after([(0, a), (1, b), (2, c)])
+    assert got == a + "\n" + b and len(got) <= AFTER_CHARS
     assert _ctx_copy_after([]) == ""
     assert _ctx_copy_after([(0, "  \n ")]) == ""
 
@@ -432,35 +444,41 @@ def test_enrich_off_wrap_on_copies_context_without_llm():
     assert "[단위:원]" in span and "※각주 설명" in span and "<table>T</table>" in span
     assert "SHOULD_NOT_BE_USED" not in enriched          # summary 빈문자열
     # 복사(이동 아님) — 사본 + 원본으로 2회 등장.
-    assert enriched.count("[단위:원]") == 2
-    assert enriched.count("※각주 설명") == 2
+    assert enriched.count("[단위:원]") == 2      # 앞: 복사 → 사본 + 원본
+    # 뒤: **이동**(consume) → 원본 세그먼트가 사라지고 MODAL 안에만 1회.
+    assert enriched.count("※각주 설명") == 1
     # 원본이 제 세그먼트로 살아있다(마커 밖에도 존재).
     outside = enriched[:enriched.index(OPEN_PREFIX)] + enriched[enriched.index(CLOSE):]
-    assert "[단위:원]" in outside and "※각주 설명" in outside
-    # 예산 채우기 계약: 100자 안이면 뒤 블록들을 이어 담는다(사본) + 원본도 유지.
-    assert "다음 본문" in span and "다음 본문" in outside
+    assert "[단위:원]" in outside          # 앞: 원본 생존(복사)
+    assert "※각주 설명" not in outside     # 뒤: 원본 이동(consume)
+    # 뒤는 이동이라 예산 안 블록들이 MODAL 로 옮겨지고 바깥에는 남지 않는다.
+    assert "다음 본문" in span and "다음 본문" not in outside
     assert ids == ["T1"]
 
 
-def test_copy_segment_count_equals_wrap_off_assembly():
-    """consumed 공집합 계약 — 세그먼트 수가 wrap_modals=False 조립과 정확히 같다."""
+def test_copy_segment_count_drops_only_moved_after_blocks():
+    """앞=복사(원본 유지) / 뒤=이동(consume) — 세그먼트는 뒤쪽 블록 수만큼만 줄어든다."""
     blocks = [
-        {"type": "text", "text": "캡션"},
+        {"type": "text", "text": "캡션"},                    # 앞: 복사 → 세그먼트 생존
         {"type": "table", "table_body": "<table>T</table>"},
-        {"type": "text", "text": "각주"},
+        {"type": "text", "text": "각주"},                    # 뒤: 이동 → 세그먼트 사라짐
     ]
     # ⚠️ enriched 를 JOIN 으로 split 하면 안 된다 — 복사 경로는 summary="" 라 MODAL 안에도
     # "\n\n" 이 생긴다. 세그먼트 수는 _assemble 결과로 직접 센다.
-    def _n_segments(wrap):
+    def _run(wrap):
         decisions, consumed, _ = modal._enrich_core(
             blocks, text_llm=None, vision_llm=None, max_workers=1,
             enrich_modals=False, wrap_modals=wrap,
         )
-        assert consumed == set()                       # 복사 = consume 0
         segs, _pi = modal._assemble(blocks, decisions, consumed, wrap_modals=wrap)
-        return len(segs)
+        return len(segs), consumed
 
-    assert _n_segments(True) == _n_segments(False) == 3
+    n_wrap, consumed_wrap = _run(True)
+    n_plain, consumed_plain = _run(False)
+    assert consumed_plain == set()                  # wrap off = 이동 없음
+    assert consumed_wrap == {2}                     # 뒤 블록(각주)만 이동
+    assert n_plain == 3                             # 캡션 / 표 / 각주
+    assert n_wrap == 2                              # 캡션 / MODAL(표+각주) — 각주 세그먼트 소멸
 
 
 def test_copy_cross_page_original_survives_on_its_own_page():
@@ -513,8 +531,9 @@ def test_copy_after_fills_budget_over_multiple_footnote_blocks():
     span = enriched[enriched.index(OPEN_PREFIX):enriched.index(CLOSE)]
     assert "※주1 상기 금액은 부가세 별도" in span
     assert "※주2 환율은 기준일 기준" in span                     # 예산 안이라 둘째도 포함
-    assert enriched.count("※주1 상기 금액은 부가세 별도") == 2   # 사본 + 원본
-    assert enriched.count("※주2 환율은 기준일 기준") == 2        # 사본 + 원본(복사)
+    # 뒤는 **이동** — 원본 세그먼트가 사라져 각각 1회(MODAL 안)만 등장.
+    assert enriched.count("※주1 상기 금액은 부가세 별도") == 1
+    assert enriched.count("※주2 환율은 기준일 기준") == 1
     assert ids == ["T1"]
 
 
