@@ -98,6 +98,52 @@ _CTX_COPY_BEFORE_CHARS = 200
 #: 표 '뒤' 문맥으로 가져올 최대 길이 — 표에 가까운 '앞'에서 200자.
 _CTX_COPY_AFTER_CHARS = 200
 
+#: 문장 경계를 맞추느라 예산을 **넘길 수 있는 한도**(문자). 예산 컷 지점이 문장 중간이면
+#: 문장 처음까지 거슬러 올라가 통째로 담는데, 경계가 아예 없는 블록(개조식·표 캡션 등)이면
+#: 무한정 커질 수 있으므로 총 길이를 ``예산 + 이 값`` 으로 제한한다. 초과하면 문장 확장을
+#: 포기하고 '컷 지점 이후의 첫 문장 경계'로 **줄여서**(예산 미달) 맞춘다.
+_CTX_SENTENCE_OVERSHOOT = 200
+
+#: 문장 경계 정규식 — 매치의 ``end()`` 가 '다음 문장이 시작되는' 오프셋이다.
+#: 오탐 차단 2건(실측): ``18.9%`` 소수점(뒤가 숫자면 ``\s+`` 불일치), ``2025.09.01.``
+#: 날짜(앞이 숫자면 ``(?<![0-9])`` 로 제외). 줄바꿈은 그 자체로 안전한 경계다.
+_SENT_BOUNDARY_RE = re.compile(r'(?:(?<![0-9])[.!?][)"\'”’」』]?[ \t]+|\n+)')
+
+
+def _sentence_starts(s: str) -> list[int]:
+    """``s`` 안에서 문장이 시작되는 오프셋들(오름차순, 0 은 제외)."""
+    return [m.end() for m in _SENT_BOUNDARY_RE.finditer(s) if m.end() < len(s)]
+
+
+def _tail_from_sentence(s: str, budget: int) -> str:
+    """``s`` 의 뒤쪽을 ``budget`` 근처로 자르되 **문장 중간에서 끊지 않는다**.
+
+    1순위: 컷 지점(``len(s)-budget``) 이하의 가장 가까운 문장 시작으로 **거슬러 올라가**
+    문장을 통째로 담는다(예산 초과 허용, ``_CTX_SENTENCE_OVERSHOOT`` 까지).
+    2순위: 그래도 너무 길면 컷 지점 **이후**의 첫 문장 시작으로 줄인다(예산 미달).
+    3순위: 문장 경계가 아예 없으면 기존대로 끝에서 ``budget`` 자를 자른다.
+    """
+    if len(s) <= budget:
+        return s
+    cut = len(s) - budget
+    starts = _sentence_starts(s)
+    # 0 도 후보다 — 컷 지점이 첫 문장 안이면 블록 처음부터 통째로 담는다(한도 안에서).
+    back = [0] + [p for p in starts if p <= cut]
+    if len(s) - back[-1] <= budget + _CTX_SENTENCE_OVERSHOOT:
+        return s[back[-1]:]                     # 문장 처음까지 확장(통째로)
+    fwd = [p for p in starts if p > cut]
+    if fwd:
+        return s[fwd[0]:]                       # 다음 문장부터(예산 미달)
+    return s[-budget:]                          # 경계 없음 — 기존 동작
+
+
+def _head_to_sentence(s: str, budget: int) -> str:
+    """``s`` 의 앞쪽에서 ``budget`` 안에 **온전히 들어가는 문장들**만 반환(없으면 "")."""
+    if len(s) <= budget:
+        return s
+    ends = [p for p in _sentence_starts(s) if p <= budget]
+    return s[:ends[-1]].rstrip() if ends else ""
+
 #: 각주로 인정하는 시작 표기. **포함 여부가 아니라 '이동 vs 복사' 판단에만** 쓴다.
 #: 실측(KIS): 뒤 문맥으로 가져오는 블록 9개 중 3개가 각주가 아니었다 — 다음 섹션 제목
 #: (``Key Monitoring Indicators``, text_level 미부여라 제목경계가 못 잡음)과 본문 서술
@@ -170,8 +216,7 @@ def _ctx_before_blocks(
     for n, ((idx, _raw), (s, is_heading)) in enumerate(zip(pairs, cands)):
         if budget <= 0:
             break
-        if len(s) > budget:
-            s = s[-budget:]                     # 표에 가까운 쪽(끝)만 남긴다
+        s = _tail_from_sentence(s, budget)      # 표에 가까운 쪽(끝) — 문장 중간 금지
         out.append((idx, s))
         budget -= len(s) + 1
         nxt = cands[n + 1] if n + 1 < len(cands) else None
@@ -210,12 +255,13 @@ def _ctx_after_blocks(
     ``유사시 계열 지원가능성`` 이 표 각주로 딸려오던 문제). 각주가 여러 블록이어도
     (``각 대상에…``/``** 사망…``/``*** "2. 회갑"…``) 본문이라 예산 안에서 다 담긴다.
 
-    ⚠️ **통째 블록만** 담는다(앞쪽과 달리 자르지 않음): 뒤쪽은 원본을 **이동**(consume)
-    시키므로 부분만 가져가면 블록 나머지를 잃는다. 따라서 예산(``_CTX_COPY_AFTER_CHARS``)
-    은 '정확히 채우는 값'이 아니라 **상한**이고, 다음 블록이 예산을 넘으면 중단한다.
+    예산 안에 통째로 들어가는 블록은 **이동 후보**다(각주 표기면 실제로 이동).
+    예산을 넘는 블록은 버리지 않고 **앞에서부터 온전한 문장들만 복사**하고 중단한다
+    — 부분만 가져가면서 원본을 consume 하면 나머지 문장을 잃으므로, 이 경우는 각주여도
+    ``이동가능=False`` 로 강제해 원본을 남긴다(긴 각주 블록에서 문맥이 0 이던 문제).
     """
     budget = _CTX_COPY_AFTER_CHARS
-    out: list[tuple[int, str]] = []
+    out: list[tuple[int, str, bool]] = []
     for (idx, raw), (s, is_heading) in zip(
         [(i, t) for i, t in after if (t or "").strip()],
         _nonblank_cands(after, blocks),
@@ -223,7 +269,13 @@ def _ctx_after_blocks(
         if is_heading:
             break                               # 다음 섹션 제목 — 포함하지 않고 중단
         if len(s) > budget:
-            break                               # 통째로 안 들어가면 중단(자르지 않음)
+            # 예산 초과 → **각주 블록만** 온전한 문장까지 발췌해 살린다. 각주가 아닌
+            # 초과 블록까지 살리면 다음 절 본문이 표 문맥으로 딸려온다(실측 KIS:
+            # ``## Key Issue Update …``, ``우수한 자본적정성 …`` 가 표 뒤 문맥에 유입).
+            head = _head_to_sentence(s, budget) if _looks_like_footnote(s) else ""
+            if head:
+                out.append((idx, head, False))   # 부분 발췌라 이동 금지(원본 보존)
+            break
         # 이동(consume)은 **각주 표기가 확실한 블록만**. 그 외(본문·제목처럼 보이는 것)는
         # 문맥으로 쓰되 원본을 남긴다(복사) — 이동하면 그 문단이 원래 자리에서 사라진다.
         out.append((idx, s, _looks_like_footnote(s)))

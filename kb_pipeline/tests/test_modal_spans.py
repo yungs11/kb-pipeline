@@ -408,7 +408,7 @@ def test_ctx_copy_before_takes_last_chars():
 
 def test_ctx_copy_after_takes_whole_blocks_within_budget():
     assert _ctx_copy_after([(0, "짧은 각주")]) == "짧은 각주"
-    # 예산 초과 블록은 **통째로 제외**(자르지 않음) — 이동이라 부분만 가져가면 나머지 유실.
+    # 문장 경계가 **하나도 없는** 초과 블록은 제외(어디서 끊어도 문장이 깨진다).
     long = "다" * 500
     assert _ctx_copy_after([(0, long)]) == ""
     # 예산 안이면 여러 블록을 통째로 이어 담고, 넘치는 블록에서 중단한다.
@@ -417,6 +417,56 @@ def test_ctx_copy_after_takes_whole_blocks_within_budget():
     assert got == a + "\n" + b and len(got) <= AFTER_CHARS
     assert _ctx_copy_after([]) == ""
     assert _ctx_copy_after([(0, "  \n ")]) == ""
+
+
+def test_sentence_boundary_detection_ignores_decimals_and_dates():
+    """문장 경계 오탐 차단 — 소수점(``18.9%``)·날짜(``2025.09.01.``)는 경계가 아니다."""
+    assert modal._sentence_starts("비중은 18.9%로 낮고 안전자산은 66.9%다. 다음 문장.") == [
+        len("비중은 18.9%로 낮고 안전자산은 66.9%다. ")]
+    assert modal._sentence_starts("가정의례 허가기준 (개정 2025.09.01.)") == []
+    # 줄바꿈은 그 자체로 안전한 경계.
+    assert modal._sentence_starts("첫 줄\n둘째 줄") == [len("첫 줄\n")]
+
+
+def test_ctx_before_never_cuts_mid_sentence():
+    """앞 문맥은 예산 컷이 문장 중간이면 **문장 처음까지 거슬러 올라간다**(한도 내).
+
+    실측(KIS): 200자 컷이 ``'단한다.'``·``'적인 자산운용**'`` 처럼 어절 중간이었다.
+    """
+    s1 = "첫 번째 문장이며 예산 밖으로 밀려난다. "
+    s2 = "두 번째 문장은 표 바로 앞에 붙는 설명이다. "
+    s3 = "세 번째 문장 " + "가" * 340 + " 로 끝난다."   # 블록 처음까지 확장은 한도 초과
+    got = _ctx_copy_before([(0, s1 + s2 + s3)])
+    assert got.startswith("세 번째 문장")                  # 컷이 걸린 문장의 '처음'으로 확장
+    assert "첫 번째 문장" not in got                       # 예산 밖 문장은 제외
+    assert "두 번째 문장" not in got
+    assert len(got) <= BEFORE_CHARS + modal._CTX_SENTENCE_OVERSHOOT
+
+    # 확장이 한도를 넘으면 **다음 문장부터**로 줄인다(예산 미달을 감수).
+    huge = "앞 문장. " + "나" * (BEFORE_CHARS + modal._CTX_SENTENCE_OVERSHOOT + 50) + "."
+    got2 = _ctx_copy_before([(0, huge)])
+    assert len(got2) <= BEFORE_CHARS + modal._CTX_SENTENCE_OVERSHOOT
+
+
+def test_ctx_after_long_block_copies_whole_sentences_instead_of_dropping():
+    """예산 초과 각주 블록도 **버리지 않고** 온전한 문장까지 복사한다(이동은 금지).
+
+    이전엔 첫 블록이 201자면 뒤 문맥이 통째로 0 이었다.
+    """
+    blk = ("주1) 첫 각주 문장이다. " + "주2) 두 번째 각주 문장이다. "
+           + "주3) " + "다" * 250 + " 로 끝나는 아주 긴 각주다.")
+    got = _ctx_after_blocks([(1, blk)])
+    assert len(got) == 1
+    idx, text, movable = got[0]
+    assert text.startswith("주1) 첫 각주 문장이다.")
+    assert "주2) 두 번째 각주 문장이다." in text
+    assert movable is False                               # 부분 발췌 → 원본 보존(복사)
+    assert len(text) <= AFTER_CHARS
+
+    # 각주가 **아닌** 초과 블록은 구제하지 않는다 — 실측(KIS)에서 다음 절 본문
+    # (`## Key Issue Update …`, `우수한 자본적정성 …`)이 표 문맥으로 딸려왔다.
+    body = ("다음 절이 시작되는 본문 문장이다. " * 3) + "가" * 200 + " 끝."
+    assert _ctx_after_blocks([(1, body)]) == []
 
 
 def test_enrich_off_wrap_on_copies_context_without_llm():
