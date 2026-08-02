@@ -11,7 +11,8 @@ Surrounding context (Philosophy A — parser owns atomicity)
 두 경로가 있다(문서 단위 플래그 ``enrich_modals`` 로 배타 결정):
 
 * **``enrich_modals=False`` (shipped 기본) — 문맥 *복사*.** 표/이미지/수식 앞 블록의
-  **마지막 200자**와 뒤 블록의 **앞 100자**를 〈MODAL…〈/MODAL〉 span **안으로 복사**한다.
+  **마지막 100자**와 뒤 블록들의 **앞 200자**를 〈MODAL…〈/MODAL〉 span **안으로 복사**한다
+  (예산이 찰 때까지 여러 블록 누적).
   패턴(제목/각주) 판정은 **하지 않는다** — 순수 글자수 규칙. **복사이므로 원본 블록은
   자기 자리에 그대로 남는다**(이동/흡수 아님) → 페이지 오귀속·원본 유실 없음. 대가는
   최대 300자 중복(임베딩/그래프 추출에서 2회 계상)이며 수용된 트레이드오프다.
@@ -47,7 +48,7 @@ MODAL_CLOSE = f"{_LANGLE}/MODAL{_RANGLE}"
 
 #: 모달 앞/뒤에서 고려할 연속 text 블록 최대 수.
 #: LLM 흡수 경로에선 '제목·각주 후보' 개수, 복사 경로에선 '문맥 스캔 범위'다
-#: (복사는 이 윈도우 안의 **첫 비공백 블록 1개**만 쓴다 — ``_first_nonblank``).
+#: (복사는 이 윈도우 안의 비공백 블록을 **예산(앞100/뒤200자)이 찰 때까지** 누적한다.)
 BEFORE_WINDOW = 3
 AFTER_WINDOW = 6
 
@@ -91,39 +92,60 @@ def _gather_after_window(blocks: list[dict], i: int, consumed: set[int]) -> list
 # 문맥을 **글자수 규칙으로 복사**한다. 제목/각주 패턴 판정은 하지 않는다(오탐 제거).
 # 복사이므로 원본 블록은 그대로 남는다 — 페이지 오귀속·유실이 구조적으로 불가능.
 
-#: 표 '앞' 블록에서 MODAL 안으로 복사할 최대 길이 — 표에 가까운 '끝' 200자.
-_CTX_COPY_BEFORE_CHARS = 200
-#: 표 '뒤' 블록에서 복사할 최대 길이 — 표에 가까운 '앞' 100자.
-_CTX_COPY_AFTER_CHARS = 100
+#: 표 '앞' 문맥으로 복사할 최대 길이 — 표에 가까운 '끝'에서 100자.
+_CTX_COPY_BEFORE_CHARS = 100
+#: 표 '뒤' 문맥으로 복사할 최대 길이 — 표에 가까운 '앞'에서 200자.
+#: 각주·단서가 표 뒤에 여러 줄로 붙는 경우가 많아 앞(100)보다 넉넉히 잡는다.
+_CTX_COPY_AFTER_CHARS = 200
 
 
-def _first_nonblank(cands: list[tuple[int, str]]) -> str:
-    """nearest-first 후보에서 strip 후 비지 않은 첫 텍스트(없으면 "").
+def _nonblank_texts(cands: list[tuple[int, str]]) -> list[str]:
+    """nearest-first 후보에서 strip 후 비지 않은 텍스트만(순서 보존).
 
-    ``_gather_*_window`` 는 빈/공백 text 블록도 window 에 넣으므로 before[0] 만 보면 바로
-    뒤의 실제 제목을 놓친다 → strip 후 빈 항목은 건너뛴다.
-    ⚠️ 계약: 스캔 범위는 BEFORE_WINDOW=3 / AFTER_WINDOW=6 이라 '직전 1블록'이 실제로는
-    '윈도우 내 첫 비공백 블록'(공백 블록이 끼면 i-2/i-3 까지)이다. 공백만 있는 블록은
-    ``_assemble`` 이 세그먼트로 emit 하지만(``if text:`` 는 truthy) 여기선 건너뛴다 —
-    의도된 차이.
+    ``_gather_*_window`` 는 빈/공백 text 블록도 window 에 넣으므로 그대로 쓰면 문맥이
+    빈 조각으로 채워진다 → strip 후 빈 항목은 건너뛴다. 스캔 범위는
+    BEFORE_WINDOW=3 / AFTER_WINDOW=6.
     """
-    for _, t in cands:
-        s = (t or "").strip()
-        if s:
-            return s
-    return ""
+    return [s for _, t in cands if (s := (t or "").strip())]
 
 
 def _ctx_copy_before(before: list[tuple[int, str]]) -> str:
-    """표 앞 문맥 — 표에 가까운 '끝' 200자(짧으면 전체). 없으면 ""."""
-    s = _first_nonblank(before)          # before 는 nearest-first
-    return s[-_CTX_COPY_BEFORE_CHARS:] if len(s) > _CTX_COPY_BEFORE_CHARS else s
+    """표 앞 문맥 — 표에서 거슬러 올라가며 **예산(_CTX_COPY_BEFORE_CHARS)을 채운다**.
+
+    한 블록만 쓰면 예산이 남아도 멈춰 정작 중요한 제목을 놓친다(실측: 표 직전이
+    ``(개정 2025.09.01.)`` 17자면 그것만 들어가고 그 앞의 제목 ``가정의례와 관련된 청원휴가
+    허가기준`` 이 빠짐). → 여러 블록을 표에 가까운 순으로 누적하고, 예산을 넘기면 **가장 먼
+    블록을 끝에서부터 잘라** 예산을 정확히 채운다. 블록 사이는 ``\\n`` 으로 잇는다.
+    """
+    budget = _CTX_COPY_BEFORE_CHARS
+    parts: list[str] = []                       # 문서순(먼 것 → 가까운 것)으로 뒤집어 쌓는다
+    for s in _nonblank_texts(before):           # before 는 nearest-first
+        if budget <= 0:
+            break
+        if len(s) > budget:
+            s = s[-budget:]                     # 표에 가까운 쪽(끝)만 남긴다
+        parts.append(s)
+        budget -= len(s) + 1                    # +1: 블록 사이 개행
+    return "\n".join(reversed(parts))
 
 
 def _ctx_copy_after(after: list[tuple[int, str]]) -> str:
-    """표 뒤 문맥 — 표에 가까운 '앞' 100자(짧으면 전체). 없으면 ""."""
-    s = _first_nonblank(after)
-    return s[:_CTX_COPY_AFTER_CHARS] if len(s) > _CTX_COPY_AFTER_CHARS else s
+    """표 뒤 문맥 — 표에서 내려가며 **예산(_CTX_COPY_AFTER_CHARS)을 채운다**.
+
+    ``_ctx_copy_before`` 대칭. 각주가 여러 블록으로 쪼개져 있어도(``각 대상에…`` /
+    ``** 사망 시의…`` / ``*** "2. 회갑"…``) 예산 안에서 이어 담고, 마지막 블록이 예산을
+    넘으면 **앞에서부터 잘라** 채운다.
+    """
+    budget = _CTX_COPY_AFTER_CHARS
+    parts: list[str] = []
+    for s in _nonblank_texts(after):            # after 는 nearest-first(문서순과 동일)
+        if budget <= 0:
+            break
+        if len(s) > budget:
+            s = s[:budget]                      # 표에 가까운 쪽(앞)만 남긴다
+        parts.append(s)
+        budget -= len(s) + 1
+    return "\n".join(parts)
 
 
 #: oversize 안전상한(문자). bge-m3 윈도우 8192tok, ~2.3char/tok → 6000tok≈13800자.
@@ -212,7 +234,7 @@ def _wrap(modal_id: str, modal_type: str, description: str, payload: str,
 
     title/footnote 슬롯의 의미는 호출 경로에 따라 다르다:
       * LLM 흡수 경로 — 앞뒤 블록 **원문 전체**(그 블록들은 세그먼트에서 사라진다).
-      * 복사 경로(shipped 기본) — 앞 블록 끝 **≤200자** / 뒤 블록 앞 **≤100자 사본**
+      * 복사 경로(shipped 기본) — 앞 끝 **≤100자** / 뒤 앞 **≤200자 사본**
         (원본 블록은 자기 자리에 그대로 남는다). 이 경로는 ``description=""`` 이라
         segments = [title, "", payload] → ``title\\n\\npayload`` 로 **빈 줄 1개**가 낀다.
 
@@ -262,7 +284,7 @@ def _assemble(
             # payload 만 emit — 원자화하면 bge-m3 윈도우 초과로 못 쪼개져 적재실패하기 때문.
             if wrap_modals and not d.get("bare", False):
                 if d.get("ctx_mode"):
-                    # 복사 경로: 앞 ≤200자 / 뒤 ≤100자 사본만 쓴다(빈 문자열도 그대로 =
+                    # 복사 경로: 앞 ≤100자 / 뒤 ≤200자 사본만 쓴다(빈 문자열도 그대로 =
                     # 문맥 없음). 원본 블록은 consumed 가 아니라 세그먼트로 그대로 남는다.
                     title, footnote = d.get("ctx_before", ""), d.get("ctx_after", "")
                 else:
@@ -308,7 +330,7 @@ def _enrich_core(
     ``enrich_modals`` 와 ``wrap_modals`` 는 **분리**된 스위치다:
       * ``enrich_modals=False`` → **모달 LLM 을 호출하지 않는다**(Phase B 스킵). 요약은 빈
         문자열이고, 주변 문맥은 흡수 대신 **복사**한다(``_ctx_copy_before/after`` — 앞
-        ≤200자·뒤 ≤100자 사본이 span 안으로 들어가고 **원본 블록은 그대로 남는다**).
+        ≤100자·뒤 ≤200자 사본이 span 안으로 들어가고 **원본 블록은 그대로 남는다**).
         tc/fc 는 0 이라 ``consumed`` 는 항상 공집합.
       * ``wrap_modals`` → Phase C **consume**(LLM 경로에서 제목/각주를 모달 안으로 흡수)과
         _assemble 의 마커 래핑을 켠다/끈다. **False 면** consume 을 스킵해 제목/각주가 일반

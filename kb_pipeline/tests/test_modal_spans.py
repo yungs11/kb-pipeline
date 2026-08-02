@@ -302,27 +302,49 @@ def test_spans_page_zero_explicit_kept_distinct():
 # A: wrap_modals / enrich_modals 분리 + 문맥 복사(LLM 0) + oversize 가드
 # =============================================================================
 
-_first_nonblank = modal._first_nonblank
+_nonblank_texts = modal._nonblank_texts
 _ctx_copy_before = modal._ctx_copy_before
 _ctx_copy_after = modal._ctx_copy_after
-BEFORE_CHARS = modal._CTX_COPY_BEFORE_CHARS      # 200
-AFTER_CHARS = modal._CTX_COPY_AFTER_CHARS        # 100
+BEFORE_CHARS = modal._CTX_COPY_BEFORE_CHARS      # 100
+AFTER_CHARS = modal._CTX_COPY_AFTER_CHARS        # 200
 
 
-def test_first_nonblank_skips_blank_candidates():
-    # nearest-first 후보에서 strip 후 비지 않은 첫 텍스트.
-    assert _first_nonblank([(0, "  "), (1, "\n"), (2, "제목")]) == "제목"
-    assert _first_nonblank([(0, "  제목  "), (1, "뒤")]) == "제목"   # strip 됨
-    assert _first_nonblank([]) == ""
-    assert _first_nonblank([(0, "   "), (1, "")]) == ""
-    assert _first_nonblank([(0, None)]) == ""                      # None-safe
+def test_nonblank_texts_skips_blank_candidates():
+    # nearest-first 후보에서 strip 후 비지 않은 텍스트만(순서 보존).
+    assert _nonblank_texts([(0, "  "), (1, "\n"), (2, "제목")]) == ["제목"]
+    assert _nonblank_texts([(0, "  제목  "), (1, "뒤")]) == ["제목", "뒤"]   # strip 됨
+    assert _nonblank_texts([]) == []
+    assert _nonblank_texts([(0, "   "), (1, "")]) == []
+    assert _nonblank_texts([(0, None)]) == []                      # None-safe
+
+
+def test_ctx_copy_fills_budget_across_blocks():
+    """예산(앞200/뒤100)을 여러 블록으로 채운다 — 1블록에서 멈추지 않는다.
+
+    실측 회귀: 표 직전이 ``(개정 …)`` 17자뿐이면 그것만 담기고 그 앞의 진짜 제목이
+    빠졌다. 이제 예산이 남는 한 계속 거슬러 올라간다.
+    """
+    before = [(2, "(개정 2025.09.01.)"), (1, "가정의례와 관련된 청원휴가 허가기준"), (0, "제27조(청원휴가)")]
+    got = _ctx_copy_before(before)
+    assert "가정의례와 관련된 청원휴가 허가기준" in got     # 2번째 블록도 포함
+    assert "제27조(청원휴가)" in got                       # 3번째 블록도 포함
+    assert got.endswith("(개정 2025.09.01.)")              # 문서순: 표에 가장 가까운 게 끝
+    assert len(got) <= BEFORE_CHARS
+
+    # 합계가 예산을 확실히 넘도록 구성 → 마지막 블록이 잘려 예산을 정확히 채운다.
+    after = [(4, "각주1 " + "가" * 30), (5, "각주2 " + "나" * 30),
+             (6, "각주3 " + "다" * (AFTER_CHARS + 50))]
+    got_a = _ctx_copy_after(after)
+    assert got_a.startswith("각주1 ")                      # 표에 가장 가까운 게 앞
+    assert "각주2 " in got_a                               # 예산 안이면 다음 블록도
+    assert len(got_a) == AFTER_CHARS                       # 마지막 블록을 잘라 예산을 정확히 채움
 
 
 def test_ctx_copy_before_takes_last_chars():
     assert _ctx_copy_before([(0, "짧은 제목")]) == "짧은 제목"       # 짧으면 전체
     long = "가" * 500
     got = _ctx_copy_before([(0, long)])
-    assert len(got) == BEFORE_CHARS and got == long[-BEFORE_CHARS:]  # 끝 200자
+    assert len(got) == BEFORE_CHARS and got == long[-BEFORE_CHARS:]  # 끝 BEFORE_CHARS 자
     exact = "나" * BEFORE_CHARS
     assert _ctx_copy_before([(0, exact)]) == exact                   # 경계=전체
     assert _ctx_copy_before([]) == ""                                # 직전이 표
@@ -333,7 +355,7 @@ def test_ctx_copy_after_takes_first_chars():
     assert _ctx_copy_after([(0, "짧은 각주")]) == "짧은 각주"
     long = "다" * 500
     got = _ctx_copy_after([(0, long)])
-    assert len(got) == AFTER_CHARS and got == long[:AFTER_CHARS]     # 앞 100자
+    assert len(got) == AFTER_CHARS and got == long[:AFTER_CHARS]     # 앞 AFTER_CHARS 자
     assert _ctx_copy_after([]) == ""
     assert _ctx_copy_after([(0, "  \n ")]) == ""
 
@@ -353,7 +375,7 @@ def test_enrich_off_wrap_on_copies_context_without_llm():
         {"type": "text", "text": "[단위:원]"},           # 앞 블록 → 사본이 span 안으로
         {"type": "table", "table_body": "<table>T</table>"},
         {"type": "text", "text": "※각주 설명"},          # 뒤 블록 → 사본이 span 안으로
-        {"type": "text", "text": "다음 본문"},           # 첫 비공백 1블록만 → 복사 안 됨
+        {"type": "text", "text": "다음 본문"},           # 예산(100자) 안이라 이것도 사본에 포함
     ]
     enriched, ids = enrich(blocks, text_llm=recording_llm, vision_llm=None,
                            enrich_modals=False, wrap_modals=True)
@@ -368,7 +390,8 @@ def test_enrich_off_wrap_on_copies_context_without_llm():
     # 원본이 제 세그먼트로 살아있다(마커 밖에도 존재).
     outside = enriched[:enriched.index(OPEN_PREFIX)] + enriched[enriched.index(CLOSE):]
     assert "[단위:원]" in outside and "※각주 설명" in outside
-    assert "다음 본문" in outside and "다음 본문" not in span   # 첫 비공백 1블록 계약
+    # 예산 채우기 계약: 100자 안이면 뒤 블록들을 이어 담는다(사본) + 원본도 유지.
+    assert "다음 본문" in span and "다음 본문" in outside
     assert ids == ["T1"]
 
 
@@ -427,8 +450,12 @@ def test_copy_adjacent_tables_no_context():
     assert enriched.count("<table>B</table>") == 1
 
 
-def test_copy_after_takes_only_first_nonblank_block():
-    """[표][※주1][※주2] → ※주1 만 ctx_after(첫 비공백 1블록 계약). ※주2 는 밖."""
+def test_copy_after_fills_budget_over_multiple_footnote_blocks():
+    """[표][※주1][※주2] → 예산(100자) 안이면 **둘 다** ctx_after 에 담긴다(복사).
+
+    각주가 여러 블록으로 쪼개져 있어도 예산까지 이어 담는다(1블록 계약 폐기 — 실측에서
+    각주 2·3번째가 통째로 빠지는 문제). 원본 블록은 그대로 남으므로 각각 2회 등장.
+    """
     blocks = [
         {"type": "table", "table_body": "<table>T</table>"},
         {"type": "text", "text": "※주1 상기 금액은 부가세 별도"},
@@ -438,9 +465,9 @@ def test_copy_after_takes_only_first_nonblank_block():
                            enrich_modals=False, wrap_modals=True)
     span = enriched[enriched.index(OPEN_PREFIX):enriched.index(CLOSE)]
     assert "※주1 상기 금액은 부가세 별도" in span
-    assert "※주2" not in span
+    assert "※주2 환율은 기준일 기준" in span                     # 예산 안이라 둘째도 포함
     assert enriched.count("※주1 상기 금액은 부가세 별도") == 2   # 사본 + 원본
-    assert enriched.count("※주2 환율은 기준일 기준") == 1        # 원본만
+    assert enriched.count("※주2 환율은 기준일 기준") == 2        # 사본 + 원본(복사)
     assert ids == ["T1"]
 
 
@@ -492,8 +519,9 @@ def test_copy_applies_to_image_and_equation_modals():
 
 def test_oversize_two_stage_drops_ctx_but_keeps_wrap():
     """§F 1순위 — 본체는 임계 이하인데 ctx 를 더하면 초과: ctx 만 버리고 **래핑 유지**."""
-    body = "x" * (modal._OVERSIZE_CHARS - 100)
-    caption = "제" * BEFORE_CHARS                            # 200자 → 합계 초과
+    # 본체는 임계 이하지만 ctx(앞 예산 가득)를 더하면 초과하도록 여유를 예산보다 작게 둔다.
+    body = "x" * (modal._OVERSIZE_CHARS - BEFORE_CHARS // 2)
+    caption = "제" * BEFORE_CHARS                            # 예산 가득 → 합계 초과
     blocks = [
         {"type": "text", "text": caption},
         {"type": "table", "table_body": body},
