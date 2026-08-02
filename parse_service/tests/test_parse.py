@@ -112,8 +112,16 @@ def test_run_parse_strips_pua_garbage():
         ocr_url="x", excel_url="y",
         parse_pages=_fake_pages_from_md(md), render=_no_render, minio=None,
     )
-    assert "" not in out["enriched_content"]
-    assert "휴가결근 신청서" in out["enriched_content"]
+    enriched = out["enriched_content"]
+    assert "" not in enriched
+    assert "휴가결근 신청서" in enriched
+    # 문맥 **복사** 계약(enrich off & wrap on 기본): 앞 블록 사본이 MODAL 안에 들어가되
+    # 원본 블록은 제 세그먼트로 그대로 남는다(이동/흡수 아님) → 2회 등장.
+    assert enriched.count("휴가결근 신청서") == 2
+    span = enriched[enriched.index(MODAL_OPEN_PREFIX):enriched.index(MODAL_CLOSE)]
+    outside = (enriched[:enriched.index(MODAL_OPEN_PREFIX)]
+               + enriched[enriched.index(MODAL_CLOSE):])
+    assert "휴가결근 신청서" in span and "휴가결근 신청서" in outside
 
 
 def test_modal_span_covers_absorbed_title_and_footnote(monkeypatch):
@@ -192,6 +200,28 @@ def test_parse_endpoint_uses_safe_basename(monkeypatch):
     assert r.status_code == 200
     # traversal stripped to a safe basename.
     assert seen["filename"] == "passwd"
+
+
+def test_parse_endpoint_preserves_unicode_filename(monkeypatch):
+    """경로 탈출은 제거하되 한글 파일명은 문서 제목용으로 그대로 보존한다."""
+    import parse_service.app as svc
+
+    seen = {}
+
+    def fake_run_parse(data, filename, **k):
+        seen["filename"] = filename
+        return {"enriched_content": "x", "n_blocks": 1, "modal_spans": []}
+
+    monkeypatch.setattr(svc, "run_parse", fake_run_parse)
+    c = TestClient(svc.app)
+    name = "2-1. 위임전결기준표(2026.04.17. 개정).xlsx"
+    r = c.post(
+        "/parse",
+        files={"file": (name, b"b", "application/octet-stream")},
+        data={"filename": f"../../{name}"},
+    )
+    assert r.status_code == 200
+    assert seen["filename"] == name
 
 
 def test_healthz():
@@ -345,6 +375,12 @@ def test_run_parse_additive_response_keys_and_alignment():
     # page 2 span covers the modal (table description / payload).
     sub2 = enriched[spans[2]["char_start"]:spans[2]["char_end"]]
     assert MODAL_OPEN_PREFIX in sub2 and MODAL_CLOSE in sub2
+    # 문맥 복사 계약: 캡션 사본이 MODAL 안에 들어가도 **원본 블록은 그대로 남는다**.
+    modal_span = enriched[enriched.index(MODAL_OPEN_PREFIX):enriched.index(MODAL_CLOSE)]
+    outside = (enriched[:enriched.index(MODAL_OPEN_PREFIX)]
+               + enriched[enriched.index(MODAL_CLOSE):])
+    assert "table caption" in modal_span and "table caption" in outside
+    assert enriched.count("table caption") == 2
 
 
 def test_default_docs_id_is_content_hash_prefix():

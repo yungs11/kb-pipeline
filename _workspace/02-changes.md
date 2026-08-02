@@ -4,17 +4,17 @@
 
 ---
 
-## 0-C. 표(table) 원자 보존 — 〈MODAL〉 wrap + page 방법 marker-aware 제외 (4레포, 2026-07-27)
+## 0-C. 표(table) 원자 보존 — 〈MODAL〉 wrap + page 독립 경쟁 경로 (4레포, 2026-07-27~28)
 
 **문제**: 대형 문서에서 청커가 `<table>` HTML 을 청크 경계에서 `<td` 중간에 쪼개 렌더 깨짐 + 검색 시 행 손실. 실측(소장 46p): table 포함 청크의 **55%(22/40)가 쪼개짐**. test_doc(신탁 3p, 3/8)보다 훨씬 심각. 가중치 튜닝(bi.40)으로는 불가 — 모든 청킹 방법이 대량 쪼갬.
 
-**해법(MODAL wrap, LLM 0회)**: 파서가 table 을 `〈MODAL type="table"〉[직전제목]<table>…</table>[직후각주]〈/MODAL〉` 원자 마커로 감싼다(U+3008/U+3009). 청커가 `MODAL_ATOMIC_MARKERS` 로 이 스팬을 통째 보존. **실측: 소장 table 쪼갬 22→0**(recursive_1100 = 86청크, split 0). LLM summary 없이도 마커 유효 → 비용 0.
+**해법(MODAL wrap, LLM 0회)**: 파서가 table 을 `〈MODAL type="table"〉[앞문맥 ≤200자]<table>…</table>[뒤문맥 ≤100자]〈/MODAL〉` 원자 마커로 감싼다(U+3008/U+3009). 청커가 `MODAL_ATOMIC_MARKERS` 로 이 스팬을 통째 보존. **실측: 소장 table 쪼갬 22→0**(recursive_1100 = 86청크, split 0). LLM summary 없이도 마커 유효 → 비용 0.
 - **wrap_modals 분리**: 기존엔 마커 wrap 이 LLM enrich(`KBP_MODAL_ENRICH`)에 하드 커플. 신규 env `KBP_MODAL_WRAP`(기본 "1"=on)로 분리 — wrap 은 항상, LLM summary 는 별도. (`kb_pipeline/modal.py` `_enrich_core`/`enrich`/`enrich_with_spans` 에 `wrap_modals` 스레딩, `_assemble` per-decision `bare` 플래그.)
-- **휴리스틱 제목/각주 흡수(LLM 0)**: 직전 1블록이 제목형(≤40자·`#`끝·`단위/서식/별표/제N`·항목번호)이면 흡수, 직후 `※/*/주)/[단위/(단위` 연속블록을 각주로 흡수. Phase C consume 은 `wrap_modals=True` 게이트(off 시 무손실 불변, decision 은 항상 유지 = drop 방지).
-- **oversize 가드**: 조립 span(제목+표+각주) >~13800자(≈6000토큰, bge-m3 8192 마진)면 `bare=True` → 마커 없이 emit(쪼갬 허용). 다페이지 대형표 ContextWindowExceeded 방지.
+- **문맥 복사(LLM 0) — 2026-08-02 계약 변경(흡수→복사)**: 초기엔 휴리스틱(≤40자·`#`끝·`단위/서식/별표/제N`·항목번호 / `※·*·주)·[단위·(단위` prefix)으로 제목·각주를 판정해 **흡수(이동)** 했으나, 페이지 오귀속(다른 페이지 블록이 표 페이지로 재귀속)·인접표 선점·무관블록 유실 때문에 폐기. 현재는 **패턴 판정 없이 글자수 규칙으로 복사**한다 — 앞 블록 **끝 200자**(`_CTX_COPY_BEFORE_CHARS`) + 표 + 뒤 블록 **앞 100자**(`_CTX_COPY_AFTER_CHARS`), 윈도우 내 **첫 비공백 블록 1개**(`_first_nonblank`). **원본 블록은 그대로 남는다**(tc=fc=0 → consumed 공집합) → 오귀속·유실 구조적 불가. 대가는 최대 300자 중복(임베딩·edgequake 엔티티 2회 계상)과 고아 마이크로청크. `decisions[i]["ctx_mode"]` 명시 플래그로 `_assemble` 이 복사/흡수 경로를 **배타 분기**. **LLM 경로(`KBP_MODAL_ENRICH=1`)는 흡수 그대로 불변.** 삭제: `_heuristic_title`/`_heuristic_footnote`/관련 정규식/`import re`.
+- **oversize 가드(2단계)**: 조립 span >~13800자(≈6000토큰, bge-m3 8192 마진)면 ①먼저 **복사 문맥(ctx)만 버려** 마커 원자화는 유지하고, ②본체(요약+payload+흡수분)만으로도 초과할 때만 `bare=True` → 마커 없이 emit(쪼갬 허용). 1단계가 없으면 13500자 표가 문맥 300자 때문에 원자성을 잃는다. 다페이지 대형표 ContextWindowExceeded 방지.
 - **마커 스트립(백엔드 2지점, 프론트 무수정)**: facade `service/edgequake.py insert_chunks`(적재 공통싱크 — /insert·/ingest 커버) + `service/app.py /chunk 응답`(chunks_meta 표시사본 커버). `_strip_modal` = `〈MODAL…〉`·`〈/MODAL〉` 만 제거, 내부(제목+표+각주) 보존. 청킹 입력(`text=`)은 마커 유지. **실측: 저장/표시 청크 마커 0**.
 
-**후속 버그 발견·수정 — PageSplitter × marker-aware 비호환**: MODAL wrap 이 활성화한 기존 잠복 버그. marker-aware 경로(`service/runner.py`)는 gap 마다 선택된 splitter 를 개별 실행하는데, `PageSplitter.split(doc)` 은 `doc`(gap) 인자를 무시하고 `self.parsed.pages`(전체 문서 페이지)를 반환(`splitters/page.py:64`) → **gap 수 × 전체 페이지 중복 → 청크 폭증(소장 26마커→1832청크)**. **수정**: marker-aware(has_atomic=True)일 때 specs 에서 `page` 방법 제외(`gap_specs`), page 는 "전체 문서 페이지 경계" 기반이라 gap 단위 실행과 구조적 비호환. selected_spec 조회도 gap_specs 로 통일. (adaptive_chunk `service/runner.py`, 유닛 117 pass.)
+**후속 버그 발견·최종 수정 — PageSplitter × marker-aware 비호환**: MODAL wrap 이 활성화한 기존 잠복 버그. marker-aware 경로(`service/runner.py`)가 gap 마다 선택 splitter 를 실행하는데, `PageSplitter.split(doc)` 은 `doc`(gap)을 무시하고 `self.parsed.pages`(전체 문서 페이지)를 반환 → **gap 수 × 전체 페이지 중복 → 청크 폭증(소장 26마커→1832청크)**. 2026-07-27 임시조치로 atomic 문서에서 page를 경쟁 제외했으나, 페이지가 가장 자연스러운 문서도 page 후보를 잃는 과잉 차단이었다. **2026-07-28 최종 정책**: `page`는 MODAL과 무관하게 전체 원문의 페이지를 딱 한 번 분할(마커가 페이지 경계를 지나면 깨져도 page 우선), 그 외 방법은 gap 청킹+MODAL 원자 조립. 각 방법의 **실제 최종 반환 청크**를 동일한 원문/BI/coref 기준으로 한 번에 채점한다. page 직접 선택(`skip_scoring`)도 동일하게 전체 페이지 1회만 실행한다. 검증: page 경쟁 복귀, page 승리 시 원본 2페이지=2청크, non-page 승리 시 MODAL 1원자, PageSplitter 1회, coref prime 1회, skip page 중복 0 + 전체 pytest green. 라이브 :18060 auto probe에서 `recursive_600`·`page` 모두 `methods_compared` 합류, page 직접 선택에서 경계횡단 MODAL을 원본 2페이지로 반환.
 
 **부수 수정**: 앞선 정식 BI 배선(0-D 참조) 잔재 — `service/tests/test_chunk_endpoint.py` 의 `FakeAdaptiveChunk.chunk()` 에 `blocks` kwarg 누락으로 5개 red → `blocks=None` 추가.
 

@@ -126,12 +126,12 @@ VL OCR 계약(in-process, `parsers/ocr/vl_api.py`): OpenAI-호환 chat/completio
 |------|------|
 | 수행 주체 | parse-svc 가 모달 블록마다 LLM(OpenRouter qwen)을 호출해 의미요약을 만들고 마커로 봉인한다. |
 | 입력 | Blockify 가 만든 문서순 블록 리스트(표/수식/그림 모달 블록과 주변 본문 블록). |
-| 처리 | 모달마다 LLM 으로 ① 검색용 한국어 요약을 생성하고, ② 바로 앞·뒤 본문 중 제목·각주 줄을 판정해 같은 모달 영역에 원문 그대로 흡수한다. 호출은 병렬로 수행한다. 두 모달이 같은 사이 블록을 다투면 문서순 앞 모달이 선점한다. |
+| 처리 | (LLM on) 모달마다 LLM 으로 ① 검색용 한국어 요약을 생성하고, ② 바로 앞·뒤 본문 중 제목·각주 줄을 판정해 같은 모달 영역에 원문 그대로 **흡수(이동)** 한다. 호출은 병렬로 수행하고, 두 모달이 같은 사이 블록을 다투면 문서순 앞 모달이 선점한다. (LLM off = 기본) 패턴 판정 없이 **앞 블록 끝 200자 + 뒤 블록 앞 100자를 모달 영역 안으로 *복사*** 한다 — 원본 블록은 자기 자리에 그대로 남으므로 선점 충돌·페이지 오귀속이 없다(대신 최대 300자 중복). |
 | 산출물 | enriched_content 와 모달 스팬·페이지 스팬. 각 모달은 단독 원자 영역으로 표시된다. |
 
 > 코드 레퍼런스(§5.2/§5.7): `parse_service/app.py:run_parse` → `kb_pipeline.modal.enrich_with_spans`, 모달 LLM=`service/llm.py:get_text_llm`. 창 크기 `BEFORE_WINDOW=3`/`AFTER_WINDOW=6`, 병렬 워커 `KBP_MODAL_MAX_WORKERS`(기본 3), id 카운터(표 `T`/수식 `E`/그림 `I`). 마커 형식 `〈MODAL id="X" type="table|image|equation"〉…〈/MODAL〉`(괄호 U+3008/U+3009, W1 Rust 소비자와 byte-identical). 산출물 = `enriched_content` + `modal_spans`(`[{id,type,char_range:[start,end]}]` 반열림) + `page_spans`(`[{page_number,char_start,char_end}]`).
 
-> **기본 동작(중요)**: 모달 LLM 보강은 환경변수 `KBP_MODAL_ENRICH`로 토글하며 **기본값은 off("0")** 다. off일 때 LLM 0회로 각 모달을 요약 없음·흡수 0(`summary="", tc=fc=0`)으로 강등해 OpenDataLoader 원본 payload를 그대로 모달 마커로 통과시킨다. 이때도 모달 원자성과 page_spans는 유지되므로 청킹/페이지 지표엔 무영향이고, 손실되는 것은 표/그림의 검색용 의미요약뿐이다. `KBP_MODAL_ENRICH=1` 로 재활성. (현재 `/parse`는 `vision_llm=None`이라 그림은 LLM 미호출·원본 통과.)
+> **기본 동작(중요)**: 모달 LLM 보강은 환경변수 `KBP_MODAL_ENRICH`로 토글하며 **기본값은 off("0")** 다. off일 때 LLM 0회로 각 모달을 요약 없음·**흡수 0**(`summary="", tc=fc=0`)으로 강등해 OpenDataLoader 원본 payload를 그대로 모달 마커로 통과시키되, 문맥은 흡수 대신 **복사**한다 — 앞 블록 끝 200자(`_CTX_COPY_BEFORE_CHARS`)와 뒤 블록 앞 100자(`_CTX_COPY_AFTER_CHARS`)의 **사본**이 마커 안에 들어가고 **원본 블록은 별도 세그먼트로 그대로 남는다**(consumed 공집합). 이때도 모달 원자성과 page_spans는 유지되므로 청킹/페이지 지표엔 무영향이고, 손실되는 것은 표/그림의 검색용 의미요약뿐이다. `KBP_MODAL_ENRICH=1` 로 재활성. (현재 `/parse`는 `vision_llm=None`이라 그림은 LLM 미호출·원본 통과.)
 
 ### 4.4 Chunking(청킹)
 
@@ -203,8 +203,10 @@ VL OCR 계약(in-process, `parsers/ocr/vl_api.py`): OpenAI-호환 chat/completio
 - **타이밍 트리**: 통일 타이밍 트리 계약(단위 ms·float)으로 parse/blockify/modal_enrich/adaptive_chunk/edgequake sub-stage 를 수집·병합. facade `/chunk` 응답은 `timing_details`(adaptive_chunk methods/metrics)를, `/insert` 응답은 `phases`(edgequake 내부 phase 체류시간 근사)를 passthrough 한다. 실측: 12페이지 문서가 파서 약 5분(표/그림당 vision LLM) / 청커 약 10분(4방법 경쟁; `llm_regex` split 단일콜 약 339s). edgequake 는 per-phase 타임스탬프가 없어 phase 소요는 `/insert/status` 폴링 관측 전이 시각으로 도출하는 근사값이다(해상도=폴 간격).
 
 ### 5.2 모달 원자성 (atomic_markers, U+3008/U+3009)
-- 모달의 원자성은 **parser 가 소유**한다(Philosophy A). Modal Enrich 가 모달 span 안에 요약·제목·각주를 흡수해 `〈MODAL id="X" type="Y"〉[제목]\n{요약}\n{원본 payload}\n[각주]〈/MODAL〉` 형태로 조립한다. 세그먼트 join 은 `\n\n`(2자)이며 이 길이를 running offset 에 반영해 `page_spans` 를 계산한다.
-- 두 모달이 같은 사이 블록을 다투면 문서순 앞 모달이 선점한다(사후 충돌 해소). LLM 이 유효 JSON 을 주지 않거나 호출이 실패하면 해당 모달만 흡수 0·요약 생략으로 강등하고 문서 전체는 살린다(폴백, 재시도 없음).
+- 모달의 원자성은 **parser 가 소유**한다(Philosophy A). Modal Enrich 가 모달 span 안에 요약 + 앞/뒤 문맥을 넣어 `〈MODAL id="X" type="Y"〉[앞문맥]\n{요약}\n{원본 payload}\n[뒤문맥]〈/MODAL〉` 형태로 조립한다. 앞/뒤 문맥 슬롯의 내용은 경로에 따라 다르다 — LLM on 이면 **흡수한 제목/각주 원문**, LLM off(기본)면 **앞 ≤200자·뒤 ≤100자 사본**(요약은 빈 문자열이라 `[앞문맥]\n\n{payload}` 로 빈 줄 1개). 세그먼트 join 은 `\n\n`(2자)이며 이 길이를 running offset 에 반영해 `page_spans` 를 계산한다.
+- **LLM on(흡수)**: 두 모달이 같은 사이 블록을 다투면 문서순 앞 모달이 선점한다(사후 충돌 해소). LLM 이 유효 JSON 을 주지 않거나 호출이 실패하면 해당 모달만 흡수 0·요약 생략으로 강등하고 문서 전체는 살린다(폴백, 재시도 없음).
+- **LLM off(복사, 기본)**: consume 이 없으므로 선점 개념 자체가 없다 — `[표1][X][표2]` 의 X 는 표1 의 뒤 문맥·표2 의 앞 문맥·원본으로 **3중 등장**한다(패턴 판정 없음의 귀결, 의도된 계약). 원본 블록의 페이지 귀속은 불변이고 **사본만 표 페이지에 계상**된다.
+- **oversize 2단계 강등**: 조립 span 추정치가 `_OVERSIZE_CHARS`(13800) 초과면 ①먼저 복사 문맥만 버려 마커 원자화는 유지하고, ②본체만으로도 초과할 때만 bare(마커 없이 payload)로 강등한다.
 - 청킹 단계에서 facade 가 마커 `[["〈MODAL", "〈/MODAL〉"]]` 를 잡 본문 `options.atomic_markers`(최상위 필드 아님)로 전달한다. 허브는 모달 *의미*를 모른 채 "이 스팬은 원자적"이라는 사실만 받아 해당 영역을 단일 atomic 청크로 유지한다(marker-aware chunking). 마커 괄호 U+3008/U+3009 는 W1 Rust 소비자와 byte-identical 해야 한다.
 
 ### 5.3 청킹 선택 (chunking_selection)과 비동기 잡

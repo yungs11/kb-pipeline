@@ -6,16 +6,19 @@ Walk blocks in document order, produce a single enriched content string:
   * image blocks            -> vision_llm(img_path, prompt) description
 Each modal is inlined as ONE ATOMIC marker.
 
-Title/footnote absorption (Philosophy A — parser owns atomicity)
+Surrounding context (Philosophy A — parser owns atomicity)
 ----------------------------------------------------------------
-A table/image/equation's **title/caption** (the text block(s) immediately before)
-and **footnote/notes** (the text block(s) immediately after) are absorbed VERBATIM
-into the same atomic 〈MODAL…〈/MODAL〉 span so they never get split away by the
-downstream chunker. Which surrounding lines belong to the modal is decided by the
-SAME per-modal LLM call that already produces the description: it returns a Korean
-``summary`` plus ``title_count`` / ``footnote_count``. If the LLM does not return
-valid JSON, we fall back to no absorption (summary = raw response) — byte-compatible
-with the pre-absorption behavior.
+두 경로가 있다(문서 단위 플래그 ``enrich_modals`` 로 배타 결정):
+
+* **``enrich_modals=False`` (shipped 기본) — 문맥 *복사*.** 표/이미지/수식 앞 블록의
+  **마지막 200자**와 뒤 블록의 **앞 100자**를 〈MODAL…〈/MODAL〉 span **안으로 복사**한다.
+  패턴(제목/각주) 판정은 **하지 않는다** — 순수 글자수 규칙. **복사이므로 원본 블록은
+  자기 자리에 그대로 남는다**(이동/흡수 아님) → 페이지 오귀속·원본 유실 없음. 대가는
+  최대 300자 중복(임베딩/그래프 추출에서 2회 계상)이며 수용된 트레이드오프다.
+* **``enrich_modals=True`` — LLM 흡수(기존, 불변).** per-modal LLM 이 한국어 ``summary``
+  + ``title_count``/``footnote_count`` 를 돌려주고, 그만큼의 앞뒤 블록을 원문 그대로
+  span 안으로 **흡수(이동)** 한다(원본 세그먼트는 사라짐). LLM 이 유효 JSON 을 주지
+  않으면 흡수 0(summary = raw) 으로 강등 — pre-absorption 동작과 byte-compatible.
 
 EXACT modal marker (single source of truth — producer here and the W1 Rust
 consumer MUST use byte-identical markers). The angle-bracket chars are
@@ -30,7 +33,6 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
-import re
 import time
 from typing import Callable
 
@@ -43,7 +45,9 @@ MODAL_OPEN_PREFIX = f"{_LANGLE}MODAL"
 #: Literal closing marker.
 MODAL_CLOSE = f"{_LANGLE}/MODAL{_RANGLE}"
 
-#: 모달 앞/뒤에서 제목·각주 후보로 고려할 연속 text 블록 최대 수.
+#: 모달 앞/뒤에서 고려할 연속 text 블록 최대 수.
+#: LLM 흡수 경로에선 '제목·각주 후보' 개수, 복사 경로에선 '문맥 스캔 범위'다
+#: (복사는 이 윈도우 안의 **첫 비공백 블록 1개**만 쓴다 — ``_first_nonblank``).
 BEFORE_WINDOW = 3
 AFTER_WINDOW = 6
 
@@ -82,48 +86,49 @@ def _gather_after_window(blocks: list[dict], i: int, consumed: set[int]) -> list
     return out
 
 
-# --- heuristic title/footnote absorption (LLM-free, pure) ---------------------
-# enrich_modals=False & wrap_modals=True 경로(shipped 기본)는 LLM 을 안 부르므로 제목/각주
-# 흡수를 길이·prefix 휴리스틱으로 판정한다. tokenizer 불요 — 순수 함수라 단위테스트 가능.
+# --- LLM-free context copy (pure) ---------------------------------------------
+# enrich_modals=False & wrap_modals=True 경로(shipped 기본)는 LLM 을 안 부르므로 주변
+# 문맥을 **글자수 규칙으로 복사**한다. 제목/각주 패턴 판정은 하지 않는다(오탐 제거).
+# 복사이므로 원본 블록은 그대로 남는다 — 페이지 오귀속·유실이 구조적으로 불가능.
 
-#: 제목형 prefix: [단위…/서식…/별표…/제 N…  (대괄호·소괄호 optional).
-_TITLE_PREFIX_RE = re.compile(r"^[\[\(]?(단위|서식|별표|제\s*\d)")
-#: 항목번호형 prefix: ①..⑳ / ㄱ..ㅎ / 숫자 뒤에 . 또는 ) — 예 "① 항목", "1) ...".
-_TITLE_ITEMNUM_RE = re.compile(r"^[①-⑳ㄱ-ㅎ\d]+[.)]")
-#: 각주형 prefix.
-_FOOTNOTE_PREFIX = ("※", "*", "주)", "[단위", "(단위")
+#: 표 '앞' 블록에서 MODAL 안으로 복사할 최대 길이 — 표에 가까운 '끝' 200자.
+_CTX_COPY_BEFORE_CHARS = 200
+#: 표 '뒤' 블록에서 복사할 최대 길이 — 표에 가까운 '앞' 100자.
+_CTX_COPY_AFTER_CHARS = 100
 
 
-def _heuristic_title(before: list[tuple[int, str]]) -> int:
-    """직전 **1블록**이 제목형이면 tc=1, 아니면 0 (nearest-first 이므로 before[0]).
+def _first_nonblank(cands: list[tuple[int, str]]) -> str:
+    """nearest-first 후보에서 strip 후 비지 않은 첫 텍스트(없으면 "").
 
-    제목형 = 짧음(<=40자) OR 끝이 '#'(서식) OR 제목/서식 prefix OR 항목번호 prefix.
-    긴 산문 단락은 제목이 아님(0). LLM 없이 길이·prefix 로만 판정한다.
+    ``_gather_*_window`` 는 빈/공백 text 블록도 window 에 넣으므로 before[0] 만 보면 바로
+    뒤의 실제 제목을 놓친다 → strip 후 빈 항목은 건너뛴다.
+    ⚠️ 계약: 스캔 범위는 BEFORE_WINDOW=3 / AFTER_WINDOW=6 이라 '직전 1블록'이 실제로는
+    '윈도우 내 첫 비공백 블록'(공백 블록이 끼면 i-2/i-3 까지)이다. 공백만 있는 블록은
+    ``_assemble`` 이 세그먼트로 emit 하지만(``if text:`` 는 truthy) 여기선 건너뛴다 —
+    의도된 차이.
     """
-    if not before:
-        return 0
-    text = (before[0][1] or "").strip()
-    if not text:
-        return 0
-    if (len(text) <= 40 or text.endswith("#")
-            or _TITLE_PREFIX_RE.match(text) or _TITLE_ITEMNUM_RE.match(text)):
-        return 1
-    return 0
+    for _, t in cands:
+        s = (t or "").strip()
+        if s:
+            return s
+    return ""
 
 
-def _heuristic_footnote(after: list[tuple[int, str]]) -> int:
-    """직후로 **연속으로** 각주 prefix(※·*·주)·[단위·(단위)로 시작하는 블록 개수 = fc."""
-    fc = 0
-    for _, t in after:
-        if (t or "").lstrip().startswith(_FOOTNOTE_PREFIX):
-            fc += 1
-        else:
-            break
-    return fc
+def _ctx_copy_before(before: list[tuple[int, str]]) -> str:
+    """표 앞 문맥 — 표에 가까운 '끝' 200자(짧으면 전체). 없으면 ""."""
+    s = _first_nonblank(before)          # before 는 nearest-first
+    return s[-_CTX_COPY_BEFORE_CHARS:] if len(s) > _CTX_COPY_BEFORE_CHARS else s
+
+
+def _ctx_copy_after(after: list[tuple[int, str]]) -> str:
+    """표 뒤 문맥 — 표에 가까운 '앞' 100자(짧으면 전체). 없으면 ""."""
+    s = _first_nonblank(after)
+    return s[:_CTX_COPY_AFTER_CHARS] if len(s) > _CTX_COPY_AFTER_CHARS else s
 
 
 #: oversize 안전상한(문자). bge-m3 윈도우 8192tok, ~2.3char/tok → 6000tok≈13800자.
-#: 조립될 span 전체(title+summary+payload+footnote) 추정치가 이보다 크면 bare 로 강등해
+#: 조립될 span 전체 추정치가 이보다 크면 2단계로 줄인다(A-guard): ①먼저 복사 문맥(ctx)만
+#: 버려 원자화는 유지하고, ②본체(summary+payload+LLM 흡수분)만으로도 초과면 bare 로 강등해
 #: atomic 원자화로 못 쪼개지는 ContextWindowExceeded 를 방지한다(초과 오판=bare 안전측).
 _OVERSIZE_CHARS = 13800
 
@@ -205,6 +210,12 @@ def _wrap(modal_id: str, modal_type: str, description: str, payload: str,
           *, title: str = "", footnote: str = "") -> str:
     """원자 〈MODAL …〉[title]\\n{desc}\\n{payload}\\n[footnote]〈/MODAL〉 span 생성.
 
+    title/footnote 슬롯의 의미는 호출 경로에 따라 다르다:
+      * LLM 흡수 경로 — 앞뒤 블록 **원문 전체**(그 블록들은 세그먼트에서 사라진다).
+      * 복사 경로(shipped 기본) — 앞 블록 끝 **≤200자** / 뒤 블록 앞 **≤100자 사본**
+        (원본 블록은 자기 자리에 그대로 남는다). 이 경로는 ``description=""`` 이라
+        segments = [title, "", payload] → ``title\\n\\npayload`` 로 **빈 줄 1개**가 낀다.
+
     title/footnote 가 비면 ``{open}{desc}\\n{payload}{close}`` 로 현재와 byte 동일.
     """
     segments: list[str] = []
@@ -250,16 +261,23 @@ def _assemble(
             # per-decision bare(oversize 가드): wrap_modals=True 여도 이 table 은 마커 없이
             # payload 만 emit — 원자화하면 bge-m3 윈도우 초과로 못 쪼개져 적재실패하기 때문.
             if wrap_modals and not d.get("bare", False):
-                title = "\n".join(blocks[j].get("text", "") for j in d["title_idxs"])
-                footnote = "\n".join(blocks[j].get("text", "") for j in d["footnote_idxs"])
+                if d.get("ctx_mode"):
+                    # 복사 경로: 앞 ≤200자 / 뒤 ≤100자 사본만 쓴다(빈 문자열도 그대로 =
+                    # 문맥 없음). 원본 블록은 consumed 가 아니라 세그먼트로 그대로 남는다.
+                    title, footnote = d.get("ctx_before", ""), d.get("ctx_after", "")
+                else:
+                    # LLM 흡수 경로(불변): consumed 된 앞뒤 블록 원문을 join.
+                    title = "\n".join(blocks[j].get("text", "") for j in d["title_idxs"])
+                    footnote = "\n".join(blocks[j].get("text", "") for j in d["footnote_idxs"])
                 seg = _wrap(
                     d["modal_id"], d["modal_type"], d["summary"], d["payload"],
                     title=title, footnote=footnote,
                 )
             else:
                 # 모달 비활성(wrap_modals=False) 또는 oversize bare: 〈MODAL〉 래핑 없이
-                # OpenDataLoader 원본 payload 를 그대로 통과. 제목/각주는 흡수 0(tc=fc=0)이라
-                # 인접 text 블록으로 남는다(무손실). decision 은 유지되므로 table drop 없음.
+                # OpenDataLoader 원본 payload 를 그대로 통과. 흡수 0(tc=fc=0)·복사 0(ctx="")
+                # 이라 주변 블록은 인접 text 세그먼트로 남는다(무손실). decision 은 유지되므로
+                # table drop 없음.
                 seg = d["payload"]
             segments.append(seg)
             seg_page_idx.append(int(blocks[i].get("page_idx", 0) or 0))
@@ -289,13 +307,17 @@ def _enrich_core(
 
     ``enrich_modals`` 와 ``wrap_modals`` 는 **분리**된 스위치다:
       * ``enrich_modals=False`` → **모달 LLM 을 호출하지 않는다**(Phase B 스킵). 요약은 빈
-        문자열, 제목/각주 흡수는 LLM 대신 휴리스틱(``_heuristic_title/_footnote``)으로 판정.
-      * ``wrap_modals`` → Phase C **consume**(제목/각주를 모달 안으로 흡수)과 _assemble 의
-        마커 래핑을 켠다/끈다. **False 면** consume 을 스킵해 제목/각주가 일반 text 블록으로
-        남고(무손실) _assemble 이 마커 없이 payload 만 통과한다. **단 decisions 는 항상
-        채운다**(빈 idxs 로라도) — 안 채우면 _assemble 이 table 을 drop(데이터 유실).
-      * oversize(조립 span 추정 > ``_OVERSIZE_CHARS``)면 tc/fc 를 0 으로 강제하고 그 decision 에
-        ``bare=True`` 를 세워, wrap_modals=True 여도 마커 없이 payload 만 emit(적재실패 방지).
+        문자열이고, 주변 문맥은 흡수 대신 **복사**한다(``_ctx_copy_before/after`` — 앞
+        ≤200자·뒤 ≤100자 사본이 span 안으로 들어가고 **원본 블록은 그대로 남는다**).
+        tc/fc 는 0 이라 ``consumed`` 는 항상 공집합.
+      * ``wrap_modals`` → Phase C **consume**(LLM 경로에서 제목/각주를 모달 안으로 흡수)과
+        _assemble 의 마커 래핑을 켠다/끈다. **False 면** consume 을 스킵해 제목/각주가 일반
+        text 블록으로 남고(무손실) 복사도 하지 않으며(ctx="") _assemble 이 마커 없이
+        payload 만 통과한다. **단 decisions 는 항상 채운다**(빈 idxs 로라도) — 안 채우면
+        _assemble 이 table 을 drop(데이터 유실).
+      * oversize(조립 span 추정 > ``_OVERSIZE_CHARS``)는 **2단계**로 줄인다(A-guard):
+        ①복사 문맥(ctx)만 버려 래핑은 유지 → ②본체만으로도 초과면 tc/fc=0 + ``bare=True``
+        로 강등해 wrap_modals=True 여도 마커 없이 payload 만 emit(적재실패 방지).
     """
     if max_workers < 1:
         raise ValueError(f"max_workers must be >= 1, got {max_workers}")
@@ -356,21 +378,26 @@ def _enrich_core(
 
     modal_wall_ms = 0.0
     if not enrich_modals:
-        # 모달 LLM 비활성(KBP_MODAL_ENRICH=0): LLM 0 회. 요약은 빈 문자열. 제목/각주 흡수는
-        # wrap_modals=True 면 휴리스틱(길이·prefix)으로, False 면 흡수 0(Phase C 게이트).
+        # 모달 LLM 비활성(KBP_MODAL_ENRICH=0): LLM 0 회. 요약은 빈 문자열. 주변 문맥은
+        # wrap_modals=True 면 글자수 규칙으로 **복사**(앞 끝200자·뒤 앞100자), False 면 없음.
         for m in modals:
             m["summary"] = ""
             if wrap_modals:
-                m["tc"] = _heuristic_title(m["before"])
-                m["fc"] = _heuristic_footnote(m["after"])
+                m["ctx_before"] = _ctx_copy_before(m["before"])
+                m["ctx_after"] = _ctx_copy_after(m["after"])
             else:
-                m["tc"], m["fc"] = 0, 0
+                m["ctx_before"] = m["ctx_after"] = ""
+            # 복사는 흡수가 아니라 tc/fc=0 (consumed 공집합 → 원본 블록 생존).
+            # ⚠️ 반드시 유지 — A-guard 와 Phase C 가 읽는다(KeyError 방지).
+            m["tc"], m["fc"] = 0, 0
     elif modals:
         workers = min(max_workers, len(modals))  # max_workers>=1 검증됨; modals 비어있지 않음
         _b0 = time.perf_counter()
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
             for m, (summary, tc, fc) in zip(modals, ex.map(_call, modals)):
                 m["summary"], m["tc"], m["fc"] = summary, tc, fc
+                # LLM 경로는 흡수 그대로 — 복사 안 함. 키만 채워 하류 KeyError 방지.
+                m["ctx_before"] = m["ctx_after"] = ""
         modal_wall_ms = (time.perf_counter() - _b0) * 1000.0
 
     # 모니터링(P2): 모달 LLM(표/이미지 분석) 단계 분해 — wall(병렬) + 호출 수 + 타입별 합 +
@@ -390,20 +417,28 @@ def _enrich_core(
             "per_call_ms": sorted((round(ms, 1) for _, ms in _call_ms), reverse=True)[:20],
         })
 
-    # A-guard(oversize): 조립될 span 전체(흡수 title+summary+payload+footnote) 추정치가
-    # _OVERSIZE_CHARS 초과면 tc/fc=0 강제(흡수·마커 없이 제목/각주 무손실) + bare 표시.
-    # 휴리스틱·LLM 경로 공통 — 임의 미래문서(다페이지 대형표)의 임베딩 초과를 막는다.
+    # A-guard(oversize) — **2단계**. 조립될 span 추정치가 _OVERSIZE_CHARS 초과면:
+    #   ① 먼저 복사 문맥(ctx, 최대 300자)만 버린다 — 원자화(마커)는 유지. ctx 300자 때문에
+    #      13500자 표를 bare 로 강등하면 래핑 가능한 표의 원자성을 공짜로 잃기 때문.
+    #   ② 본체(summary+payload+LLM 흡수분)만으로도 초과면 tc/fc=0 + bare(마커 없이 payload).
+    # 복사·LLM 경로 공통 — 임의 미래문서(다페이지 대형표)의 임베딩 초과를 막는다.
     for m in modals:
         title_est = sum(len(t) for _, t in m["before"][:m["tc"]])
         foot_est = sum(len(t) for _, t in m["after"][:m["fc"]])
-        span_est = len(m["summary"]) + len(m["body"]) + title_est + foot_est
-        m["bare"] = span_est > _OVERSIZE_CHARS
+        base_est = len(m["summary"]) + len(m["body"]) + title_est + foot_est
+        if base_est + len(m["ctx_before"]) + len(m["ctx_after"]) > _OVERSIZE_CHARS:
+            m["ctx_before"] = m["ctx_after"] = ""   # 1순위: 문맥 포기(원자성 유지)
+        m["bare"] = base_est > _OVERSIZE_CHARS       # 2순위: 본체만으로도 초과면 bare
         if m["bare"]:
             m["tc"], m["fc"] = 0, 0
+            m["ctx_before"] = m["ctx_after"] = ""
 
     # Phase C — 충돌 해소(문서순; 앞 모달 우선, 모달에서 연속, consumed 만나면 중단).
     # consume(제목/각주 흡수)만 wrap_modals 게이트 — decisions 는 **항상** 채워야 table 이
     # _assemble 에서 drop(데이터 유실)되지 않는다.
+    # ⚠️ 복사 경로는 tc=fc=0 이라 여기서 아무것도 consume 하지 않는다(원본 전부 생존).
+    # 따라서 '앞 모달 선점' 충돌해소도 복사엔 미적용 — [표1][X][표2] 의 X 는 표1.ctx_after·
+    # 표2.ctx_before·원본으로 **3중 등장**한다(패턴 판정 없음의 귀결, 의도된 계약).
     consumed: set[int] = set()
     decisions: dict[int, dict] = {}
     modal_ids: list[str] = []
@@ -426,6 +461,9 @@ def _enrich_core(
             "summary": m["summary"],
             "title_idxs": sorted(title_idxs), "footnote_idxs": sorted(footnote_idxs),
             "bare": m["bare"],
+            # 복사 경로 명시 플래그(truthiness 폴백 금지 — _assemble 이 배타 분기).
+            "ctx_mode": bool(m["ctx_before"] or m["ctx_after"]),
+            "ctx_before": m["ctx_before"], "ctx_after": m["ctx_after"],
         }
 
     # modal_ids: 문서순으로 (흡수되지 않은) 모달만 — _assemble 출력 순서와 일치.
@@ -449,11 +487,16 @@ def enrich(
 ) -> tuple[str, list[str]]:
     """Enrich blocks into a single content string + ordered modal ids.
 
-    모달(table/image/equation)마다 LLM 호출 1회로 한국어 요약 + 주변 text 의
-    제목/각주 개수를 판정해, 제목·각주를 원문 그대로 〈MODAL…〈/MODAL〉 안으로 흡수한다.
-    LLM 호출은 스레드풀로 **병렬** 실행하고(표 많은 문서의 parse 시간 단축), 두 모달이
-    같은 사이 블록을 다투면 문서순으로 앞 모달이 선점한다(사후 충돌 해소). LLM 이 JSON 을
-    주지 않으면 흡수 0건 + 요약=원문(하위호환).
+    ``enrich_modals=True`` — 모달(table/image/equation)마다 LLM 호출 1회로 한국어 요약 +
+    주변 text 의 제목/각주 개수를 판정해, 제목·각주를 원문 그대로 〈MODAL…〈/MODAL〉 안으로
+    **흡수(이동)** 한다. LLM 호출은 스레드풀로 **병렬** 실행하고(표 많은 문서의 parse 시간
+    단축), 두 모달이 같은 사이 블록을 다투면 문서순으로 앞 모달이 선점한다(사후 충돌 해소).
+    LLM 이 JSON 을 주지 않으면 흡수 0건 + 요약=원문(하위호환).
+
+    ``enrich_modals=False`` (shipped 기본, LLM 0회) — 패턴 판정 없이 앞 블록 **끝 200자** +
+    뒤 블록 **앞 100자**를 span 안으로 **복사**한다(요약은 빈 문자열). 복사이므로 **원본
+    블록은 자기 페이지의 세그먼트로 그대로 남고**, 사본만 모달 span(=표 페이지)에 계상된다.
+    ``wrap_modals=False`` 면 복사도 하지 않는다.
 
     :param text_llm: ``(prompt, payload) -> description`` for table/equation.
     :param vision_llm: ``(img_path, prompt) -> description`` for image.
@@ -493,6 +536,11 @@ def enrich_with_spans(
         모달 세그먼트는 모달 블록의 page_idx). 페이지별로 min(char_start)/max(char_end) 를
         모아 span 1개씩 만든다(``page_number = page_idx``).
       * 블록에 page_idx 가 전부 비면(전부 0) → 전체를 page 1 로 덮는 단일 span 으로 강등.
+
+    ⚠️ 복사 경로(enrich_modals=False & wrap_modals=True)의 페이지 귀속 계약: **원본 블록의
+    페이지 귀속은 불변**(이동이 아니므로 유실·재귀속 없음). 다만 **사본은 모달 세그먼트 안에
+    있으므로 모달(표)의 페이지에 귀속**된다 — 앞 블록이 이전 페이지면 그 ≤200자 사본은 표
+    페이지 span 에 계상된다. 하류(chunks_meta.page_number/페이지이미지)는 이를 전제한다.
 
     :returns: ``(enriched_content, modal_ids, page_spans)`` where
         ``page_spans = [{"page_number": int, "char_start": int, "char_end": int}, ...]``

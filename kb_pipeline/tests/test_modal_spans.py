@@ -299,39 +299,50 @@ def test_spans_page_zero_explicit_kept_distinct():
 
 
 # =============================================================================
-# A: wrap_modals / enrich_modals 분리 + 휴리스틱 흡수(LLM 0) + oversize 가드
+# A: wrap_modals / enrich_modals 분리 + 문맥 복사(LLM 0) + oversize 가드
 # =============================================================================
 
-_heuristic_title = modal._heuristic_title
-_heuristic_footnote = modal._heuristic_footnote
+_first_nonblank = modal._first_nonblank
+_ctx_copy_before = modal._ctx_copy_before
+_ctx_copy_after = modal._ctx_copy_after
+BEFORE_CHARS = modal._CTX_COPY_BEFORE_CHARS      # 200
+AFTER_CHARS = modal._CTX_COPY_AFTER_CHARS        # 100
 
 
-def test_heuristic_title_patterns():
-    # before 는 nearest-first → before[0] 가 직전 블록.
-    assert _heuristic_title([(0, "[단위:원]")]) == 1     # 단위 prefix
-    assert _heuristic_title([(0, "서식1-1#")]) == 1       # 끝 '#'
-    assert _heuristic_title([(0, "별표 3")]) == 1         # 별표 prefix
-    assert _heuristic_title([(0, "제1조")]) == 1          # 제 N prefix
-    assert _heuristic_title([(0, "① 신청항목")]) == 1     # 항목번호(원문자)
-    assert _heuristic_title([(0, "1) 개요")]) == 1        # 항목번호(숫자))
-    assert _heuristic_title([(0, "짧은 제목")]) == 1      # len<=40
-    long_prose = "이 문단은 표와 무관한 매우 긴 산문 단락으로 제목이 결코 아니며 계속 이어진다 " * 3
-    assert _heuristic_title([(0, long_prose)]) == 0      # 긴 산문=비제목
-    assert _heuristic_title([]) == 0
-    assert _heuristic_title([(0, "   ")]) == 0
+def test_first_nonblank_skips_blank_candidates():
+    # nearest-first 후보에서 strip 후 비지 않은 첫 텍스트.
+    assert _first_nonblank([(0, "  "), (1, "\n"), (2, "제목")]) == "제목"
+    assert _first_nonblank([(0, "  제목  "), (1, "뒤")]) == "제목"   # strip 됨
+    assert _first_nonblank([]) == ""
+    assert _first_nonblank([(0, "   "), (1, "")]) == ""
+    assert _first_nonblank([(0, None)]) == ""                      # None-safe
 
 
-def test_heuristic_footnote_patterns():
-    after = [(0, "※상기 금액은..."), (1, "* 부가세 별도"), (2, "본문 재개")]
-    assert _heuristic_footnote(after) == 2               # 연속 2개, 3번째서 중단
-    assert _heuristic_footnote([(0, "주) 비고"), (1, "(단위: 천원)")]) == 2
-    assert _heuristic_footnote([(0, "[단위:원]")]) == 1
-    assert _heuristic_footnote([(0, "일반 본문")]) == 0
-    assert _heuristic_footnote([]) == 0
+def test_ctx_copy_before_takes_last_chars():
+    assert _ctx_copy_before([(0, "짧은 제목")]) == "짧은 제목"       # 짧으면 전체
+    long = "가" * 500
+    got = _ctx_copy_before([(0, long)])
+    assert len(got) == BEFORE_CHARS and got == long[-BEFORE_CHARS:]  # 끝 200자
+    exact = "나" * BEFORE_CHARS
+    assert _ctx_copy_before([(0, exact)]) == exact                   # 경계=전체
+    assert _ctx_copy_before([]) == ""                                # 직전이 표
+    assert _ctx_copy_before([(0, "   ")]) == ""                      # 전부 공백
 
 
-def test_enrich_off_wrap_on_absorbs_without_llm():
-    """shipped 기본 경로(enrich off & wrap on): 마커 + 휴리스틱 흡수, text_llm 0 호출."""
+def test_ctx_copy_after_takes_first_chars():
+    assert _ctx_copy_after([(0, "짧은 각주")]) == "짧은 각주"
+    long = "다" * 500
+    got = _ctx_copy_after([(0, long)])
+    assert len(got) == AFTER_CHARS and got == long[:AFTER_CHARS]     # 앞 100자
+    assert _ctx_copy_after([]) == ""
+    assert _ctx_copy_after([(0, "  \n ")]) == ""
+
+
+def test_enrich_off_wrap_on_copies_context_without_llm():
+    """shipped 기본 경로(enrich off & wrap on): 마커 + 문맥 **복사**, text_llm 0 호출.
+
+    복사이므로 원본 블록이 자기 세그먼트로 **그대로 남는다**(흡수 아님) → 2회 등장.
+    """
     calls = []
 
     def recording_llm(prompt, payload):
@@ -339,10 +350,10 @@ def test_enrich_off_wrap_on_absorbs_without_llm():
         return "SHOULD_NOT_BE_USED"
 
     blocks = [
-        {"type": "text", "text": "[단위:원]"},           # 제목형 → 흡수
+        {"type": "text", "text": "[단위:원]"},           # 앞 블록 → 사본이 span 안으로
         {"type": "table", "table_body": "<table>T</table>"},
-        {"type": "text", "text": "※각주 설명"},          # 각주형 → 흡수
-        {"type": "text", "text": "다음 본문"},           # 각주 prefix 아님 → 별도
+        {"type": "text", "text": "※각주 설명"},          # 뒤 블록 → 사본이 span 안으로
+        {"type": "text", "text": "다음 본문"},           # 첫 비공백 1블록만 → 복사 안 됨
     ]
     enriched, ids = enrich(blocks, text_llm=recording_llm, vision_llm=None,
                            enrich_modals=False, wrap_modals=True)
@@ -351,9 +362,163 @@ def test_enrich_off_wrap_on_absorbs_without_llm():
     span = enriched[enriched.index(OPEN_PREFIX):enriched.index(CLOSE)]
     assert "[단위:원]" in span and "※각주 설명" in span and "<table>T</table>" in span
     assert "SHOULD_NOT_BE_USED" not in enriched          # summary 빈문자열
-    assert enriched.count("[단위:원]") == 1               # 흡수분 외부중복 0
-    assert enriched.count("※각주 설명") == 1
-    assert "다음 본문" in enriched[enriched.index(CLOSE):]  # 흡수 안 됨
+    # 복사(이동 아님) — 사본 + 원본으로 2회 등장.
+    assert enriched.count("[단위:원]") == 2
+    assert enriched.count("※각주 설명") == 2
+    # 원본이 제 세그먼트로 살아있다(마커 밖에도 존재).
+    outside = enriched[:enriched.index(OPEN_PREFIX)] + enriched[enriched.index(CLOSE):]
+    assert "[단위:원]" in outside and "※각주 설명" in outside
+    assert "다음 본문" in outside and "다음 본문" not in span   # 첫 비공백 1블록 계약
+    assert ids == ["T1"]
+
+
+def test_copy_segment_count_equals_wrap_off_assembly():
+    """consumed 공집합 계약 — 세그먼트 수가 wrap_modals=False 조립과 정확히 같다."""
+    blocks = [
+        {"type": "text", "text": "캡션"},
+        {"type": "table", "table_body": "<table>T</table>"},
+        {"type": "text", "text": "각주"},
+    ]
+    # ⚠️ enriched 를 JOIN 으로 split 하면 안 된다 — 복사 경로는 summary="" 라 MODAL 안에도
+    # "\n\n" 이 생긴다. 세그먼트 수는 _assemble 결과로 직접 센다.
+    def _n_segments(wrap):
+        decisions, consumed, _ = modal._enrich_core(
+            blocks, text_llm=None, vision_llm=None, max_workers=1,
+            enrich_modals=False, wrap_modals=wrap,
+        )
+        assert consumed == set()                       # 복사 = consume 0
+        segs, _pi = modal._assemble(blocks, decisions, consumed, wrap_modals=wrap)
+        return len(segs)
+
+    assert _n_segments(True) == _n_segments(False) == 3
+
+
+def test_copy_cross_page_original_survives_on_its_own_page():
+    """교차페이지 복사: p1 캡션 원본은 p1 세그먼트로 생존, 사본은 p2 MODAL(=표 페이지) 안."""
+    blocks = [
+        {"type": "text", "text": "p1 캡션", "page_idx": 1},
+        {"type": "table", "table_body": "<table>X</table>", "page_idx": 2},
+    ]
+    enriched, ids, spans = _assert_enrich_parity(
+        blocks, text_llm=None, vision_llm=None,
+        enrich_modals=False, wrap_modals=True,
+    )
+    assert ids == ["T1"]
+    by_page = {s["page_number"]: s for s in spans}
+    assert set(by_page) == {1, 2}                          # 페이지 사라짐 없음
+    p1 = enriched[by_page[1]["char_start"]:by_page[1]["char_end"]]
+    p2 = enriched[by_page[2]["char_start"]:by_page[2]["char_end"]]
+    assert p1 == "p1 캡션"                                  # (a) 원본 유실 없음
+    assert "p1 캡션" in p2 and OPEN_PREFIX in p2            # (b) 사본은 p2 MODAL 안
+    assert by_page[1]["char_end"] <= by_page[2]["char_start"]   # (c) 비중첩
+    assert enriched.count("p1 캡션") == 2                    # (d) 사본은 표 페이지 귀속
+
+
+def test_copy_adjacent_tables_no_context():
+    """인접표 [표1][표2] → before/after 가 비어 ctx="" (표끼리 안 섞임)."""
+    blocks = [
+        {"type": "table", "table_body": "<table>A</table>"},
+        {"type": "table", "table_body": "<table>B</table>"},
+    ]
+    enriched, ids = enrich(blocks, text_llm=None, vision_llm=None,
+                           enrich_modals=False, wrap_modals=True)
+    assert ids == ["T1", "T2"]
+    assert enriched.count("<table>A</table>") == 1
+    assert enriched.count("<table>B</table>") == 1
+
+
+def test_copy_after_takes_only_first_nonblank_block():
+    """[표][※주1][※주2] → ※주1 만 ctx_after(첫 비공백 1블록 계약). ※주2 는 밖."""
+    blocks = [
+        {"type": "table", "table_body": "<table>T</table>"},
+        {"type": "text", "text": "※주1 상기 금액은 부가세 별도"},
+        {"type": "text", "text": "※주2 환율은 기준일 기준"},
+    ]
+    enriched, ids = enrich(blocks, text_llm=None, vision_llm=None,
+                           enrich_modals=False, wrap_modals=True)
+    span = enriched[enriched.index(OPEN_PREFIX):enriched.index(CLOSE)]
+    assert "※주1 상기 금액은 부가세 별도" in span
+    assert "※주2" not in span
+    assert enriched.count("※주1 상기 금액은 부가세 별도") == 2   # 사본 + 원본
+    assert enriched.count("※주2 환율은 기준일 기준") == 1        # 원본만
+    assert ids == ["T1"]
+
+
+def test_copy_long_article_block_truncated_to_last_200():
+    """조항 통째 유입 방지 — 직전 2000자 블록에서 끝 200자만 복사."""
+    # 반복 없는 2000자(각 조각이 유일해야 '앞부분 미포함'을 단언할 수 있다).
+    long_block = "".join(f"{k:04d}" for k in range(500))
+    blocks = [
+        {"type": "text", "text": long_block},
+        {"type": "table", "table_body": "<table>T</table>"},
+    ]
+    enriched, _ = enrich(blocks, text_llm=None, vision_llm=None,
+                         enrich_modals=False, wrap_modals=True)
+    span = enriched[enriched.index(OPEN_PREFIX):enriched.index(CLOSE)]
+    assert long_block[-BEFORE_CHARS:] in span
+    assert long_block[:100] not in span                     # 앞부분은 안 들어옴
+    assert long_block in enriched                           # 원본은 온전
+
+
+def test_copy_disabled_when_wrap_off():
+    """wrap_modals=False → ctx="" (§C else 분기) — 마커도 사본도 없음."""
+    blocks = [
+        {"type": "text", "text": "캡션"},
+        {"type": "table", "table_body": "<table>T</table>"},
+        {"type": "text", "text": "각주"},
+    ]
+    enriched, _ = enrich(blocks, text_llm=None, vision_llm=None,
+                         enrich_modals=False, wrap_modals=False)
+    assert OPEN_PREFIX not in enriched
+    assert enriched.count("캡션") == 1 and enriched.count("각주") == 1
+
+
+def test_copy_applies_to_image_and_equation_modals():
+    """복사는 table 전용이 아니라 image/equation 모달에도 동일 적용."""
+    for btype, key, body in (("image", "img_path", "fig.png"),
+                             ("equation", "latex", "E=mc^2")):
+        blocks = [
+            {"type": "text", "text": "그림 캡션"},
+            {"type": btype, key: body},
+            {"type": "text", "text": "출처 표기"},
+        ]
+        enriched, ids = enrich(blocks, text_llm=None, vision_llm=None,
+                               enrich_modals=False, wrap_modals=True)
+        span = enriched[enriched.index(OPEN_PREFIX):enriched.index(CLOSE)]
+        assert "그림 캡션" in span and "출처 표기" in span, btype
+        assert enriched.count("그림 캡션") == 2, btype       # 사본 + 원본
+        assert len(ids) == 1
+
+
+def test_oversize_two_stage_drops_ctx_but_keeps_wrap():
+    """§F 1순위 — 본체는 임계 이하인데 ctx 를 더하면 초과: ctx 만 버리고 **래핑 유지**."""
+    body = "x" * (modal._OVERSIZE_CHARS - 100)
+    caption = "제" * BEFORE_CHARS                            # 200자 → 합계 초과
+    blocks = [
+        {"type": "text", "text": caption},
+        {"type": "table", "table_body": body},
+    ]
+    enriched, ids = enrich(blocks, text_llm=None, vision_llm=None,
+                           enrich_modals=False, wrap_modals=True)
+    assert OPEN_PREFIX in enriched and CLOSE in enriched     # bare 아님(원자성 유지)
+    span = enriched[enriched.index(OPEN_PREFIX):enriched.index(CLOSE)]
+    assert caption not in span                               # ctx 는 포기
+    assert enriched.count(caption) == 1                      # 원본만 남음
+    assert ids == ["T1"]
+
+
+def test_oversize_two_stage_body_alone_over_goes_bare():
+    """§F 2순위 — 본체만으로 초과: bare(마커 0) + ctx 무효화."""
+    body = "x" * (modal._OVERSIZE_CHARS + 100)
+    blocks = [
+        {"type": "text", "text": "짧은 제목"},
+        {"type": "table", "table_body": body},
+    ]
+    enriched, ids = enrich(blocks, text_llm=None, vision_llm=None,
+                           enrich_modals=False, wrap_modals=True)
+    assert OPEN_PREFIX not in enriched and CLOSE not in enriched
+    assert enriched.count("짧은 제목") == 1                   # 사본 없음
+    assert body in enriched
     assert ids == ["T1"]
 
 
@@ -424,12 +589,12 @@ def test_oversize_boundary_just_over_bare_lossless():
 
 
 def test_enrich_with_spans_wrap_on_page_spans_align():
-    """shipped 경로(enrich_with_spans, wrap on): 마커 삽입 + 흡수 후에도 page_spans 정합."""
+    """shipped 경로(enrich_with_spans, wrap on): 마커 삽입 + 문맥 복사 후에도 page_spans 정합."""
     blocks = [
         {"type": "text", "text": "인트로 페이지1", "page_idx": 1},
-        {"type": "text", "text": "[단위:원]", "page_idx": 2},        # 제목 흡수
+        {"type": "text", "text": "[단위:원]", "page_idx": 2},        # 앞 문맥 복사(원본 유지)
         {"type": "table", "table_body": "<table>P</table>", "page_idx": 2},
-        {"type": "text", "text": "※각주 설명", "page_idx": 2},        # 각주 흡수
+        {"type": "text", "text": "※각주 설명", "page_idx": 2},        # 뒤 문맥 복사(원본 유지)
     ]
     enriched, ids, spans = enrich_with_spans(
         blocks, text_llm=None, vision_llm=None,

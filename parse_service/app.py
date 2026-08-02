@@ -32,7 +32,7 @@ log = logging.getLogger("kb_pipeline.parse_service")
 
 # U+E000–U+F8FF: Unicode Private Use Area. OpenDataLoader 는 PDF 의 매핑 불가 글자
 # (커스텀 폰트 기호·장식선 등)를 이 영역으로 쏟아낸다 → 깨진 글자처럼 보이고, 텍스트에
-# 끼어 "제목↔표" 인접을 끊어 모달 제목/각주 흡수까지 방해한다. 파싱 직후 제거한다.
+# 끼어 "제목↔표" 인접을 끊어 모달 문맥 복사/흡수까지 방해한다. 파싱 직후 제거한다.
 _PUA_RE = re.compile("[-]")
 
 
@@ -211,7 +211,8 @@ def run_parse(file_bytes: bytes, filename: str, *,
     # 기본 3 으로 낮춘다(KBP_MODAL_MAX_WORKERS 로 조정; 524 잦으면 2/1 로).
     max_workers = max(1, int(os.environ.get("KBP_MODAL_MAX_WORKERS", "3")))
     # 모달 LLM(표/이미지 검색요약) 토글. 기본 off — LLM 0 회(속도↑). off 여도 아래 wrap 이
-    # 켜져 있으면 표는 〈MODAL〉 로 원자화되고 제목/각주는 휴리스틱으로 흡수된다(요약만 손실).
+    # 켜져 있으면 표는 〈MODAL〉 로 원자화되고, 앞 블록 끝 200자·뒤 블록 앞 100자가 span 안으로
+    # **복사**된다(원본 블록은 그대로 유지 — 이동/흡수 아님). 손실은 의미요약뿐.
     # KBP_MODAL_ENRICH=1 로 재활성하면 표/이미지 의미요약 + LLM 제목/각주 판정이 붙는다.
     enrich_modals = os.environ.get("KBP_MODAL_ENRICH", "0") != "0"
     # 모달 wrap(〈MODAL〉 원자 마커) 토글 — enrich 와 **분리**. 기본 on: 표를 마커로 원자화해

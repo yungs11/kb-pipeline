@@ -95,14 +95,17 @@
 
 **합류 방식(고급안: 독립 모달청크 + 엔티티)**: 서술을 atomic 마킹 블록으로 인라인.
 ```
-〈MODAL id="T1" type="table"〉[제목]\n{LLM 서술}\n{table_body HTML}\n[각주]〈/MODAL〉
+〈MODAL id="T1" type="table"〉[앞문맥]\n{LLM 서술}\n{table_body HTML}\n[뒤문맥]〈/MODAL〉
 ```
 - 마커 괄호 = U+3008/U+3009, **W1 Rust 소비자와 byte-identical**.
-- 창 크기 `BEFORE_WINDOW=3`/`AFTER_WINDOW=6`, 병렬 워커 `KBP_MODAL_MAX_WORKERS`(기본 3), id 카운터(표 `T`/수식 `E`/그림 `I`).
-- 두 모달이 같은 사이 블록을 다투면 **문서순 앞 모달이 선점**. LLM 실패 시 해당 모달만 흡수 0·요약 생략으로 강등(폴백, 재시도 없음).
+- `[앞문맥]`/`[뒤문맥]` 의 의미는 경로별로 다르다 — **LLM on = 흡수한 제목/각주 원문**(원본 블록은 사라짐), **LLM off(기본) = 앞 블록 끝 ≤200자·뒤 블록 앞 ≤100자 *사본***(원본 블록은 그대로 남음, 요약이 빈 문자열이라 `[앞문맥]\n\n{payload}`).
+- 창 크기 `BEFORE_WINDOW=3`/`AFTER_WINDOW=6`(복사 경로에선 '스캔 범위' — 이 안의 **첫 비공백 블록 1개**만 복사), 병렬 워커 `KBP_MODAL_MAX_WORKERS`(기본 3), id 카운터(표 `T`/수식 `E`/그림 `I`).
+- **LLM on**: 두 모달이 같은 사이 블록을 다투면 **문서순 앞 모달이 선점**. LLM 실패 시 해당 모달만 흡수 0·요약 생략으로 강등(폴백, 재시도 없음).
+- **LLM off(복사)**: consume 이 없어 선점 미적용 — `[표1][X][표2]` 의 X 는 **3중 등장**(표1 뒤문맥·표2 앞문맥·원본). 원본의 페이지 귀속 불변, 사본만 표 페이지에 계상.
+- **oversize 2단계**: 추정치 > `_OVERSIZE_CHARS`(13800) 이면 ①복사 문맥만 버려 래핑 유지 → ②본체만으로도 초과면 bare.
 - 산출: `enriched_content` + `modal_spans`(`[{id,type,char_range:[start,end]}]` 반열림) + `page_spans`(`[{page_number,char_start,char_end}]`). 세그먼트 join 은 `\n\n`(2자), 이 길이를 running offset 에 반영해 page_spans 계산.
 
-> **기본 동작(중요)**: 모달 LLM 보강은 `KBP_MODAL_ENRICH` 로 토글하며 **기본 off("0")**. off 일 때 LLM 0회로 각 모달을 `summary="", tc=fc=0` 으로 강등해 원본 payload 를 마커로 통과. 모달 원자성·page_spans 는 유지되어 청킹/페이지 지표 무영향, 손실은 표/그림 검색용 의미요약뿐. 현재 `/parse` 는 `vision_llm=None` 이라 그림은 LLM 미호출.
+> **기본 동작(중요)**: 모달 LLM 보강은 `KBP_MODAL_ENRICH` 로 토글하며 **기본 off("0")**. off 일 때 LLM 0회로 각 모달을 `summary="", tc=fc=0`(흡수 0) 으로 강등해 원본 payload 를 마커로 통과하되, 문맥은 **복사**한다(앞 ≤200자·뒤 ≤100자 사본, 원본 블록 생존). 모달 원자성·page_spans 는 유지되어 청킹/페이지 지표 무영향, 손실은 표/그림 검색용 의미요약뿐. 현재 `/parse` 는 `vision_llm=None` 이라 그림은 LLM 미호출.
 
 → 표/그림이 **검색가능 텍스트 + 그래프 노드**로 승격되며, 그래프는 edgequake 추출이 단독 생성(이중생성 없음).
 
