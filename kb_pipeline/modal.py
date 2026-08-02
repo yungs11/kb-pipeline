@@ -99,27 +99,43 @@ _CTX_COPY_BEFORE_CHARS = 100
 _CTX_COPY_AFTER_CHARS = 200
 
 
-def _nonblank_texts(cands: list[tuple[int, str]]) -> list[str]:
-    """nearest-first 후보에서 strip 후 비지 않은 텍스트만(순서 보존).
+def _nonblank_cands(
+    cands: list[tuple[int, str]], blocks: list[dict] | None = None
+) -> list[tuple[str, bool]]:
+    """nearest-first 후보 → ``[(텍스트, 제목여부)]`` (빈/공백 블록 제외, 순서 보존).
 
     ``_gather_*_window`` 는 빈/공백 text 블록도 window 에 넣으므로 그대로 쓰면 문맥이
-    빈 조각으로 채워진다 → strip 후 빈 항목은 건너뛴다. 스캔 범위는
-    BEFORE_WINDOW=3 / AFTER_WINDOW=6.
+    빈 조각으로 채워진다 → strip 후 빈 항목은 **먼저 건너뛴다**. 이 순서가 중요하다:
+    OpenDataLoader 가 PUA 쓰레기 블록에 ``text_level`` 을 붙이는 경우가 실측돼(휴가규정
+    p5), 빈 블록을 건너뛰지 않으면 그 가짜 제목에서 스캔이 멈춰 진짜 제목을 놓친다.
+
+    ``blocks`` 가 없으면 제목여부는 전부 False(하위호환 — 경계 없이 예산만 적용).
     """
-    return [s for _, t in cands if (s := (t or "").strip())]
+    out: list[tuple[str, bool]] = []
+    for idx, t in cands:
+        s = (t or "").strip()
+        if not s:
+            continue                            # 빈/PUA 블록: 제목 판정 전에 skip
+        is_heading = bool(blocks and "text_level" in (blocks[idx] or {}))
+        out.append((s, is_heading))
+    return out
 
 
-def _ctx_copy_before(before: list[tuple[int, str]]) -> str:
-    """표 앞 문맥 — 표에서 거슬러 올라가며 **예산(_CTX_COPY_BEFORE_CHARS)을 채운다**.
+def _ctx_copy_before(before: list[tuple[int, str]], blocks: list[dict] | None = None) -> str:
+    """표 앞 문맥 — 표에서 거슬러 올라가며 **예산(``_CTX_COPY_BEFORE_CHARS``)만 채운다**.
 
-    한 블록만 쓰면 예산이 남아도 멈춰 정작 중요한 제목을 놓친다(실측: 표 직전이
-    ``(개정 2025.09.01.)`` 17자면 그것만 들어가고 그 앞의 제목 ``가정의례와 관련된 청원휴가
-    허가기준`` 이 빠짐). → 여러 블록을 표에 가까운 순으로 누적하고, 예산을 넘기면 **가장 먼
-    블록을 끝에서부터 잘라** 예산을 정확히 채운다. 블록 사이는 ``\\n`` 으로 잇는다.
+    - 여러 블록을 누적한다(1블록만 쓰면 예산이 남아도 멈춰 진짜 제목을 놓침 — 실측 회귀).
+    - **제목 경계는 쓰지 않는다(방향이 반대라 역효과)**: 뒤쪽 제목은 *다음* 섹션 것이라
+      차단해야 하지만, 앞쪽 제목은 *이 표의* 제목이라 오히려 가져와야 한다. 실측(휴가규정)
+      에서 표 직전 ``(개정 2025.09.01.)`` 에도 ``text_level`` 이 붙어 있어, 제목에서 멈추면
+      바로 위의 진짜 제목 ``가정의례와 관련된 청원휴가 허가기준`` 을 놓쳤다. KIS 도 동일
+      (표 직전 ``등급변동추이(IFSR)`` 가 본문 표시 → 제목까지 계속 올라가야 함).
+      무관한 앞 문맥이 조금 섞이는 건 예산(100자)이 제한하며, 사용자 수용 사항.
+    - 예산을 넘기면 가장 먼 블록을 **끝에서부터** 잘라 채운다. 블록 사이는 ``\\n``.
     """
     budget = _CTX_COPY_BEFORE_CHARS
-    parts: list[str] = []                       # 문서순(먼 것 → 가까운 것)으로 뒤집어 쌓는다
-    for s in _nonblank_texts(before):           # before 는 nearest-first
+    parts: list[str] = []                       # nearest-first 로 쌓고 마지막에 뒤집는다
+    for s, _is_heading in _nonblank_cands(before, blocks):
         if budget <= 0:
             break
         if len(s) > budget:
@@ -129,16 +145,19 @@ def _ctx_copy_before(before: list[tuple[int, str]]) -> str:
     return "\n".join(reversed(parts))
 
 
-def _ctx_copy_after(after: list[tuple[int, str]]) -> str:
-    """표 뒤 문맥 — 표에서 내려가며 **예산(_CTX_COPY_AFTER_CHARS)을 채운다**.
+def _ctx_copy_after(after: list[tuple[int, str]], blocks: list[dict] | None = None) -> str:
+    """표 뒤 문맥 — 표에서 내려가며 **예산을 채우되 제목 직전에 멈춘다**.
 
-    ``_ctx_copy_before`` 대칭. 각주가 여러 블록으로 쪼개져 있어도(``각 대상에…`` /
-    ``** 사망 시의…`` / ``*** "2. 회갑"…``) 예산 안에서 이어 담고, 마지막 블록이 예산을
-    넘으면 **앞에서부터 잘라** 채운다.
+    ``_ctx_copy_before`` 대칭이나 **경계 방향이 반대**다: 뒤쪽의 제목은 *다음* 섹션·표의
+    제목이므로 **포함하지 않고 그 직전에서 중단**한다(실측: 휴가규정 ``휴가결근 신청서``,
+    KIS ``유사시 계열 지원가능성`` 이 표 각주로 딸려오던 문제). 각주가 여러 블록으로
+    쪼개져 있어도(``각 대상에…``/``** 사망 시의…``/``*** "2. 회갑"…``) 본문이라 다 담긴다.
     """
     budget = _CTX_COPY_AFTER_CHARS
     parts: list[str] = []
-    for s in _nonblank_texts(after):            # after 는 nearest-first(문서순과 동일)
+    for s, is_heading in _nonblank_cands(after, blocks):   # after 는 문서순과 동일
+        if is_heading:
+            break                               # 다음 섹션 제목 — 포함하지 않고 중단
         if budget <= 0:
             break
         if len(s) > budget:
@@ -401,12 +420,12 @@ def _enrich_core(
     modal_wall_ms = 0.0
     if not enrich_modals:
         # 모달 LLM 비활성(KBP_MODAL_ENRICH=0): LLM 0 회. 요약은 빈 문자열. 주변 문맥은
-        # wrap_modals=True 면 글자수 규칙으로 **복사**(앞 끝200자·뒤 앞100자), False 면 없음.
+        # wrap_modals=True 면 **복사**(앞 끝100자·뒤 앞200자, 제목 경계에서 중단), False 면 없음.
         for m in modals:
             m["summary"] = ""
             if wrap_modals:
-                m["ctx_before"] = _ctx_copy_before(m["before"])
-                m["ctx_after"] = _ctx_copy_after(m["after"])
+                m["ctx_before"] = _ctx_copy_before(m["before"], blocks)
+                m["ctx_after"] = _ctx_copy_after(m["after"], blocks)
             else:
                 m["ctx_before"] = m["ctx_after"] = ""
             # 복사는 흡수가 아니라 tc/fc=0 (consumed 공집합 → 원본 블록 생존).

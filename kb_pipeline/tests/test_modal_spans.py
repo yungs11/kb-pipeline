@@ -302,20 +302,67 @@ def test_spans_page_zero_explicit_kept_distinct():
 # A: wrap_modals / enrich_modals 분리 + 문맥 복사(LLM 0) + oversize 가드
 # =============================================================================
 
-_nonblank_texts = modal._nonblank_texts
+_nonblank_cands = modal._nonblank_cands
 _ctx_copy_before = modal._ctx_copy_before
 _ctx_copy_after = modal._ctx_copy_after
 BEFORE_CHARS = modal._CTX_COPY_BEFORE_CHARS      # 100
 AFTER_CHARS = modal._CTX_COPY_AFTER_CHARS        # 200
 
 
-def test_nonblank_texts_skips_blank_candidates():
-    # nearest-first 후보에서 strip 후 비지 않은 텍스트만(순서 보존).
-    assert _nonblank_texts([(0, "  "), (1, "\n"), (2, "제목")]) == ["제목"]
-    assert _nonblank_texts([(0, "  제목  "), (1, "뒤")]) == ["제목", "뒤"]   # strip 됨
-    assert _nonblank_texts([]) == []
-    assert _nonblank_texts([(0, "   "), (1, "")]) == []
-    assert _nonblank_texts([(0, None)]) == []                      # None-safe
+def test_nonblank_cands_skips_blank_and_flags_heading():
+    # strip 후 비지 않은 것만 (텍스트, 제목여부) 로. blocks 없으면 제목여부 전부 False.
+    assert _nonblank_cands([(0, "  "), (1, "\n"), (2, "제목")]) == [("제목", False)]
+    assert _nonblank_cands([(0, "  제목  "), (1, "뒤")]) == [("제목", False), ("뒤", False)]
+    assert _nonblank_cands([]) == []
+    assert _nonblank_cands([(0, "   "), (1, "")]) == []
+    assert _nonblank_cands([(0, None)]) == []                      # None-safe
+    # blocks 를 주면 text_level 있는 블록만 제목으로 표시된다.
+    blocks = [{"type": "text", "text": "머리글", "text_level": 2},
+              {"type": "text", "text": "본문"}]
+    assert _nonblank_cands([(0, "머리글"), (1, "본문")], blocks) == [("머리글", True), ("본문", False)]
+
+
+def test_ctx_copy_stops_at_heading_both_directions():
+    """앞=제목까지 포함하고 중단 / 뒤=제목 직전에 중단(다음 섹션이므로 제외)."""
+    blocks = [
+        {"type": "text", "text": "이전 섹션 본문"},                       # 0 — 경계 밖
+        {"type": "text", "text": "이 표의 제목", "text_level": 3},        # 1 — 제목(포함+중단)
+        {"type": "text", "text": "부제"},                                  # 2
+        {"type": "table", "table_body": "<table>T</table>"},              # 3
+        {"type": "text", "text": "주1) 각주"},                             # 4 — 본문(포함)
+        {"type": "text", "text": "다음 섹션 제목", "text_level": 2},      # 5 — 제목(제외+중단)
+        {"type": "text", "text": "다음 섹션 본문"},                        # 6 — 경계 밖
+    ]
+    before = [(2, "부제"), (1, "이 표의 제목"), (0, "이전 섹션 본문")]     # nearest-first
+    after = [(4, "주1) 각주"), (5, "다음 섹션 제목"), (6, "다음 섹션 본문")]
+    got_b = _ctx_copy_before(before, blocks)
+    # 앞쪽은 제목 경계를 쓰지 않는다(방향 반대 — 앞쪽 제목은 이 표의 제목이라 가져와야 함).
+    # 예산(100자) 안이면 이전 섹션 본문까지 섞일 수 있고, 그건 수용된 트레이드오프다.
+    assert "이 표의 제목" in got_b and "부제" in got_b
+    got_a = _ctx_copy_after(after, blocks)
+    assert got_a == "주1) 각주"                        # 다음 섹션 제목 직전에서 중단
+    # PUA 등 빈 블록에 text_level 이 붙어 있어도 진짜 제목을 놓치지 않는다(실측 함정).
+    blocks_pua = [
+        {"type": "text", "text": "진짜 제목", "text_level": 3},
+        {"type": "text", "text": "   ", "text_level": 4},               # 빈 가짜 제목
+        {"type": "table", "table_body": "<table>T</table>"},
+    ]
+    assert "진짜 제목" in _ctx_copy_before([(1, "   "), (0, "진짜 제목")], blocks_pua)
+
+
+def test_ctx_copy_before_ignores_heading_boundary():
+    """앞쪽: 표 직전이 제목으로 표시돼도 멈추지 않고 그 위 진짜 제목까지 가져온다.
+
+    실측 회귀(휴가규정): `(개정 2025.09.01.)` 에 text_level 이 붙어 있어 제목에서 멈추면
+    바로 위 `가정의례와 관련된 청원휴가 허가기준` 을 놓쳤다.
+    """
+    blocks = [
+        {"type": "text", "text": "가정의례와 관련된 청원휴가 허가기준", "text_level": 3},
+        {"type": "text", "text": "(개정 2025.09.01.)", "text_level": 4},
+        {"type": "table", "table_body": "<table>T</table>"},
+    ]
+    got = _ctx_copy_before([(1, "(개정 2025.09.01.)"), (0, "가정의례와 관련된 청원휴가 허가기준")], blocks)
+    assert "가정의례와 관련된 청원휴가 허가기준" in got and "(개정 2025.09.01.)" in got
 
 
 def test_ctx_copy_fills_budget_across_blocks():
