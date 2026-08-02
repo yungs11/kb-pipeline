@@ -122,13 +122,22 @@ def _nonblank_cands(
 
 
 def _ctx_before_blocks(
-    before: list[tuple[int, str]], blocks: list[dict] | None = None
+    before: list[tuple[int, str]], blocks: list[dict] | None = None,
+    page_idx: int | None = None,
 ) -> list[tuple[int, str]]:
     """표 앞 문맥으로 **복사**할 블록들 — ``[(블록인덱스, 텍스트)]`` (nearest-first).
 
-    복사라 원본을 건드리지 않으므로 마지막(가장 먼) 블록은 예산에 맞춰 **잘라도** 된다.
-    Phase C 가 이 목록에서 '앞 모달이 이미 이동시킨(consumed) 블록'을 걸러낸다 — 안 그러면
-    [표1][각주][표2] 에서 표1 이 이동시킨 각주를 표2 가 다시 복사한다(실측 T2 누출).
+    - 예산(``_CTX_COPY_BEFORE_CHARS``)까지 누적. 복사라 원본을 안 건드리므로 마지막(가장
+      먼) 블록은 **잘라도** 된다.
+    - **페이지 경계에서 중단**(``page_idx`` 주어질 때): 표와 다른 페이지의 블록은 다른
+      영역이다. 실측(휴가규정) — 표는 p5, 그 앞 ``제1조 (시행일)…`` 부칙 조문은 p4 라
+      경계가 없으면 무관한 개정이력이 표 문맥으로 딸려왔다. 조밀한 문서(KIS)는 한 페이지에
+      표가 여러 개라 페이지가 안 바뀌어 **발동하지 않는다**(무해) — 순이득.
+    - 제목(``text_level``) 경계는 앞쪽엔 **쓰지 않는다**: 뒤쪽 제목은 *다음* 섹션 것이라
+      차단해야 하지만 앞쪽 제목은 *이 표의* 제목이라 가져와야 한다. 실측에서 표 직전
+      ``(개정 2025.09.01.)`` 에도 text_level 이 붙어 제목에서 멈추면 진짜 제목을 놓쳤고,
+      KIS 는 표 직전이 본문인 경우가 절반이라 '본문에서 중단' 도 문맥 0 을 만든다.
+    - Phase C 가 '앞 모달이 이미 이동시킨(consumed) 블록'을 추가로 걸러낸다.
     """
     budget = _CTX_COPY_BEFORE_CHARS
     out: list[tuple[int, str]] = []
@@ -136,6 +145,8 @@ def _ctx_before_blocks(
     for (idx, _raw), (s, _is_heading) in zip(pairs, _nonblank_cands(before, blocks)):
         if budget <= 0:
             break
+        if page_idx is not None and blocks and (blocks[idx] or {}).get("page_idx") != page_idx:
+            break                               # 페이지 경계 — 다른 영역
         if len(s) > budget:
             s = s[-budget:]                     # 표에 가까운 쪽(끝)만 남긴다
         out.append((idx, s))
@@ -450,7 +461,8 @@ def _enrich_core(
             m["summary"] = ""
             if wrap_modals:
                 # 앞: 복사(원본 유지) — 경계가 없어 무관 본문이 섞일 수 있어 이동 금지.
-                m["ctx_before_pairs"] = _ctx_before_blocks(m["before"], blocks)
+                m["ctx_before_pairs"] = _ctx_before_blocks(
+                    m["before"], blocks, page_idx=(blocks[m["i"]] or {}).get("page_idx"))
                 m["ctx_before"] = _join_before(m["ctx_before_pairs"])
                 # 뒤: 이동(consume) — 제목 경계로 '이 표의 각주'만 정확히 잡으므로 안전.
                 m["ctx_after_pairs"] = _ctx_after_blocks(m["after"], blocks)

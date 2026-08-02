@@ -481,10 +481,15 @@ def test_copy_segment_count_drops_only_moved_after_blocks():
     assert n_wrap == 2                              # 캡션 / MODAL(표+각주) — 각주 세그먼트 소멸
 
 
-def test_copy_cross_page_original_survives_on_its_own_page():
-    """교차페이지 복사: p1 캡션 원본은 p1 세그먼트로 생존, 사본은 p2 MODAL(=표 페이지) 안."""
+def test_ctx_before_stops_at_page_boundary():
+    """앞 문맥은 **페이지 경계에서 중단** — 다른 페이지 블록은 표의 영역이 아니다.
+
+    실측(휴가규정): 표는 p5, 그 앞 `제1조 (시행일)…` 부칙 조문은 p4 → 경계가 없으면
+    무관한 개정이력이 표 문맥으로 딸려왔다. 같은 페이지 블록만 복사한다.
+    """
     blocks = [
-        {"type": "text", "text": "p1 캡션", "page_idx": 1},
+        {"type": "text", "text": "p1 부칙 조문", "page_idx": 1},      # 다른 페이지 — 제외
+        {"type": "text", "text": "p2 표 제목", "page_idx": 2},        # 같은 페이지 — 포함
         {"type": "table", "table_body": "<table>X</table>", "page_idx": 2},
     ]
     enriched, ids, spans = _assert_enrich_parity(
@@ -492,14 +497,13 @@ def test_copy_cross_page_original_survives_on_its_own_page():
         enrich_modals=False, wrap_modals=True,
     )
     assert ids == ["T1"]
+    span = enriched[enriched.index(OPEN_PREFIX):enriched.index(CLOSE)]
+    assert "p2 표 제목" in span                              # 같은 페이지 → 복사됨
+    assert "p1 부칙 조문" not in span                        # 페이지 경계에서 중단
     by_page = {s["page_number"]: s for s in spans}
-    assert set(by_page) == {1, 2}                          # 페이지 사라짐 없음
-    p1 = enriched[by_page[1]["char_start"]:by_page[1]["char_end"]]
-    p2 = enriched[by_page[2]["char_start"]:by_page[2]["char_end"]]
-    assert p1 == "p1 캡션"                                  # (a) 원본 유실 없음
-    assert "p1 캡션" in p2 and OPEN_PREFIX in p2            # (b) 사본은 p2 MODAL 안
-    assert by_page[1]["char_end"] <= by_page[2]["char_start"]   # (c) 비중첩
-    assert enriched.count("p1 캡션") == 2                    # (d) 사본은 표 페이지 귀속
+    assert set(by_page) == {1, 2}                           # 페이지 사라짐 없음
+    assert enriched.count("p1 부칙 조문") == 1               # 원본만(복사 안 됨)
+    assert enriched.count("p2 표 제목") == 2                 # 사본 + 원본(앞은 복사)
 
 
 def test_copy_adjacent_tables_no_context():
