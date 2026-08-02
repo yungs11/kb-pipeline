@@ -842,9 +842,11 @@ def test_label_between_two_tables_is_not_prev_tables_footnote():
     enriched, ids = enrich(blocks, text_llm=None, vision_llm=None,
                            enrich_modals=False, wrap_modals=True)
     assert ids == ["T1", "T2"]
-    assert enriched.count("서식1#") == 2          # 원본 + T2 앞문맥(사본). T1 뒤문맥 제외
+    # 50자 이내 구간이라 T2 로 **흡수(이동)** — 원본 소멸, T1 뒤문맥에는 애초에 미포함.
+    assert enriched.count("서식1#") == 1
     t1 = enriched[:enriched.index("T2")]
     assert "서식1#" not in t1[t1.index(OPEN_PREFIX):t1.index(CLOSE)]
+    assert "서식1#" in enriched[enriched.index('id="T2"'):]
 
 
 def test_footnote_followed_by_body_still_moves():
@@ -859,6 +861,54 @@ def test_footnote_followed_by_body_still_moves():
     assert enriched.count("주1) 지급여력비율은") == 1     # 이동(원본 소멸)
     span = enriched[enriched.index(OPEN_PREFIX):enriched.index(CLOSE)]
     assert "주1) 지급여력비율은" in span
+
+
+def _two_tables_with_gap(gap_text, page_gap=1, page_tbl=1):
+    return [
+        {"type": "table", "table_body": "<table>A</table>", "page_idx": 1},
+        {"type": "text", "text": gap_text, "page_idx": page_gap},
+        {"type": "table", "table_body": "<table>B</table>", "page_idx": page_tbl},
+    ]
+
+
+def test_short_gap_between_modals_is_absorbed_into_next():
+    """두 모달 사이 ≤50자 텍스트는 뒤 모달로 **이동** — 파편 청크 방지."""
+    enriched, ids = enrich(_two_tables_with_gap("휴가결근 신청서"),
+                           text_llm=None, vision_llm=None,
+                           enrich_modals=False, wrap_modals=True)
+    assert ids == ["T1", "T2"]
+    assert enriched.count("휴가결근 신청서") == 1          # 원본 소멸
+    assert "휴가결근 신청서" in enriched[enriched.index('id="T2"'):]
+
+
+def test_long_gap_between_modals_stays_copied():
+    """>50자 구간은 흡수하지 않는다 — 본문 서술은 자기 청크로 남는 게 낫다."""
+    body = ("표유일표지 이 문단은 표 사이에 있지만 쉰 글자를 넘는 본문 서술이라 "
+            "흡수 대상이 아니고 자기 청크로 남아야 한다.")
+    assert len(body) > modal._CTX_ABSORB_GAP_CHARS
+    enriched, _ = enrich(_two_tables_with_gap(body), text_llm=None, vision_llm=None,
+                         enrich_modals=False, wrap_modals=True)
+    assert enriched.count("표유일표지") == 2               # 원본 + 사본(복사)
+
+
+def test_gap_on_other_page_is_not_absorbed():
+    """다른 페이지 블록은 이동 금지 — page_spans 에서 그 페이지가 사라진다."""
+    blocks = _two_tables_with_gap("서식1#", page_gap=1, page_tbl=2)
+    blocks[0]["page_idx"] = 1
+    enriched, ids, spans = _assert_enrich_parity(
+        blocks, text_llm=None, vision_llm=None, enrich_modals=False, wrap_modals=True)
+    assert enriched.count("서식1#") == 2                   # 복사(원본 유지)
+    assert set(s["page_number"] for s in spans) == {1, 2}  # 페이지 사라짐 없음
+
+
+def test_footnote_before_next_table_goes_to_previous_modal():
+    """다음이 표여도 **각주**는 앞 모달이 가져간다("각주면 앞 모달")."""
+    blocks = _two_tables_with_gap("주1) 앞 표에 대한 각주다.")
+    enriched, _ = enrich(blocks, text_llm=None, vision_llm=None,
+                         enrich_modals=False, wrap_modals=True)
+    assert enriched.count("주1) 앞 표에 대한 각주다.") == 1
+    t1_end = enriched.index(CLOSE) + len(CLOSE)
+    assert "주1) 앞 표에 대한 각주다." in enriched[:t1_end]   # 앞 모달 안
 
 
 if __name__ == "__main__":  # pragma: no cover

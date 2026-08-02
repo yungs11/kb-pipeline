@@ -98,6 +98,15 @@ _CTX_COPY_BEFORE_CHARS = 200
 #: 표 '뒤' 문맥으로 가져올 최대 길이 — 표에 가까운 '앞'에서 200자.
 _CTX_COPY_AFTER_CHARS = 200
 
+#: 두 모달 **사이에 낀** 텍스트를 뒤 모달로 통째 **흡수(이동)** 하는 상한(문자).
+#: 청크는 MODAL 경계로 잘리므로, 표와 표 사이에 남은 짧은 텍스트는 쓸모없는 파편 청크가
+#: 된다(실측: `서식1#` 4자, `휴가결근 신청서` 8자). 실측 26개 구간의 크기 분포는
+#: ``0자×8 / 4~10자×7 / 196 / 322 / 433 … 3413`` 로 **라벨(≤10자)과 본문 서술(≥196자)
+#: 사이가 비어 있어** 이 구간 어디를 잘라도 결과가 같다. 본문 서술까지 흡수하면 청커가
+#: 못 쪼개는 수천 자 원자 청크가 되고 A-guard 가 문맥을 통째로 버릴 수 있어 제외한다.
+#: 순서는 "각주면 앞 모달, 아니면 뒷 모달" — 앞 모달이 각주를 먼저 가져간 뒤 남은 것만 본다.
+_CTX_ABSORB_GAP_CHARS = 50
+
 #: 문장 경계를 맞추느라 예산을 **넘길 수 있는 한도**(문자). 예산 컷 지점이 문장 중간이면
 #: 문장 처음까지 거슬러 올라가 통째로 담는데, 경계가 아예 없는 블록(개조식·표 캡션 등)이면
 #: 무한정 커질 수 있으므로 총 길이를 ``예산 + 이 값`` 으로 제한한다. 초과하면 문장 확장을
@@ -280,6 +289,49 @@ def _next_is_modal(blocks: list[dict] | None, idx: int) -> bool:
     return False
 
 
+def _absorbable_gap(
+    blocks: list[dict] | None, i: int, consumed: set[int]
+) -> list[tuple[int, str]] | None:
+    """모달 ``i`` 바로 앞의 '두 모달 사이 구간'이 통째로 흡수 가능하면 그 블록들을 반환.
+
+    조건 (모두 만족해야 함):
+      1. 앞쪽 연속 text 블록을 거슬러 올라가 만나는 블록이 **모달**이다(= 두 모달 사이).
+      2. 앞 모달이 각주로 이미 가져간(``consumed``) 블록을 만나지 않는다 — 만나면 그
+         지점부터가 진짜 구간이므로 남은 부분만 대상이다.
+      3. 남은 텍스트 총합이 ``_CTX_ABSORB_GAP_CHARS`` 이하다.
+      4. 모든 블록이 모달과 **같은 페이지**다 — 다른 페이지 블록을 소멸시키면 그 페이지가
+         ``page_spans`` 에서 빠져 썸네일·page_number 매핑이 깨진다.
+    조건 미달이면 ``None``(기존 복사 경로 유지).
+    """
+    if not blocks:
+        return None
+    page = (blocks[i] or {}).get("page_idx")
+    gap: list[tuple[int, str]] = []
+    total = 0
+    j = i - 1
+    while j >= 0:
+        b = blocks[j] or {}
+        if not _is_text(b):
+            # 모달을 만나면 '두 모달 사이' 성립. 그 외 비-text 는 흡수 대상 아님.
+            if b.get("type") not in ("table", "image", "equation"):
+                return None
+            break
+        if j in consumed:
+            break                               # 앞 모달이 가져간 지점 = 구간의 시작
+        s = (b.get("text") or "").strip()
+        if s:
+            if b.get("page_idx") != page:
+                return None                     # 페이지 소실 방지
+            total += len(s)
+            if total > _CTX_ABSORB_GAP_CHARS:
+                return None
+            gap.append((j, s))
+        j -= 1
+    else:
+        return None                             # 문서 시작까지 도달 — 앞 모달 없음
+    return gap or None
+
+
 def _ctx_after_blocks(
     after: list[tuple[int, str]], blocks: list[dict] | None = None
 ) -> list[tuple[int, str, bool]]:
@@ -307,9 +359,11 @@ def _ctx_after_blocks(
     ):
         if is_heading:
             break                               # 다음 섹션 제목 — 포함하지 않고 중단
-        if _next_is_modal(blocks, idx):
-            break               # 다음 표의 라벨 — 이 표의 각주가 아니다(제외하고 중단)
         li = bool(blocks and (blocks[idx] or {}).get("list_markers"))
+        if _next_is_modal(blocks, idx) and not _looks_like_footnote(s, li):
+            # 다음 표 직전의 **각주가 아닌** 블록 = 다음 표의 라벨 → 제외하고 중단.
+            # 각주는 표기가 확실하므로 다음이 표여도 이 표의 것으로 본다("각주면 앞 모달").
+            break
         if len(s) > budget:
             # 예산 초과 → **각주 블록만** 온전한 문장까지 발췌해 살린다. 각주가 아닌
             # 초과 블록까지 살리면 다음 절 본문이 표 문맥으로 딸려온다(실측 KIS:
@@ -634,6 +688,7 @@ def _enrich_core(
         if base_est + len(m["ctx_before"]) + len(m["ctx_after"]) > _OVERSIZE_CHARS:
             m["ctx_before"] = m["ctx_after"] = ""   # 1순위: 문맥 포기(원자성 유지)
             m["ctx_before_pairs"] = m["ctx_after_pairs"] = []
+            m["ctx_dropped"] = True                 # Phase C 의 gap 흡수도 막는다
         m["bare"] = base_est > _OVERSIZE_CHARS       # 2순위: 본체만으로도 초과면 bare
         if m["bare"]:
             m["tc"], m["fc"] = 0, 0
@@ -684,6 +739,16 @@ def _enrich_core(
                 kept_before.append((idx, text))
             if m.get("ctx_before_pairs"):
                 m["ctx_before"] = _join_before(kept_before)
+            # 두 모달 사이의 짧은 잔여 텍스트는 **통째로 흡수(이동)** — 파편 청크 방지.
+            # 앞 모달이 각주를 먼저 가져간 뒤 남은 것만 대상이라 "각주면 앞, 아니면 뒤".
+            # ⚠️ 복사 경로 전용 — LLM 흡수 경로(enrich_modals=True)는 title_count 로
+            # 흡수량을 정하고 ctx_* 를 안 쓴다. 여기서 ctx_before 를 채우면 ctx_mode 가
+            # 켜져 조립 분기가 바뀐다(byte-identical 회귀).
+            if not enrich_modals and not m["bare"] and not m.get("ctx_dropped"):
+                gap = _absorbable_gap(blocks, m["i"], consumed)
+                if gap is not None:
+                    m["ctx_before"] = _join_before(gap)
+                    title_idxs.extend(idx for idx, _ in gap)   # 이동 → 원본 소멸
             consumed.update(title_idxs)
             consumed.update(footnote_idxs)
         decisions[m["i"]] = {
