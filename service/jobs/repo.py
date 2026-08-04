@@ -157,11 +157,17 @@ class JobRepo:
         batch_key: str | None = None,
         parent_job_id: uuid.UUID | str | None = None,
         legacy: bool = False,
+        job_id: uuid.UUID | None = None,
     ) -> uuid.UUID:
-        """잡 하나를 ``queued`` 로 넣고 id 를 돌려준다. 밀리초 안에 끝나야 한다."""
+        """잡 하나를 ``queued`` 로 넣고 id 를 돌려준다. 밀리초 안에 끝나야 한다.
+
+        ``job_id`` 를 받는 이유: staging·payload 객체 키가 ``{prefix}/{job_id}/...`` 라
+        호출자가 **INSERT 전에** id 를 알아야 한다. 안 그러면 행을 만든 뒤 UPDATE 로
+        참조를 덧칠하는 우회가 생긴다.
+        """
         if kind not in KINDS:
             raise ValueError(f"unknown job kind: {kind!r}")
-        job_id = uuid.uuid4()
+        job_id = job_id or uuid.uuid4()
         sql = """
             INSERT INTO kbp.jobs
                 (id, kind, status, workspace_key, batch_key, parent_job_id,

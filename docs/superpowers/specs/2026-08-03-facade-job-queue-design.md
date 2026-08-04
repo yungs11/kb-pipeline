@@ -1033,11 +1033,19 @@ kb 의 `IngestionBatch` 도메인 모델 이식(`batch_key` 문자열로 갈음)
 0. **완료** — `pyproject.toml` 의 `testpaths`/`markers`, `service/jobs/admission.py`,
    `service/jobs/schema.py`, `service/tests/test_job_admission.py`(20 passed).
    **런타임 의존성 추가는 없다** — 커넥션 풀을 쓰지 않으므로(§2.3).
-1. `repo.py` — claim SQL(§3.1), 펜싱 술어, `42P01` 복구. `requires_pg` 테스트.
-2. `blobs.py` + `runner.py` — 현행 핸들러 본문 이동, 기존 다운스트림 클라이언트 재사용.
-3. `worker.py` — 틱 루프, heartbeat 불변식, 드레인.
-4. `app.py` 신규 `/jobs/*` 제출·조회.
-5. `app.py` 레거시 4경로를 잡 래퍼로 전환 + 기존 테스트 재배선(§8.1).
-6. compose·런처·문서.
+1. **완료** — `repo.py`(claim SQL, `(claimed_by, attempt_count)` 펜싱, `42P01` 복구).
+2. **완료** — `blobs.py` + `runner.py`(현행 핸들러 본문 이동, 클라이언트 재사용).
+3. **완료** — `worker.py`(틱 루프, heartbeat 전용 스레드, 드레인).
+4. **완료** — `jobs/api.py` 라우터 + `app.py` 등록. `/jobs/*` 제출·조회·취소.
+5. **완료** — 레거시 4경로를 잡 래퍼로. 테스트 재배선은 `service/tests/conftest.py`
+   하나로 처리했다(인메모리 repo/blobs + 인라인 디스패처 자동 주입) — 기존 파일들의
+   단언을 손대지 않고 살렸다.
+6. ⬜ compose·런처·문서.
+
+**라이브 검증(2026-08-04)**: facade(:19000) + facade-worker 를 실제로 띄우고 스캔 PDF
+6건을 동시 제출 → **정확히 4건만 running, 2건 queued**가 6회 관측 내내 유지됐다. 슬롯이
+비는 대로 승격됐고, 결과는 현행 `/parse` 응답 스키마 그대로(OCR 한글 884자 +
+`docs_id`·`page_spans`·`pages`·`table_blocks`·`timing_metrics`). 레거시 `/parse` 도
+동일 본문을 반환했다.
 
 각 단계 끝에서 `_workspace/03-dev-progress.md` 를 갱신한다.

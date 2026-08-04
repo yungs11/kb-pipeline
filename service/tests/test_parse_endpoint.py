@@ -62,6 +62,21 @@ def test_parse_sanitizes_filename_before_forwarding():
     app.dependency_overrides.clear()
 
 
+def test_parse_preserves_unicode_filename_before_forwarding():
+    """경로 탈출은 제거하지만 parse-svc 문서 제목에 필요한 한글은 보존한다."""
+    fake = FakeParseClient()
+    app.dependency_overrides[get_parse_client] = lambda: fake
+    c = TestClient(app)
+    name = "2-1. 위임전결기준표(2026.04.17. 개정).xlsx"
+    r = c.post(
+        "/parse",
+        files={"file": (f"../../{name}", b"b", "application/octet-stream")},
+    )
+    assert r.status_code == 200
+    assert fake.calls[0]["filename"] == name
+    app.dependency_overrides.clear()
+
+
 def test_parse_client_posts_multipart(monkeypatch):
     """ParseSvcClient.parse posts multipart file+filename to parse-svc /parse."""
     from service.parse_client import ParseSvcClient
