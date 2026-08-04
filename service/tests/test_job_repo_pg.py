@@ -27,6 +27,31 @@ if not DSN:
     pytest.skip("KBP_PG_DSN unset", allow_module_level=True)
 
 
+def _live_worker_present() -> bool:
+    """살아있는 facade-worker 가 이 큐를 물고 있는가."""
+    try:
+        with psycopg.connect(DSN, connect_timeout=3) as conn:
+            row = conn.execute(
+                "SELECT count(*) FROM kbp.job_workers"
+                " WHERE heartbeat_at >= now() - interval '60 seconds'"
+            ).fetchone()
+        return bool(row and row[0])
+    except psycopg.Error:
+        return False   # 스키마 없음 = 아직 아무도 안 씀
+
+
+if _live_worker_present():
+    # 이 테스트들은 큐를 **단독으로** 써야 한다. 실제 worker 가 떠 있으면 2초마다
+    # claim 이 돌아 queued 잡을 채가므로, "제출 직후 queued 상태" 를 전제하는 단언들이
+    # 무작위로 깨진다(실제로 test_cancel_queued_is_immediate 가 그렇게 깨졌다).
+    # 조용한 flaky 로 두는 것보다 이유를 밝히고 건너뛰는 게 낫다.
+    pytest.skip(
+        "live facade-worker is consuming this queue — stop it to run these tests "
+        "(pgrep -f -- '-m service\\.worker' | xargs kill)",
+        allow_module_level=True,
+    )
+
+
 def _truncate():
     with psycopg.connect(DSN) as conn:
         conn.execute("DELETE FROM kbp.jobs")
