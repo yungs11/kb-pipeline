@@ -28,10 +28,15 @@ class InMemoryJobRepo:
 
     def submit(self, *, kind, payload=None, payload_ref=None, input_ref=None,
                workspace_key=None, batch_key=None, parent_job_id=None,
-               legacy=False, job_id=None) -> uuid.UUID:
+               legacy=False, job_id=None, idem_key=None) -> uuid.UUID:
+        if idem_key is not None:
+            for row in self.rows.values():
+                if row.get("idem_key") == idem_key:
+                    return row["id"]     # 충돌 → 기존 잡 재사용
         job_id = job_id or uuid.uuid4()
         self.rows[job_id] = {
             "id": job_id, "kind": kind, "status": "queued", "stage": None,
+            "idem_key": idem_key,
             "workspace_key": workspace_key, "batch_key": batch_key,
             "parent_job_id": _as_uuid(parent_job_id), "legacy": legacy,
             "payload": copy.deepcopy(payload), "payload_ref": payload_ref,
@@ -82,6 +87,8 @@ class InMemoryJobRepo:
         row = self._fenced(job_id, worker_id, attempt)
         row.update(status=status, result=copy.deepcopy(result),
                    result_ref=result_ref, error=error, stage=None)
+        if status != "succeeded":
+            row["idem_key"] = None   # 실패는 캐시하지 않는다
 
     def requeue(self, job_id, *, worker_id, attempt, error) -> None:
         row = self._fenced(job_id, worker_id, attempt)
@@ -101,6 +108,7 @@ class InMemoryJobRepo:
         if row is None or row["status"] not in {"queued", "running"}:
             return None
         row["cancel_requested"] = True
+        row["idem_key"] = None
         if row["status"] == "queued":
             row["status"] = "canceled"
             return "canceled"

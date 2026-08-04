@@ -37,6 +37,7 @@ CREATE SCHEMA IF NOT EXISTS kbp;
 CREATE TABLE IF NOT EXISTS kbp.jobs (
   id               uuid PRIMARY KEY,
   kind             text NOT NULL,
+  idem_key         text,
   status           text NOT NULL,
   stage            text,
   workspace_key    text,
@@ -63,6 +64,15 @@ CREATE INDEX IF NOT EXISTS jobs_claim_idx   ON kbp.jobs (status, created_at, id)
 CREATE INDEX IF NOT EXISTS jobs_running_idx ON kbp.jobs (status, kind, workspace_key);
 CREATE INDEX IF NOT EXISTS jobs_batch_idx   ON kbp.jobs (batch_key) WHERE batch_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS jobs_parent_idx  ON kbp.jobs (parent_job_id) WHERE parent_job_id IS NOT NULL;
+
+-- 이미 만들어진 테이블의 업그레이드 경로. CREATE TABLE IF NOT EXISTS 는 컬럼을 더해주지
+-- 않으므로 ALTER 를 함께 둔다(둘 다 멱등).
+ALTER TABLE kbp.jobs ADD COLUMN IF NOT EXISTS idem_key text;
+
+-- 제출 멱등키. failed/canceled 로 끝난 잡은 idem_key 를 NULL 로 비우므로(repo.complete),
+-- 부분 유니크 조건은 "NULL 이 아닌 것"만으로 충분하다. 고친 뒤 같은 파일을 다시 올리면
+-- 새 잡이 만들어진다 — 실패가 영구히 캐시되지 않는다.
+CREATE UNIQUE INDEX IF NOT EXISTS jobs_idem_idx ON kbp.jobs (idem_key) WHERE idem_key IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS kbp.job_workers (
   worker_id    text PRIMARY KEY,

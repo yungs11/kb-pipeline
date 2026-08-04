@@ -158,6 +158,7 @@ class JobRepo:
         parent_job_id: uuid.UUID | str | None = None,
         legacy: bool = False,
         job_id: uuid.UUID | None = None,
+        idem_key: str | None = None,
     ) -> uuid.UUID:
         """잡 하나를 ``queued`` 로 넣고 id 를 돌려준다. 밀리초 안에 끝나야 한다.
 
@@ -168,11 +169,16 @@ class JobRepo:
         if kind not in KINDS:
             raise ValueError(f"unknown job kind: {kind!r}")
         job_id = job_id or uuid.uuid4()
+        # 멱등키 충돌이면 새 잡을 만들지 않고 **기존 job_id 를 그대로 돌려준다**.
+        # 소비자(kb)가 5xx 를 재시도하므로, 이게 없으면 재시도마다 새 잡이 생겨
+        # /insert·/ingest 에서 edgequake 중복 적재가 된다.
         sql = """
             INSERT INTO kbp.jobs
                 (id, kind, status, workspace_key, batch_key, parent_job_id,
-                 legacy, payload, payload_ref, input_ref)
-            VALUES (%s, %s, 'queued', %s, %s, %s, %s, %s, %s, %s)
+                 legacy, payload, payload_ref, input_ref, idem_key)
+            VALUES (%s, %s, 'queued', %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (idem_key) WHERE idem_key IS NOT NULL DO NOTHING
+            RETURNING id
         """
 
         def _run():
@@ -182,8 +188,26 @@ class JobRepo:
                         job_id, kind, workspace_key, batch_key,
                         _as_uuid(parent_job_id), legacy,
                         Jsonb(payload) if payload is not None else None,
-                        payload_ref, input_ref,
+                        payload_ref, input_ref, idem_key,
                     ))
+                    row = cur.fetchone()
+                    if row is None:
+                        # 충돌 — 같은 키의 살아있는 잡이 이미 있다.
+                        cur.execute(
+                            "SELECT id FROM kbp.jobs WHERE idem_key = %s", (idem_key,)
+                        )
+                        existing = cur.fetchone()
+                        if existing is None:
+                            # 그 사이 실패로 끝나 키가 비워졌다 — 재삽입.
+                            conn.rollback()
+                            return self.submit(
+                                kind=kind, payload=payload, payload_ref=payload_ref,
+                                input_ref=input_ref, workspace_key=workspace_key,
+                                batch_key=batch_key, parent_job_id=parent_job_id,
+                                legacy=legacy, idem_key=None,
+                            )
+                        conn.commit()
+                        return existing["id"]
                 conn.commit()
             return job_id
 
@@ -332,7 +356,12 @@ class JobRepo:
                    completed_at = CASE
                      WHEN j.cancel_requested
                        OR j.stage = 'inserting'
-                       OR j.attempt_count >= lim.max_attempts THEN now() END
+                       OR j.attempt_count >= lim.max_attempts THEN now() END,
+                   idem_key = CASE
+                     WHEN j.cancel_requested
+                       OR j.stage = 'inserting'
+                       OR j.attempt_count >= lim.max_attempts THEN NULL
+                     ELSE j.idem_key END
               FROM unnest(%s::text[], %s::int[], %s::int[])
                    AS lim(kind, max_attempts, max_runtime)
              WHERE j.kind = lim.kind
@@ -517,12 +546,15 @@ class JobRepo:
             """
             UPDATE kbp.jobs
                SET status = %s, result = %s, result_ref = %s, error = %s,
-                   completed_at = now(), heartbeat_at = NULL, stage = NULL
+                   completed_at = now(), heartbeat_at = NULL, stage = NULL,
+                   -- 실패로 끝나면 멱등키를 비운다. 설정을 고치고 같은 파일을 다시
+                   -- 올렸을 때 옛 실패 job_id 가 반환되어 영구 실패로 굳는 것을 막는다.
+                   idem_key = CASE WHEN %s = 'succeeded' THEN idem_key ELSE NULL END
              WHERE id = %s AND claimed_by = %s AND attempt_count = %s
                AND status = 'running'
             """,
             (status, Jsonb(result) if result is not None else None,
-             result_ref, error, job_id, worker_id, attempt),
+             result_ref, error, status, job_id, worker_id, attempt),
         )
 
     def requeue(
@@ -573,7 +605,9 @@ class JobRepo:
                            status = CASE WHEN status='queued' THEN 'canceled'
                                          ELSE status END,
                            completed_at = CASE WHEN status='queued' THEN now()
-                                              ELSE completed_at END
+                                              ELSE completed_at END,
+                           -- 취소된 잡의 키를 비워야 같은 요청을 다시 낼 수 있다.
+                           idem_key = NULL
                      WHERE id = %s AND status IN ('queued', 'running')
                     RETURNING status
                     """,

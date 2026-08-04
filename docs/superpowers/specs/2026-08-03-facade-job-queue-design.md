@@ -452,6 +452,7 @@ ingest 승인이 지연될 수 있다. Phase 1 트래픽은 kb 의 단계별 호
 | `KBP_JOB_INLINE_MAX_BYTES` | 262144 | payload/result 공통 임계 |
 | `KBP_JOB_MAX_UPLOAD_BYTES` | 209715200 | 200MB. 초과 시 413 |
 | `KBP_JOB_MAX_WAITERS` | 4 | 프로세스당 동시 대기 상한(레거시 포함) |
+| `KBP_JOB_IDEM_WINDOW_SECONDS` | 300 | 자동 파생 멱등키의 시간 버킷 폭(§4.4) |
 | `KBP_JOB_WAIT_MAX_SECONDS` | 0 | `/jobs/*?wait` 상한. **기본 비활성** |
 | `KBP_JOB_LEGACY_WAIT_SECONDS` | 3300 | 기존 4경로 내부 대기 상한. **kb 소비자 타임아웃 3600.0(`config.py:159`)보다 작아야** 우리 응답이 먼저 도달한다 |
 | `KBP_JOB_MINIO_PREFIX` | `kbp-jobs` | 객체 키 접두사 |
@@ -585,7 +586,27 @@ ingest 승인이 지연될 수 있다. Phase 1 트래픽은 kb 의 단계별 호
 무인증 경로가 stateless 에서 stateful 로 바뀌는 것은 사실이다(인증 없는 호출 하나가
 최대 200MB staging 을 남긴다). GC 가 없는 Phase 1 에서는 §5.3 이 이를 막는다.
 
-### 4.4 `?wait` 와 레거시 대기
+### 4.4 제출 멱등키
+
+소비자(kb)는 429/5xx 를 최대 3회 재시도한다(`kb_pipeline_client.py:137`). 제출 경로에서
+그건 잡 중복 생성이고, `/insert`·`/ingest` 에서는 곧 edgequake 중복 적재다.
+
+`/jobs/*` 제출은 `Idempotency-Key` 헤더를 받고, 없으면
+`sha256(kind + workspace + payload + file)` + **시간 버킷**으로 자동 파생한다. 같은 키의
+살아있는 잡이 있으면 새로 만들지 않고 **기존 `job_id` 를 반환**한다.
+
+| 상황 | 동작 |
+|---|---|
+| 같은 요청 재시도(수 초 내) | 같은 자동 키 → 기존 잡 반환 |
+| 의도적 재요청(버킷 경과 뒤) | 새 키 → 새 잡 |
+| 명시 헤더 | 버킷 없음 — 소비자가 수명을 정한다 |
+| 잡이 `failed`/`canceled` 로 종결 | **키를 비운다** → 고친 뒤 재제출하면 새 잡 |
+| 키 충돌 | 방금 올린 staging 객체를 즉시 삭제(고아 방지, GC 없음 — D2) |
+
+**레거시 4경로는 멱등키를 쓰지 않는다.** 동기라 소비자가 최종 결과를 보고 재시도를
+판단하므로, 캐시가 끼면 "설정 고치고 다시 파싱" 이 조용한 no-op 이 된다.
+
+### 4.5 `?wait` 와 레거시 대기
 
 `/jobs/*?wait=true` 는 제출 후 완료까지 **DB 만 폴링**해 결과를 반환한다. 기본
 `KBP_JOB_WAIT_MAX_SECONDS=0`(**비활성**).
@@ -624,7 +645,7 @@ facade-worker 는 **이번에 새로 생기는 프로세스**라(호스트 런�
 **잡 행이 조회되지 않으면 즉시 5xx 로 종결한다.** 무한 대기 금지 — §7.3 의 dev 큐 소멸
 시나리오가 여기로 온다.
 
-### 4.5 레거시 래퍼 응답 매핑
+### 4.6 레거시 래퍼 응답 매핑
 
 Phase 1 의 핵심 약속이 "기존 4경로 응답 계약 불변" 이므로 실패 경로도 정의해야 한다.
 kb 는 429/5xx 만 재시도한다(`kb_pipeline_client.py:126-142`).
@@ -997,7 +1018,7 @@ next(iter(client.list_objects(bucket, prefix=f"{JOB_PREFIX}/", recursive=True)),
 
 ## 9. Phase 2 — kb-backend 축소 (별도 착수)
 
-1. **선행**: 제출 멱등키 구현(D1). kb 의 `_request` 가 5xx 를 재시도하므로 필수다.
+1. ~~선행: 제출 멱등키 구현(D1)~~ — **완료**(§4.4).
 2. kb 의 facade 클라이언트를 `/jobs/*` + 폴링으로 전환.
 3. kb 의 `batch_worker` 제거. 화면은 `GET /jobs?batch_key=` 와 `GET /jobs/workers` 로
    대응(키 이름을 kb 와 맞췄으므로 프론트 매핑 변경 없음).
@@ -1020,7 +1041,7 @@ next(iter(client.list_objects(bucket, prefix=f"{JOB_PREFIX}/", recursive=True)),
 ## 11. 비범위
 
 [`2026-08-03-facade-job-queue-deferred.md`](2026-08-03-facade-job-queue-deferred.md) 참조 —
-멱등키(D1) · TTL GC(D2) · 업로드 스트리밍(D3) · `lease_epoch`(D4) · insert 재시도
+TTL GC(D2) · 업로드 스트리밍(D3) · `lease_epoch`(D4) · insert 재시도
 멱등(D5) · 취소 즉시반응(D6) · ingest aging(D7) · airgap 검증 스크립트(D8) · NUL 정제
 (D9) · `/communities/build` 큐 편입(D10) · `/healthz` async(D11) ·
 airgap `KBP_FACADE_KEY` 필수화(D12).

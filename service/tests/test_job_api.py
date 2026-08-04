@@ -225,3 +225,82 @@ def test_legacy_parse_records_job_as_legacy(client, job_queue_inline):
     client.post("/parse", files={"file": ("a.pdf", b"x", "application/pdf")})
     rows = list(job_queue_inline["repo"].rows.values())
     assert rows and rows[0]["legacy"] is True
+
+
+# ── 제출 멱등키 (D1) — Phase 2 선행 조건 ───────────────────────────────────
+
+def test_retrying_same_upload_reuses_job(client, job_queue_inline):
+    """kb 는 5xx 를 3회까지 재시도한다. 재시도가 새 잡을 만들면 중복 적재다."""
+    _use(get_parse_client, FakeParse())
+    files = {"file": ("a.pdf", b"same-bytes", "application/pdf")}
+    first = client.post("/jobs/parse", files=files).json()["job_id"]
+    second = client.post("/jobs/parse", files=files).json()["job_id"]
+    assert first == second
+    assert len(job_queue_inline["repo"].rows) == 1
+
+
+def test_different_content_creates_new_job(client):
+    _use(get_parse_client, FakeParse())
+    a = client.post("/jobs/parse",
+                    files={"file": ("a.pdf", b"one", "application/pdf")}).json()["job_id"]
+    b = client.post("/jobs/parse",
+                    files={"file": ("a.pdf", b"two", "application/pdf")}).json()["job_id"]
+    assert a != b
+
+
+def test_explicit_idempotency_key_wins(client):
+    """헤더가 있으면 내용이 달라도 같은 요청으로 본다(소비자가 수명을 정한다)."""
+    _use(get_parse_client, FakeParse())
+    h = {"Idempotency-Key": "upload-42"}
+    a = client.post("/jobs/parse", headers=h,
+                    files={"file": ("a.pdf", b"one", "application/pdf")}).json()["job_id"]
+    b = client.post("/jobs/parse", headers=h,
+                    files={"file": ("b.pdf", b"two", "application/pdf")}).json()["job_id"]
+    assert a == b
+
+
+def test_different_explicit_keys_create_separate_jobs(client):
+    _use(get_parse_client, FakeParse())
+    files = {"file": ("a.pdf", b"x", "application/pdf")}
+    a = client.post("/jobs/parse", headers={"Idempotency-Key": "k1"}, files=files).json()["job_id"]
+    b = client.post("/jobs/parse", headers={"Idempotency-Key": "k2"}, files=files).json()["job_id"]
+    assert a != b
+
+
+def test_idem_collision_does_not_leak_staging_object(client, job_queue_inline):
+    """충돌 시 방금 올린 staging 은 어떤 행도 참조하지 않는다 — 즉시 지워야 한다.
+
+    GC 가 없으므로(D2) 그냥 두면 영구 고아다.
+    """
+    _use(get_parse_client, FakeParse())
+    files = {"file": ("a.pdf", b"same", "application/pdf")}
+    client.post("/jobs/parse", files=files)
+    blobs = job_queue_inline["blobs"]
+    before = len(blobs.objects)
+    client.post("/jobs/parse", files=files)          # 충돌
+    assert len(blobs.objects) == before              # 새 객체가 남지 않았다
+    assert blobs.deleted                              # 정리가 실제로 돌았다
+
+
+def test_chunk_idem_accounts_for_parent(client, job_queue_inline):
+    """payload 가 같아도 선행 잡이 다르면 다른 요청이다."""
+    repo = job_queue_inline["repo"]
+    p1 = repo.submit(kind="parse"); repo.rows[p1]["status"] = "succeeded"
+    p2 = repo.submit(kind="parse"); repo.rows[p2]["status"] = "succeeded"
+    a = client.post("/jobs/chunk", json={"parse_job_id": str(p1)}).json()["job_id"]
+    b = client.post("/jobs/chunk", json={"parse_job_id": str(p2)}).json()["job_id"]
+    assert a != b
+
+
+def test_legacy_path_is_not_deduped_across_calls(client, job_queue_inline):
+    """레거시 /parse 는 멱등키를 쓰지 않는다 — 호출마다 실제로 파싱해야 한다.
+
+    레거시는 동기라 소비자가 최종 결과를 보고 재시도를 판단한다. 여기에 멱등 캐시가
+    끼면 "설정을 고치고 다시 파싱" 같은 정상 재요청이 옛 결과를 돌려받는다.
+    """
+    fake = _use(get_parse_client, FakeParse())
+    files = {"file": ("a.pdf", b"same", "application/pdf")}
+    assert client.post("/parse", files=files).status_code == 200
+    assert client.post("/parse", files=files).status_code == 200
+    assert len(job_queue_inline["repo"].rows) == 2, "레거시가 잡을 재사용했다"
+    assert len(fake.calls) == 2, "두 번째 호출이 실제로 파싱하지 않았다"

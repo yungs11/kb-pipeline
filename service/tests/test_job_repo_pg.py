@@ -288,3 +288,73 @@ def test_heartbeat_ignores_stale_generation(repo, worker):
 
     repo.heartbeat(worker_id=worker, leases=[(gen2.id, gen2.attempt)])  # 현 세대
     assert repo.get(gen2.id)["heartbeat_at"] > before
+
+
+# ── 제출 멱등키 (D1) ───────────────────────────────────────────────────────
+#
+# 소비자(kb)는 429/5xx 를 최대 3회 재시도한다. 제출 경로에서 그건 잡 중복 생성이고,
+# insert/ingest 에서는 곧 edgequake 중복 적재다.
+
+
+def test_same_idem_key_returns_existing_job(repo):
+    a = repo.submit(kind="parse", idem_key="k1")
+    b = repo.submit(kind="parse", idem_key="k1")
+    assert a == b
+    assert len(repo.list_jobs()) == 1
+
+
+def test_different_idem_keys_create_separate_jobs(repo):
+    a = repo.submit(kind="parse", idem_key="k1")
+    b = repo.submit(kind="parse", idem_key="k2")
+    assert a != b
+
+
+def test_no_idem_key_never_collides(repo):
+    """키가 없으면 멱등 보장도 없다 — 매번 새 잡(현행 동작)."""
+    a = repo.submit(kind="parse")
+    b = repo.submit(kind="parse")
+    assert a != b
+
+
+def test_failed_job_releases_idem_key(repo, worker):
+    """설정을 고치고 같은 파일을 다시 올리면 새 잡이 만들어져야 한다.
+
+    실패를 캐시하면 옛 failed job_id 가 계속 반환되어 영구 실패로 굳는다.
+    """
+    first = repo.submit(kind="parse", idem_key="k1")
+    claimed = repo.claim(worker_id=worker, local_free=1)[0]
+    repo.complete(claimed.id, worker_id=worker, attempt=claimed.attempt,
+                  status="failed", error="boom")
+    assert repo.get(first)["idem_key"] is None
+    second = repo.submit(kind="parse", idem_key="k1")
+    assert second != first
+
+
+def test_succeeded_job_keeps_idem_key(repo, worker):
+    """성공은 캐시한다 — 재시도가 같은 결과를 받는다."""
+    first = repo.submit(kind="parse", idem_key="k1")
+    claimed = repo.claim(worker_id=worker, local_free=1)[0]
+    repo.complete(claimed.id, worker_id=worker, attempt=claimed.attempt,
+                  status="succeeded", result={"ok": True})
+    assert repo.submit(kind="parse", idem_key="k1") == first
+
+
+def test_cancelled_job_releases_idem_key(repo):
+    first = repo.submit(kind="parse", idem_key="k1")
+    repo.cancel(first)
+    assert repo.submit(kind="parse", idem_key="k1") != first
+
+
+def test_recovered_exhausted_job_releases_idem_key(repo, worker):
+    """회수가 attempt 소진으로 failed 종결할 때도 키를 놓아야 한다."""
+    first = repo.submit(kind="insert", workspace_key="ws-a", idem_key="k1")
+    claimed = repo.claim(worker_id=worker, local_free=1)[0]
+    # heartbeat 를 과거로 돌려 stale 로 만든다 (insert 는 max_attempts=1)
+    with psycopg.connect(DSN) as conn:
+        conn.execute("UPDATE kbp.jobs SET heartbeat_at = now() - interval '1 hour' "
+                     "WHERE id = %s", (claimed.id,))
+        conn.commit()
+    repo.claim(worker_id=worker, local_free=1)   # 회수 틱
+    row = repo.get(first)
+    assert row["status"] == "failed"
+    assert row["idem_key"] is None

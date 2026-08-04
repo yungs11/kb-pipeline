@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import threading
@@ -15,7 +17,8 @@ import time
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import (APIRouter, Body, Depends, File, Form, Header, HTTPException,
+                     Query, UploadFile)
 
 from service.jobs import blobs as blobs_mod
 from service.jobs.repo import JobRepo
@@ -90,6 +93,43 @@ def get_job_runner(repo=Depends(get_job_repo), blobs=Depends(get_job_blobs)):
 router = APIRouter()
 
 
+# ── 멱등키 ─────────────────────────────────────────────────────────────────
+
+
+def derive_idem_key(
+    *, kind: str, payload: dict[str, Any], file_bytes: bytes | None,
+    explicit: str | None, workspace_key: str | None, parent_job_id: str | None = None,
+) -> str:
+    """제출 멱등키. 명시 헤더가 있으면 그것, 없으면 요청 내용에서 파생한다.
+
+    소비자(kb)는 429/5xx 를 최대 3회 재시도한다. 제출 경로에서 그건 잡 중복 생성이고,
+    ``/insert``·``/ingest`` 에서는 곧 edgequake 중복 적재다(멱등키가 없는 한).
+
+    **자동 파생 키에는 시간 버킷이 들어간다.** 그러지 않으면 "설정을 고치고 같은 파일을
+    다시 파싱" 같은 정상 재요청이 옛 잡 id 를 돌려받는 조용한 no-op 이 된다. 버킷 폭
+    (``KBP_JOB_IDEM_WINDOW_SECONDS``, 기본 300s)은 재시도 버스트(수 초)보다 훨씬 넓고
+    의도적 재요청(수 분 뒤)보다는 좁다. 명시 헤더에는 버킷을 넣지 않는다 — 소비자가
+    수명을 스스로 정한 것이므로.
+    """
+    if explicit:
+        return f"h:{explicit}"
+    material = {
+        "kind": kind,
+        "workspace": workspace_key,
+        # 같은 payload 라도 참조하는 선행 잡이 다르면 다른 요청이다.
+        "parent": str(parent_job_id) if parent_job_id else None,
+        # payload 는 키 순서에 무관해야 한다(소비자가 dict 순서를 보장하지 않는다).
+        "payload": json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str),
+        "file": hashlib.sha256(file_bytes).hexdigest() if file_bytes else None,
+    }
+    digest = hashlib.sha256(
+        json.dumps(material, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    window = max(1, _env_int("KBP_JOB_IDEM_WINDOW_SECONDS", 300))
+    bucket = int(time.time()) // window
+    return f"a:{digest}:{bucket}"
+
+
 # ── 제출 헬퍼 ──────────────────────────────────────────────────────────────
 
 
@@ -97,7 +137,7 @@ def submit_job(
     repo, blobs, *, kind: str, payload: dict[str, Any],
     file_bytes: bytes | None = None, workspace_key: str | None = None,
     batch_key: str | None = None, parent_job_id: str | None = None,
-    legacy: bool = False,
+    legacy: bool = False, idem_key: str | None = None,
 ) -> uuid.UUID:
     """staging 업로드 → payload 오프로딩 → 행 INSERT. 밀리초.
 
@@ -127,10 +167,17 @@ def submit_job(
         blobs.put_bytes(input_ref, file_bytes, content_type="application/octet-stream")
     inline, payload_ref = blobs.store_json(job_id, "payload", payload)
 
-    return repo.submit(job_id=job_id, kind=kind, payload=inline,
-                       payload_ref=payload_ref, input_ref=input_ref,
-                       workspace_key=workspace_key, batch_key=batch_key,
-                       parent_job_id=parent, legacy=legacy)
+    created = repo.submit(job_id=job_id, kind=kind, payload=inline,
+                          payload_ref=payload_ref, input_ref=input_ref,
+                          workspace_key=workspace_key, batch_key=batch_key,
+                          parent_job_id=parent, legacy=legacy, idem_key=idem_key)
+    if created != job_id:
+        # 멱등 충돌 — 기존 잡을 재사용한다. 방금 올린 staging 객체는 어떤 행도
+        # 참조하지 않으므로 즉시 지운다(GC 가 없어 그냥 두면 영구 고아다).
+        blobs.delete(input_ref)
+        if payload_ref:
+            blobs.delete(payload_ref)
+    return created
 
 
 def _validate_parent(repo, parent_job_id):
@@ -230,6 +277,7 @@ async def submit_parse(
     docs_id: str | None = Form(None),
     workspace_id: str | None = Form(None),
     batch_key: str | None = Form(None),
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
     repo=Depends(get_job_repo), blobs=Depends(get_job_blobs),
 ):
     from service.app import _safe_basename
@@ -242,8 +290,12 @@ async def submit_parse(
         "content_type": content_type or file.content_type,
         "docs_id": docs_id,
     }
-    job_id = submit_job(repo, blobs, kind="parse", payload=payload, file_bytes=data,
-                        workspace_key=workspace_id, batch_key=batch_key)
+    job_id = submit_job(
+        repo, blobs, kind="parse", payload=payload, file_bytes=data,
+        workspace_key=workspace_id, batch_key=batch_key,
+        idem_key=derive_idem_key(kind="parse", payload=payload, file_bytes=data,
+                                 explicit=idempotency_key, workspace_key=workspace_id),
+    )
     return {"job_id": str(job_id), "status": "queued"}
 
 
@@ -260,6 +312,7 @@ def submit_chunk(
     llm_regex_pattern: str | None = Body(None, embed=True),
     workspace_id: str | None = Body(None, embed=True),
     batch_key: str | None = Body(None, embed=True),
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
     repo=Depends(get_job_repo), blobs=Depends(get_job_blobs),
 ):
     if (enriched_content is None) == (parse_job_id is None):
@@ -269,9 +322,13 @@ def submit_chunk(
                "page_spans": page_spans, "pages": pages, "table_blocks": table_blocks,
                "methods": methods, "skip_scoring": skip_scoring,
                "llm_regex_pattern": llm_regex_pattern}
-    job_id = submit_job(repo, blobs, kind="chunk", payload=payload,
-                        workspace_key=workspace_id, batch_key=batch_key,
-                        parent_job_id=parse_job_id)
+    job_id = submit_job(
+        repo, blobs, kind="chunk", payload=payload,
+        workspace_key=workspace_id, batch_key=batch_key, parent_job_id=parse_job_id,
+        idem_key=derive_idem_key(kind="chunk", payload=payload, file_bytes=None,
+                                 explicit=idempotency_key, workspace_key=workspace_id,
+                                 parent_job_id=parse_job_id),
+    )
     return {"job_id": str(job_id), "status": "queued"}
 
 
@@ -284,6 +341,7 @@ def submit_insert(
     title: str = Body("", embed=True),
     extract_graph: bool = Body(True, embed=True),
     batch_key: str | None = Body(None, embed=True),
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
     repo=Depends(get_job_repo), blobs=Depends(get_job_blobs),
 ):
     if (chunks is None) == (chunk_job_id is None):
@@ -291,9 +349,13 @@ def submit_insert(
                             detail="exactly one of chunks / chunk_job_id")
     payload = {"workspace_id": workspace_id, "doc_id": doc_id, "chunks": chunks,
                "title": title, "extract_graph": extract_graph}
-    job_id = submit_job(repo, blobs, kind="insert", payload=payload,
-                        workspace_key=workspace_id, batch_key=batch_key,
-                        parent_job_id=chunk_job_id)
+    job_id = submit_job(
+        repo, blobs, kind="insert", payload=payload,
+        workspace_key=workspace_id, batch_key=batch_key, parent_job_id=chunk_job_id,
+        idem_key=derive_idem_key(kind="insert", payload=payload, file_bytes=None,
+                                 explicit=idempotency_key, workspace_key=workspace_id,
+                                 parent_job_id=chunk_job_id),
+    )
     return {"job_id": str(job_id), "status": "queued"}
 
 
@@ -304,6 +366,7 @@ async def submit_ingest(
     doc_id: str = Form(...),
     content_type: str | None = Form(None),
     batch_key: str | None = Form(None),
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
     repo=Depends(get_job_repo), blobs=Depends(get_job_blobs),
 ):
     from service.app import _safe_basename
@@ -315,8 +378,12 @@ async def submit_ingest(
         "content_type": content_type or file.content_type,
         "workspace_id": workspace_id, "doc_id": doc_id,
     }
-    job_id = submit_job(repo, blobs, kind="ingest", payload=payload, file_bytes=data,
-                        workspace_key=workspace_id, batch_key=batch_key)
+    job_id = submit_job(
+        repo, blobs, kind="ingest", payload=payload, file_bytes=data,
+        workspace_key=workspace_id, batch_key=batch_key,
+        idem_key=derive_idem_key(kind="ingest", payload=payload, file_bytes=data,
+                                 explicit=idempotency_key, workspace_key=workspace_id),
+    )
     return {"job_id": str(job_id), "status": "queued"}
 
 
