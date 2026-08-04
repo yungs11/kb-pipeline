@@ -37,6 +37,8 @@
 | 임베딩(bge-m3) | — | OpenAI-호환, 1024d. 현행 배선=원격 litellm(`https://litellm.ax-demo.com/v1`) |
 | gotenberg | 3000 | office(pptx/docx)→PDF 변환(VL OCR 전처리). parse-svc 만 소비 |
 | ~~ocr(:18050)~~ ~~excel-parser(:18055)~~ ~~redis~~ | — | **Phase 2e 제거** — parse-svc in-process 로 흡수 |
+| doc_guard | 8000 (컨테이너 내부) | 문서 게이트. **facade `/gate/*` 뒤에 숨는다** — 외부 노출 없음 |
+| minio | 9000 | 객체 저장. 제어평면은 facade `/objects/*` 뒤, 브라우저 읽기만 `/obj/*` 프록시 |
 | kb-backend (knowledge_base) | 8088 | 소비자/집계자. facade 호출 + IngestionJob 추적·영속 |
 
 ## 불변식
@@ -45,3 +47,12 @@
 - **마크다운 + inline HTML 중간표현**: 표는 절대 pipe 로 납작화하지 않고 `<table>` HTML(colspan/rowspan) 보존.
 - **단일 Postgres + per-KB RLS**: 별도 스키마가 아니라 공유테이블 + tenant_id/workspace_id 컬럼 + RLS.
 - **BGE-M3 1024d 통일**: 청킹·적재·검색 세 구간 단일 모델/차원.
+- **facade 가 doc_guard·MinIO 를 은닉한다**: 소비자는 facade 만 안다. 게이트는
+  `/gate/check-excel`·`/gate/rules`, 오브젝트는 `/objects/*`(제어평면). 소비자가
+  doc_guard/MinIO 주소를 직접 갖지 않는다 — 주소를 아는 곳이 둘이면 어긋나도 소비자
+  쪽에서만 터진다(2026-08-04 실측: kb `:8000` vs doc_guard `:8001` → xlsx 적재 전면 실패).
+  **예외는 브라우저 이미지 읽기**(`/obj/*` same-origin 프록시) — 데이터평면이라 현행 유지다.
+  facade 를 정적 파일 서버로 만들면 잡 접수·`/healthz` 가 스레드를 못 얻는다.
+- **오브젝트 키 규칙은 `service/objects.py build_key` 하나가 소유**: `original`
+  `{docs_id}/original/{name}` · `page` `{docs_id}/{page_uuid}.jpeg` · `staging`
+  `parse-staging/{key}`. 확장자·프리픽스를 소비자가 붙이지 않는다(중복/누락이 조용한 404 가 된다).

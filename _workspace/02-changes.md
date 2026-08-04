@@ -267,3 +267,74 @@ knowledge_base plan `23_plan_chunk_method_selection.md` §B 반영. adaptive_chu
 **참고(빌드)**: edgequake `docker/Dockerfile` 에 cargo 캐시 마운트(registry+target) 추가했으나, 이번 빌드는 `FROM rust:bookworm` 이 툴체인을 1.95.0 으로 플로팅해 target 캐시 무효화(전량 재컴파일 91분). 캐시 이득 보려면 rust 베이스 태그 핀(`rust:1.xx-bookworm`) 필요 — 미결.
 
 **불변식 유지**: BGE-M3 1024d / 청크 KB당 단일우주 / 단일 Postgres+RLS. 리랭커는 검색 정렬 단계만 변경(적재·청킹 불변).
+
+## 10. facade 가 doc_guard·MinIO 를 은닉 — `/gate/*`, `/objects/*` (2026-08-04)
+
+> 계기: kb 가 없어지고 kbp(facade)가 유일한 API 서버로 남는다. 그런데 kb 가 doc_guard 와
+> MinIO 를 **직접** 찌르고 있었다. 실측 당시 kb 는 `docguard_base_url=:8000` 을 보는데
+> doc_guard 는 `:8001` 에 있어 **xlsx 적재가 게이트에서 통째로 실패**했고, 소비자 쪽에서만
+> 터져 원인이 "엑셀 적재가 안 된다"로 보였다. 주소를 아는 곳이 둘이면 이런 어긋남이 늦게
+> 드러난다.
+
+**게이트** — facade `POST /gate/check-excel`, `GET /gate/rules`. doc_guard 원형 응답을
+**변형 없이** 통과시킨다(소비자 `_build_gate_popup` 과 프론트가 원형 필드를 직접 읽는다).
+`/parse` 에 합치지 않은 이유: 판정 룰이 바뀔 때 재파싱 없이 게이트만 다시 돌려야 한다.
+순서는 **parse(gate_summary 산출) → 게이트 판정 → 청크**다.
+
+**오브젝트** — facade `PUT /objects/{scope}/{...}`, `GET|DELETE /objects`. 키 규칙을
+`service/objects.py build_key` 하나가 소유한다. 기존 객체는 마이그레이션하지 않는다:
+실 버킷 1137개(page 802·original 17·staging 318)를 재현해 **1137/1137 일치, 불일치 0**.
+
+### 제어평면만 은닉한다 (기각한 대안 포함)
+
+| | 무엇 | 결정 |
+|---|---|---|
+| 제어평면 | staging put/get, 원본 승격, 페이지 이미지 쓰기, 삭제 | **facade 뒤로** |
+| 데이터평면 | 브라우저의 썸네일·인용 이미지 읽기(`/obj/*`) | **현행 유지** |
+
+데이터평면까지 facade 로 돌리는 안을 검토하다 기각했다. 실측 페이지 이미지 802개
+중앙값 292KB·최대 3,987KB, 검색 1회 인용 top_k=10 이면 최대 ~4MB 가 facade 를 통과한다.
+facade 는 `gunicorn -w 4` + 동기 핸들러(AnyIO 스레드풀 공유)이고 잡 대기가
+`KBP_JOB_MAX_WAITERS` 만큼 스레드를 이미 점유한다 — 이미지 스트리밍이 얹히면 **썸네일을
+뿌리는 동안 잡 접수·`/healthz` 가 스레드를 못 얻는다**. facade 를 정적 파일 서버로 만드는
+셈이라 설계 전제와 충돌한다.
+
+**presign 안도 기각**: 한때 presigned URL 로 가기로 했다가 사실확인에서 뒤집었다 —
+`presign` 은 kb 에서 **호출부 0건 데드코드**고, 실제 읽기 경로는 프론트 Next.js 의
+`/obj/* → minio/document-parser/*` same-origin rewrite 다. presign 은 `localhost:9000`
+절대 URL 이라 외부/https 에서 혼합콘텐츠로 깨진다.
+
+### 소비자(kb) 변경
+
+- `DocGuardClient` → facade `/gate/*`. multipart `check()`(pdf·docx 전 포맷)는 **삭제** —
+  호출부 0건 데드코드인데 남기면 doc_guard 직결 경로가 그대로 남는다.
+- `MinioStore` → facade `/objects/*` 클라이언트로 재작성. 메서드 시그니처를 유지해 호출부
+  9곳은 생성자만 바뀐다. **minio 패키지 의존성과 자격증명 4키를 제거**했다.
+- kb 에 남는 것: `public_url`·`rewrite_minio_urls`·키 헬퍼(MinIO 미호출 순수 문자열) +
+  `minio_bucket`(챗 답변의 옛 절대 URL 을 `/obj/` 로 치환할 때 버킷 식별용).
+- staging 프리픽스 소유권이 facade 로 갔다. `MinioBlobStore` 가 또 붙이면
+  `parse-staging/parse-staging/...` 이 되어 워커가 staging 을 못 찾으므로 인자로 받으면 거부.
+
+### 폐쇄망 노출 정책 변경
+
+doc_guard 의 `3004:8000` 을 **제거**했다(인증 없는 게이트가 밖에 열려 있었다). facade·
+facade-worker 에 `KBP_DOC_GUARD_URL: http://doc_guard:8000` 을 넣어 인트라스택 DNS 로만
+닿는다. 외부 노출은 facade(3000)·edgequake(3001)·webui(3002)·minio 콘솔(3003)·
+parse-svc(18081)·postgres(5433) 로 줄었다.
+
+### 검증
+
+- 실기동 왕복: 3개 scope PUT→GET→DELETE prefix, 한글·공백·괄호 파일명 보존, 버킷 원상복귀
+- kb `/docguard/rules` → facade `/gate/rules` → doc_guard: 룰 14개
+- xlsx 업로드 → `status=gate_failed` + `gate_popup` 원형 보존(error 1건)
+- kb 클라이언트로 3 scope 왕복 후 `delete_prefix` 2건 → 잔여 0
+- kbp `service/tests` 219 passed / kb 회귀 0건(기존 실패 19건 그대로)
+
+**미검증**: PDF 전 구간은 chunk 에서 막혀 확인 못 했다 — adaptive_chunk 의 bge-m3 임베딩
+백엔드가 502/500(litellm). 이 변경과 무관한 기존 장애다.
+
+**보류(D19)**: doc_guard 룰 14개 중 docx 13·pdf 11 로 **엑셀 전용이 아닌데**, kb 는
+`xlsx/xlsm` 에서만 `check_excel` 을 부른다. 즉 pdf·docx 는 게이트를 통과하는 게 아니라
+거치지 않는다. pdf·docx 게이트를 켤 때 `/gate/check` 를 함께 설계한다.
+
+**불변식 유지**: 청크 KB당 단일우주 / 표 `<table>` 보존 / 단일 Postgres+RLS / BGE-M3 1024d.

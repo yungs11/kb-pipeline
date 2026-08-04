@@ -11,6 +11,8 @@ x-facade-env: &facade_env
   KBP_PARSE_SVC_URL: http://parse-svc:19001
   KBP_ADAPTIVE_CHUNK_URL: http://adaptive_chunk:18060
   KBP_EDGEQUAKE_URL: http://edgequake:8081
+  # doc_guard — facade 가 게이트를 은닉한다(/gate/*). 소비자(kb)는 이 주소를 모른다.
+  KBP_DOC_GUARD_URL: http://doc_guard:8000
   KBP_PG_DSN: postgres://edgequake:${POSTGRES_PASSWORD:-edgequake_secret}@postgres:5432/edgequake
   KBP_OPENAI_API_KEY: ${KBP_OPENAI_API_KEY}
   KBP_OPENAI_BASE_URL: ${KBP_OPENAI_BASE_URL}
