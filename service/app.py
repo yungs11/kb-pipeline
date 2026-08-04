@@ -208,7 +208,7 @@ app.include_router(_jobs_router, dependencies=[Depends(require_facade_key)])
 
 
 @app.post("/parse")
-async def parse(file: UploadFile = File(...), content_type: str | None = Form(None),
+def parse(file: UploadFile = File(...), content_type: str | None = Form(None),
                 docs_id: str | None = Form(None),
                 repo=Depends(_job_repo), blobs=Depends(_job_blobs),
                 runner=Depends(_job_runner)):
@@ -222,7 +222,11 @@ async def parse(file: UploadFile = File(...), content_type: str | None = Form(No
     the keys the orchestrator/UI assemble. The response passes through the additive
     page fields (``docs_id``/``page_count``/``pages``/``page_spans``) unchanged.
     """
-    data = await file.read()
+    # **동기 def 다.** async 로 두면 아래 대기(_legacy_job → wait_for_job)의 time.sleep 이
+    # 이벤트루프를 통째로 막아 같은 프로세스의 /healthz·/jobs/* 가 전부 멎는다.
+    # FastAPI 는 동기 def 를 threadpool 에서 돌리므로 루프가 살아 있다. 업로드는
+    # SpooledTemporaryFile 을 직접 읽는다(await 불가).
+    data = file.file.read()
     payload = {
         "filename": _safe_basename(file.filename or "upload"),
         # 폼 필드가 없으면 파트 헤더로 폴백 — worker 에는 UploadFile 이 없으므로
@@ -345,7 +349,7 @@ def insert_status(workspace_id: str, doc_id: str, eq=Depends(get_edgequake)):
 
 
 @app.post("/ingest", dependencies=[Depends(require_facade_key)])
-async def ingest(file: UploadFile = File(...), workspace_id: str = Form(...),
+def ingest(file: UploadFile = File(...), workspace_id: str = Form(...),
                  doc_id: str = Form(...), content_type: str | None = Form(None),
                  repo=Depends(_job_repo), blobs=Depends(_job_blobs),
                  runner=Depends(_job_runner)):
@@ -356,7 +360,7 @@ async def ingest(file: UploadFile = File(...), workspace_id: str = Form(...),
     SAME result as the step-by-step path — including the real chunking selection
     rationale. Returns ``{document_id, chunk_count, status, chunking_selection}``.
     """
-    data = await file.read()
+    data = file.file.read()   # 동기 def — 이유는 /parse 주석 참조
     payload = {
         # ingest 의 filename 폴백은 parse 와 **다르다** — doc_id 로 떨어진다(현행 유지).
         "filename": _safe_basename(file.filename or doc_id),

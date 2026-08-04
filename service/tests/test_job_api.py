@@ -304,3 +304,45 @@ def test_legacy_path_is_not_deduped_across_calls(client, job_queue_inline):
     assert client.post("/parse", files=files).status_code == 200
     assert len(job_queue_inline["repo"].rows) == 2, "레거시가 잡을 재사용했다"
     assert len(fake.calls) == 2, "두 번째 호출이 실제로 파싱하지 않았다"
+
+
+# ── 이벤트루프 블로킹 방지 ─────────────────────────────────────────────────
+
+def test_legacy_handlers_are_sync_def():
+    """레거시 4경로는 **반드시 동기 `def`** 여야 한다.
+
+    async 로 두면 대기 루프의 `time.sleep` 이 이벤트루프를 통째로 막아 같은 프로세스의
+    `/healthz`·`/jobs/*` 가 최대 `KBP_JOB_LEGACY_WAIT_SECONDS`(3300s) 동안 멎는다.
+    compose healthcheck 가 unhealthy 로 넘어가고 depends_on 체인이 무너진다.
+
+    실제로 이 전환을 설계에만 적고 구현을 빠뜨렸다 — 인라인 모드에서는 폴링 루프에
+    도달하지 않아 다른 테스트가 못 잡았다. 그래서 구조로 못박는다.
+    """
+    import inspect
+
+    from service.app import chunk, ingest, insert, parse
+
+    for fn in (parse, chunk, insert, ingest):
+        assert not inspect.iscoroutinefunction(fn), (
+            f"{fn.__name__} must be a sync def — async blocks the event loop while waiting"
+        )
+
+
+def test_legacy_wait_timeout_returns_409_with_job_id(monkeypatch, job_queue_inline):
+    """대기 초과는 409 + job_id — 잡은 계속 진행한다.
+
+    (원래 여기에 "대기 중에도 /healthz 가 응답한다"는 행동 테스트를 뒀는데, TestClient 가
+    인스턴스마다 별도 이벤트루프를 만들어 **핸들러가 async 여도 통과했다** — 주장을
+    검증하지 못하는 테스트였다. 이벤트루프 블로킹은 위의 구조 단언으로 막는다.)
+    """
+    monkeypatch.setenv("KBP_JOB_LEGACY_WAIT_SECONDS", "1")
+    monkeypatch.setenv("KBP_JOB_WAIT_POLL_INTERVAL_SECONDS", "0")
+    app.state.job_inline = False
+    _use(get_parse_client, FakeParse())
+    try:
+        r = TestClient(app).post("/parse",
+                                 files={"file": ("a.pdf", b"x", "application/pdf")})
+    finally:
+        app.state.job_inline = True
+    assert r.status_code == 409
+    assert uuid.UUID(r.json()["detail"]["job_id"])

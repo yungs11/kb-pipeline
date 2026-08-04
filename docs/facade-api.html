@@ -1,0 +1,1529 @@
+<title>kb-pipeline facade :19000 — API · 운영 매뉴얼</title>
+
+<style>
+  :root {
+    --ground:      #F6F7F9;
+    --surface:     #FFFFFF;
+    --surface-alt: #EFF1F4;
+    --ink:         #14181F;
+    --ink-soft:    #3C444F;
+    --muted:       #5A6472;
+    --rule:        #D8DDE4;
+    --rule-soft:   #E6EAEF;
+    --accent:      #2F6F62;
+    --accent-soft: #E4EFEB;
+    --warn:        #A8562A;
+    --warn-soft:   #F7EDE4;
+    --danger:      #9B2C2C;
+    --danger-soft: #F8E9E9;
+
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo",
+            "Noto Sans KR", "Malgun Gothic", Roboto, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+            "Liberation Mono", monospace;
+
+    --step--1: 0.815rem;
+    --step-0:  0.965rem;
+    --step-1:  1.16rem;
+    --step-2:  1.45rem;
+    --step-3:  1.95rem;
+    --step-4:  2.75rem;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground:      #0F1317;
+      --surface:     #161B21;
+      --surface-alt: #1C222A;
+      --ink:         #E6EAEE;
+      --ink-soft:    #C3CBD4;
+      --muted:       #8B96A3;
+      --rule:        #2A323B;
+      --rule-soft:   #222932;
+      --accent:      #74B8A4;
+      --accent-soft: #16302B;
+      --warn:        #D2905F;
+      --warn-soft:   #2E2118;
+      --danger:      #D97A76;
+      --danger-soft: #2E1B1B;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:      #0F1317;
+    --surface:     #161B21;
+    --surface-alt: #1C222A;
+    --ink:         #E6EAEE;
+    --ink-soft:    #C3CBD4;
+    --muted:       #8B96A3;
+    --rule:        #2A323B;
+    --rule-soft:   #222932;
+    --accent:      #74B8A4;
+    --accent-soft: #16302B;
+    --warn:        #D2905F;
+    --warn-soft:   #2E2118;
+    --danger:      #D97A76;
+    --danger-soft: #2E1B1B;
+  }
+
+  :root[data-theme="light"] {
+    --ground:      #F6F7F9;
+    --surface:     #FFFFFF;
+    --surface-alt: #EFF1F4;
+    --ink:         #14181F;
+    --ink-soft:    #3C444F;
+    --muted:       #5A6472;
+    --rule:        #D8DDE4;
+    --rule-soft:   #E6EAEF;
+    --accent:      #2F6F62;
+    --accent-soft: #E4EFEB;
+    --warn:        #A8562A;
+    --warn-soft:   #F7EDE4;
+    --danger:      #9B2C2C;
+    --danger-soft: #F8E9E9;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: var(--step-0);
+    line-height: 1.68;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 0 clamp(1.1rem, 4vw, 2.5rem) 6rem;
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+
+  /* ---------- masthead ---------- */
+
+  .masthead {
+    padding: clamp(3rem, 8vw, 5.5rem) 0 2.2rem;
+    border-bottom: 2px solid var(--ink);
+  }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: var(--step--1);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 1.1rem;
+  }
+
+  h1 {
+    font-family: var(--sans);
+    font-size: clamp(2rem, 6vw, var(--step-4));
+    line-height: 1.06;
+    letter-spacing: -0.032em;
+    font-weight: 700;
+    margin: 0 0 0.75rem;
+    text-wrap: balance;
+  }
+
+  h1 .port {
+    font-family: var(--mono);
+    font-weight: 500;
+    letter-spacing: -0.01em;
+    color: var(--muted);
+  }
+
+  .standfirst {
+    max-width: 62ch;
+    font-size: var(--step-1);
+    color: var(--ink-soft);
+    margin: 0 0 2rem;
+    text-wrap: pretty;
+  }
+
+  .provenance {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 2.4rem;
+    font-family: var(--mono);
+    font-size: var(--step--1);
+    color: var(--muted);
+    border-top: 1px solid var(--rule-soft);
+    padding-top: 1rem;
+  }
+
+  .provenance b {
+    color: var(--ink-soft);
+    font-weight: 500;
+  }
+
+  /* ---------- layout: rail + column ---------- */
+
+  .body-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+
+  @media (min-width: 960px) {
+    .body-grid {
+      grid-template-columns: 190px minmax(0, 1fr);
+      gap: 3.5rem;
+      align-items: start;
+    }
+  }
+
+  .rail {
+    display: none;
+  }
+
+  @media (min-width: 960px) {
+    .rail {
+      display: block;
+      position: sticky;
+      top: 2rem;
+      padding-top: 3rem;
+      font-family: var(--mono);
+      font-size: var(--step--1);
+      line-height: 1.5;
+    }
+    .rail ol {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 0.55rem;
+    }
+    .rail a {
+      color: var(--muted);
+      text-decoration: none;
+      display: block;
+      border-left: 2px solid var(--rule);
+      padding-left: 0.75rem;
+    }
+    .rail a:hover,
+    .rail a:focus-visible {
+      color: var(--accent);
+      border-left-color: var(--accent);
+    }
+    .rail .rail-num {
+      color: var(--rule);
+      margin-right: 0.45rem;
+    }
+  }
+
+  main { min-width: 0; }
+
+  /* ---------- sections ---------- */
+
+  section {
+    padding-top: 3.4rem;
+  }
+
+  section + section {
+    border-top: 1px solid var(--rule);
+    margin-top: 3.4rem;
+    padding-top: 3.4rem;
+  }
+
+  h2 {
+    font-size: var(--step-3);
+    line-height: 1.15;
+    letter-spacing: -0.022em;
+    font-weight: 700;
+    margin: 0 0 1.4rem;
+    text-wrap: balance;
+    display: flex;
+    align-items: baseline;
+    gap: 0.85rem;
+  }
+
+  h2 .h2-num {
+    font-family: var(--mono);
+    font-size: var(--step-0);
+    font-weight: 500;
+    color: var(--accent);
+    letter-spacing: 0;
+  }
+
+  h3 {
+    font-size: var(--step-1);
+    letter-spacing: -0.012em;
+    font-weight: 650;
+    margin: 2.6rem 0 0.9rem;
+  }
+
+  h4 {
+    font-family: var(--mono);
+    font-size: var(--step--1);
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 500;
+    margin: 1.9rem 0 0.7rem;
+  }
+
+  p { margin: 0 0 1.05rem; max-width: 74ch; }
+  p.lede { max-width: 68ch; color: var(--ink-soft); }
+
+  ul, ol { max-width: 74ch; padding-left: 1.2rem; margin: 0 0 1.05rem; }
+  li { margin-bottom: 0.45rem; }
+  li > ul { margin-top: 0.45rem; }
+
+  a { color: var(--accent); text-underline-offset: 0.16em; }
+  a:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  strong { font-weight: 650; }
+
+  code {
+    font-family: var(--mono);
+    font-size: 0.885em;
+    background: var(--surface-alt);
+    padding: 0.12em 0.36em;
+    border-radius: 2px;
+    word-break: break-word;
+  }
+
+  pre {
+    font-family: var(--mono);
+    font-size: var(--step--1);
+    line-height: 1.62;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 2px;
+    padding: 1.05rem 1.15rem;
+    overflow-x: auto;
+    margin: 0 0 1.3rem;
+    tab-size: 2;
+  }
+
+  pre code {
+    background: none;
+    padding: 0;
+    font-size: inherit;
+  }
+
+  pre .cm { color: var(--muted); }
+  pre .ky { color: var(--accent); }
+
+  figure.diagram {
+    margin: 0 0 1.5rem;
+  }
+
+  figure.diagram pre {
+    line-height: 1.35;
+    font-size: clamp(0.6rem, 1.55vw, 0.79rem);
+    background: var(--surface-alt);
+  }
+
+  figcaption {
+    font-family: var(--mono);
+    font-size: var(--step--1);
+    color: var(--muted);
+    margin-top: 0.5rem;
+  }
+
+  /* ---------- tables ---------- */
+
+  .table-scroll {
+    overflow-x: auto;
+    margin: 0 0 1.5rem;
+    border-top: 1px solid var(--ink);
+    border-bottom: 1px solid var(--rule);
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--step--1);
+    font-variant-numeric: tabular-nums;
+  }
+
+  thead th {
+    text-align: left;
+    font-family: var(--mono);
+    font-weight: 500;
+    font-size: 0.76rem;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: 0.7rem 0.9rem 0.7rem 0;
+    border-bottom: 1px solid var(--rule);
+    white-space: nowrap;
+  }
+
+  tbody td {
+    padding: 0.72rem 0.9rem 0.72rem 0;
+    border-bottom: 1px solid var(--rule-soft);
+    vertical-align: top;
+    line-height: 1.55;
+  }
+
+  tbody tr:last-child td { border-bottom: none; }
+
+  td code, th code { font-size: 0.87em; }
+
+  .col-narrow { width: 1%; white-space: nowrap; }
+
+  .yes { color: var(--accent); font-family: var(--mono); }
+  .no  { color: var(--muted); font-family: var(--mono); }
+
+  /* ---------- endpoint blocks ---------- */
+
+  .endpoint {
+    border-top: 1px solid var(--rule);
+    padding-top: 1.5rem;
+    margin-top: 2.6rem;
+  }
+
+  .ep-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.6rem 0.75rem;
+    margin-bottom: 0.35rem;
+  }
+
+  .verb {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    padding: 0.22em 0.5em;
+    border: 1px solid currentColor;
+    border-radius: 2px;
+  }
+
+  .verb-get    { color: var(--accent); }
+  .verb-post   { color: var(--ink); }
+  .verb-delete { color: var(--danger); }
+
+  .ep-path {
+    font-family: var(--mono);
+    font-size: var(--step-1);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+
+  .ep-tag {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    border-left: 1px solid var(--rule);
+    padding-left: 0.75rem;
+  }
+
+  .ep-tag.locked { color: var(--warn); }
+
+  .ep-sub {
+    color: var(--muted);
+    font-size: var(--step--1);
+    font-family: var(--mono);
+    margin: 0 0 1.1rem;
+  }
+
+  /* ---------- callouts ---------- */
+
+  .note {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 2px;
+    padding: 1rem 1.15rem 0.35rem;
+    margin: 0 0 1.4rem;
+  }
+
+  .note > .note-label {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    display: block;
+    margin-bottom: 0.5rem;
+  }
+
+  .note p:last-child { margin-bottom: 0.7rem; }
+
+  .note.trap {
+    background: var(--warn-soft);
+    border-color: color-mix(in srgb, var(--warn) 35%, transparent);
+  }
+  .note.trap > .note-label { color: var(--warn); }
+
+  .note.stop {
+    background: var(--danger-soft);
+    border-color: color-mix(in srgb, var(--danger) 38%, transparent);
+  }
+  .note.stop > .note-label { color: var(--danger); }
+
+  .note.key {
+    background: var(--accent-soft);
+    border-color: color-mix(in srgb, var(--accent) 32%, transparent);
+  }
+  .note.key > .note-label { color: var(--accent); }
+
+  /* ---------- misc ---------- */
+
+  .kicker {
+    font-family: var(--mono);
+    font-size: var(--step--1);
+    color: var(--muted);
+    margin: 0 0 1.4rem;
+    max-width: 74ch;
+  }
+
+  .footer {
+    margin-top: 4rem;
+    padding-top: 1.6rem;
+    border-top: 2px solid var(--ink);
+    font-family: var(--mono);
+    font-size: var(--step--1);
+    color: var(--muted);
+  }
+
+  .footer ul { list-style: none; padding: 0; }
+  .footer li { margin-bottom: 0.4rem; }
+
+  @media (prefers-reduced-motion: no-preference) {
+    html { scroll-behavior: smooth; }
+  }
+
+  [id] { scroll-margin-top: 1.5rem; }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <p class="eyebrow">kb-pipeline · 내부 서비스 계약</p>
+    <h1>facade <span class="port">:19000</span><br />API · 운영 매뉴얼</h1>
+    <p class="standfirst">
+      업로드 문서 1건을 parse → chunk → insert 로 흘려보내는 오케스트레이터의 전체 계약,
+      실제 동시 처리 한계, 그리고 기동·중지 절차.
+    </p>
+    <div class="provenance">
+      <span><b>대조</b> 2026-08-03</span>
+      <span><b>branch</b> feat/paddle-gw-scan-lane</span>
+      <span><b>출처</b> 소스 직접 대조 (service/, scripts/, compose)</span>
+    </div>
+  </header>
+
+  <div class="body-grid">
+
+    <nav class="rail" aria-label="목차">
+      <ol>
+        <li><a href="#s1"><span class="rail-num">01</span>개요·구성도</a></li>
+        <li><a href="#s2"><span class="rail-num">02</span>인증</a></li>
+        <li><a href="#s3"><span class="rail-num">03</span>API 레퍼런스</a></li>
+        <li><a href="#s4"><span class="rail-num">04</span>배치 처리</a></li>
+        <li><a href="#s5"><span class="rail-num">05</span>동시 처리량</a></li>
+        <li><a href="#s6"><span class="rail-num">06</span>환경변수</a></li>
+        <li><a href="#s7"><span class="rail-num">07</span>기동·중지·헬스</a></li>
+        <li><a href="#s8"><span class="rail-num">08</span>트러블슈팅</a></li>
+      </ol>
+    </nav>
+
+    <main>
+
+      <!-- ============ 1 ============ -->
+      <section id="s1">
+        <h2><span class="h2-num">01</span>facade 는 무엇인가</h2>
+
+        <p class="lede">
+          <code>service/app.py</code> 하나로 이루어진 FastAPI 앱이다. 외부 소비자(kb-backend 등)에게
+          capability 만 노출하고 다운스트림(parse-svc / adaptive_chunk / edgequake)을 숨기는 얇은
+          오케스트레이터다. facade 자신은 파싱도 청킹도 하지 않는다 — 대신
+          <strong>청킹 정책과 모달 원자성의 소유자</strong>다.
+        </p>
+
+        <h4>단순 프록시가 아닌 이유</h4>
+
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr><th>책임</th><th>코드</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>워크스페이스 해석</strong> — 소비자의 kb id → edgequake workspace UUID (모든 stateful 핸들러)</td>
+                <td><code>ensure_workspace()</code><br /><code>service/edgequake.py:65</code></td>
+              </tr>
+              <tr>
+                <td><strong>모달 원자성 강제</strong> — <code>〈MODAL…〈/MODAL〉</code> 스팬을 <code>atomic_markers</code> 로 청커에 전달</td>
+                <td><code>MODAL_ATOMIC_MARKERS</code><br /><code>service/adaptive_chunk.py:33</code></td>
+              </tr>
+              <tr>
+                <td><strong>passthrough 묶기</strong> — 청크 텍스트를 U+001E 로 join → edgequake 가 같은 바이트로 분할(1:1 정합)</td>
+                <td><code>PASSTHROUGH_SEP</code><br /><code>service/edgequake.py:39</code></td>
+              </tr>
+              <tr>
+                <td><strong>마커 스트립</strong> — 저장·표시 직전 마커 제거(내용은 보존)</td>
+                <td><code>_strip_modal()</code><br /><code>service/app.py:39</code></td>
+              </tr>
+              <tr>
+                <td><strong>응답 정규화</strong> — 허브의 <code>chunk_text</code>/<code>chunk_pages</code> → 계약의 <code>text</code>/<code>pages</code></td>
+                <td><code>service/app.py:174-183</code></td>
+              </tr>
+              <tr>
+                <td><strong>비동기 잡 폴링 은폐</strong> — adaptive 잡·edgequake task 폴링을 동기 호출 뒤로 숨김</td>
+                <td><code>AdaptiveChunkClient.chunk()</code><br /><code>EdgequakeClient.insert_chunks()</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>구성도</h3>
+
+        <figure class="diagram">
+<pre>                    ┌──────────────── consumer ────────────────┐
+                    │  kb-backend(:8088) / 프론트(:4000)        │
+                    └───────────────┬──────────────────────────┘
+                                    │ HTTP  (+X-Facade-Key)
+                    ┌───────────────▼──────────────────────────┐
+                    │  facade  :19000   service/app.py         │
+                    │  /parse /chunk /insert /search /ingest   │
+                    │  /chunks /doc /communities/build         │
+                    └──┬─────────────┬──────────────┬──────────┘
+   KBP_PARSE_SVC_URL   │             │              │  KBP_EDGEQUAKE_URL
+                       │  KBP_ADAPTIVE_CHUNK_URL    │
+    ┌──────────────────▼──┐  ┌───────▼──────────┐  ┌▼───────────────────────┐
+    │ parse-svc  :19001   │  │ adaptive_chunk   │  │ edgequake  :8081       │
+    │ parse + blockify +  │  │ :18060           │  │ 추출·임베딩·AGE 그래프 │
+    │ modal enrich        │  │ 4방법 경쟁 청킹  │  │ ·검색  (passthrough)   │
+    └──┬──────────────┬───┘  └──────────────────┘  └───────────┬────────────┘
+       │ gotenberg    │ VL / paddle_gw (원격)                  │
+       │ :3000        │ MODEL_API_URL                          │
+       │              │ KBP_PADDLE_OCR_GATEWAY_URL             │
+       ▼              ▼                          ┌─────────────▼────────────┐
+    MinIO :9000 (페이지 이미지)                  │ postgres :5433           │
+                                                 │ pgvector + Apache AGE    │
+ facade 직결: KBP_PG_DSN ──────────────────────▶ │ (community_reports)      │
+                                                 └──────────────────────────┘</pre>
+          <figcaption>facade 가 DB 를 직접 만지는 유일한 경로는 /communities/build (service/app.py:348). 나머지는 전부 HTTP 위임.</figcaption>
+        </figure>
+
+        <h3>오케스트레이션 두 경로</h3>
+
+        <ul>
+          <li>
+            <strong>표준(단계별)</strong> — 소비자가 <code>/parse</code> → <code>/chunk</code> →
+            <code>/insert</code>(+ <code>/insert/status</code> 폴링)를 순차 호출. 단계별 진행률·청킹 근거를
+            UI 에 노출할 수 있다. kb-backend 가 쓰는 경로.
+          </li>
+          <li>
+            <strong>블로킹 one-shot</strong> — <code>/ingest</code> 한 번으로 parse→chunk→insert.
+            결과는 동일하되 중간 제어가 없다.
+          </li>
+        </ul>
+
+        <p class="kicker">
+          <code>/ingest/submit</code>·<code>/ingest/status</code>(비동기 변형)는 Phase 2d 에서 제거됐다.
+          폴링은 <code>/insert/status</code> 로 갈음한다.
+        </p>
+      </section>
+
+      <!-- ============ 2 ============ -->
+      <section id="s2">
+        <h2><span class="h2-num">02</span>인증 — X-Facade-Key</h2>
+
+        <p>
+          <code>service/app.py:63-83</code>. 환경변수 <code>KBP_FACADE_KEY</code> 와 요청 헤더
+          <code>X-Facade-Key</code> 를 비교한다. 불일치·누락 시
+          <code>401 {"detail": "invalid or missing X-Facade-Key"}</code>.
+        </p>
+
+        <div class="note trap">
+          <span class="note-label">현재 상태</span>
+          <p>
+            <code>KBP_FACADE_KEY</code> 가 <strong>미설정이면 게이트가 전면 비활성</strong>된다(dev). 기동 시
+            WARNING 로그 1줄만 남는다. 현재 <code>scripts/facade.env</code> 에 이 키가 <strong>없으므로
+            로컬 dev 는 무인증</strong>이다.
+          </p>
+        </div>
+
+        <ul>
+          <li><strong>게이트 대상</strong> — <code>/search</code>, <code>/insert</code>, <code>/insert/status</code>, <code>/ingest</code>, <code>/chunks</code>, <code>/doc</code>, <code>/communities/build</code></li>
+          <li><strong>비대상(무인증)</strong> — <code>/healthz</code>, <code>/parse</code>, <code>/chunk</code>. stateless(워크스페이스 없음)라 의도적으로 열려 있다.</li>
+        </ul>
+      </section>
+
+      <!-- ============ 3 ============ -->
+      <section id="s3">
+        <h2><span class="h2-num">03</span>API 레퍼런스</h2>
+
+        <p class="lede">
+          Base URL <code>http://localhost:19000</code>. 런처가 <code>--host 127.0.0.1</code> 로 바인드한다
+          — <strong>루프백 전용</strong>이며 외부에 노출되지 않는다.
+        </p>
+
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th class="col-narrow">Method</th>
+                <th>Path</th>
+                <th>파라미터 위치</th>
+                <th class="col-narrow">인증</th>
+                <th>블로킹</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>GET</code></td><td><code>/healthz</code></td><td>—</td><td class="no">✗</td><td>즉시</td></tr>
+              <tr><td><code>POST</code></td><td><code>/parse</code></td><td>multipart form</td><td class="no">✗</td><td>수십초–수분</td></tr>
+              <tr><td><code>POST</code></td><td><code>/chunk</code></td><td>JSON body</td><td class="no">✗</td><td>수분 (4방법 경쟁)</td></tr>
+              <tr><td><code>POST</code></td><td><code>/insert</code></td><td>JSON body</td><td class="yes">✓</td><td>수분 (터미널까지 폴링)</td></tr>
+              <tr><td><code>GET</code></td><td><code>/insert/status</code></td><td><strong>query</strong></td><td class="yes">✓</td><td>즉시</td></tr>
+              <tr><td><code>POST</code></td><td><code>/ingest</code></td><td>multipart form</td><td class="yes">✓</td><td>parse+chunk+insert 합</td></tr>
+              <tr><td><code>GET</code></td><td><code>/chunks</code></td><td><strong>query</strong></td><td class="yes">✓</td><td>chunk_count 만큼 순차 GET</td></tr>
+              <tr><td><code>DELETE</code></td><td><code>/doc</code></td><td><strong>query</strong></td><td class="yes">✓</td><td>즉시 (204)</td></tr>
+              <tr><td><code>POST</code></td><td><code>/communities/build</code></td><td><strong>query</strong></td><td class="yes">✓</td><td>즉시 202 (백그라운드)</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="note trap">
+          <span class="note-label">계약 함정 · 파라미터 위치</span>
+          <p>
+            <code>/insert/status</code>·<code>/chunks</code>·<code>/doc</code>·<code>/communities/build</code> 는
+            <strong>query string</strong> 이다. JSON body 로 보내면 422 다. FastAPI 가
+            <code>def f(workspace_id: str, …)</code> 시그니처(Body 미표기)를 query 로 바인딩하기 때문 —
+            <code>service/app.py:259, 333, 339, 356</code>.
+          </p>
+        </div>
+
+        <!-- healthz -->
+        <div class="endpoint" id="ep-healthz">
+          <div class="ep-head">
+            <span class="verb verb-get">GET</span>
+            <span class="ep-path">/healthz</span>
+            <span class="ep-tag">무인증</span>
+          </div>
+          <p class="ep-sub">프로세스 부팅 여부만 증명한다. 다운스트림 상태는 보지 않는다.</p>
+<pre>curl -s http://localhost:19000/healthz
+<span class="cm"># {"status":"ok"}</span></pre>
+        </div>
+
+        <!-- parse -->
+        <div class="endpoint" id="ep-parse">
+          <div class="ep-head">
+            <span class="verb verb-post">POST</span>
+            <span class="ep-path">/parse</span>
+            <span class="ep-tag">무인증</span>
+            <span class="ep-tag">service/app.py:112</span>
+          </div>
+          <p class="ep-sub">파일 1건 파싱 — 전부 parse-svc 로 위임하고 응답을 거의 그대로 통과시킨다.</p>
+
+          <h4>Request · multipart/form-data</h4>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>필드</th><th class="col-narrow">필수</th><th>설명</th></tr></thead>
+              <tbody>
+                <tr>
+                  <td><code>file</code></td><td class="yes">✓</td>
+                  <td>업로드 원본. 파일명은 <code>_safe_basename</code> 으로 정규화된다(경로 탈출·제어문자 차단, <strong>한글·공백·괄호는 보존</strong> — ASCII 치환하면 검색 청크 제목이 영구 오염된다).</td>
+                </tr>
+                <tr><td><code>content_type</code></td><td class="no">✗</td><td>미지정 시 업로드 파트의 content-type 사용</td></tr>
+                <tr>
+                  <td><code>docs_id</code></td><td class="no">✗</td>
+                  <td>오케스트레이터의 <code>sha256(bytes)[:16]</code>. 주면 parse-svc 의 MinIO 페이지 이미지 키가 소비자와 일치한다. 미지정 시 parse-svc 가 동일 식으로 자체 계산.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h4>Response 200 (a) · 일반 문서 — chunk_needed: true</h4>
+          <p class="kicker">PDF / DOCX / PPTX / 이미지 / 기타</p>
+<pre>{
+  <span class="ky">"enriched_content"</span>: "…마크다운 + inline &lt;table&gt; HTML + 〈MODAL…〉 마커…",
+  <span class="ky">"n_blocks"</span>: 42,
+  <span class="ky">"modal_spans"</span>:  [{"id":"T1","type":"table","char_range":[1200,2400]}],
+  <span class="ky">"table_blocks"</span>: [{"category":"table","content":"&lt;table&gt;…&lt;/table&gt;","page_number":3}],
+  <span class="ky">"chunk_needed"</span>: true,
+  <span class="ky">"docs_id"</span>: "9f2c…",            <span class="cm">// 16 hex</span>
+  <span class="ky">"page_count"</span>: 12,
+  <span class="ky">"pages"</span>:      [{"page_number":1,"page_uuid":"9f2c…_1",
+                "minio_object":"9f2c…/9f2c…_1.jpeg"}],
+  <span class="ky">"page_spans"</span>: [{"page_number":1,"char_start":0,"char_end":980}],
+  <span class="ky">"timing_metrics"</span>: {
+    "parse_ms": 8120.4, "modal_enrich_ms": 0.0, "render_upload_ms": 640.2,
+    "counters": {"page_count":12,"n_blocks":42},
+    "modal_llm": {"wall_ms":null,"calls":null,"by_type":null,
+                  "per_call_ms":null,"max_workers":null}
+  }
+}</pre>
+
+          <h4>Response 200 (b) · Excel — chunk_needed: false</h4>
+          <p>
+            xlsx/xlsm/xls 는 parse-svc 가 LLM 없이 parse+chunk 를 함께 끝내 native 청크를 돌려준다.
+            <strong><code>/chunk</code> 를 호출하면 안 된다.</strong>
+          </p>
+<pre>{
+  <span class="ky">"enriched_content"</span>: "…청크 텍스트를 \n\n 로 이은 것…",
+  <span class="ky">"n_blocks"</span>: 17,                <span class="cm">// = 청크 수</span>
+  <span class="ky">"modal_spans"</span>: [],
+  <span class="ky">"chunks"</span>: [{"chunk_index":0,"text":"…",
+              "titles_context":["시트1","표A"],"pages":[]}],
+  <span class="ky">"gate_summary"</span>: {"ok": true, "sheets": [...]},   <span class="cm">// 엑셀 게이트 판정 재료</span>
+  <span class="ky">"chunk_needed"</span>: false,
+  <span class="ky">"chunk_strategy"</span>: "excel_rag_parser",         <span class="cm">// facade 가 주입 (app.py:130)</span>
+  <span class="ky">"docs_id"</span>: "…", "page_count": 0, "pages": [], "page_spans": [],
+  <span class="ky">"timing_metrics"</span>: { … }
+}</pre>
+
+          <div class="note trap">
+            <span class="note-label">계약 함정 · 실패가 200 으로 온다</span>
+            <p>
+              parse-svc 는 파싱 실패를 HTTP 5xx 가 아니라 <strong>200 + 실패 바디</strong>로 준다:
+              <code>{"status": "failed", "detail": "parse_failed: …"}</code>.
+              소비자는 반드시 <code>status == "failed"</code> 를 확인해야 한다. 상태 코드만 보면 실패를 성공으로 처리한다.
+            </p>
+          </div>
+
+<pre>curl -s -m 1800 \
+  -F "file=@sample.pdf;type=application/pdf" \
+  -F "docs_id=$(shasum -a 256 sample.pdf | cut -c1-16)" \
+  http://localhost:19000/parse \
+  | jq '{status, n_blocks, len: (.enriched_content|length), pages: .page_count}'</pre>
+        </div>
+
+        <!-- chunk -->
+        <div class="endpoint" id="ep-chunk">
+          <div class="ep-head">
+            <span class="verb verb-post">POST</span>
+            <span class="ep-path">/chunk</span>
+            <span class="ep-tag">무인증</span>
+            <span class="ep-tag">service/app.py:134</span>
+          </div>
+          <p class="ep-sub">enriched content 청킹 — adaptive_chunk 허브의 비동기 잡을 동기 호출처럼 은폐한다.</p>
+
+          <p>
+            허브(:18060)에 <code>POST /chunk/jobs</code> 를 제출하고 <code>GET /chunk/jobs/{id}</code> 를
+            3초 간격으로 폴링한다. 마커(<code>atomic_markers</code>)는 facade 가 <strong>항상 자동 첨부</strong>하므로
+            소비자가 넘길 필요가 없다.
+          </p>
+
+          <h4>Request · application/json</h4>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>필드</th><th class="col-narrow">기본</th><th>설명</th></tr></thead>
+              <tbody>
+                <tr><td><code>enriched_content</code></td><td><strong>필수</strong></td><td><code>/parse</code> 의 <code>enriched_content</code> 그대로. <strong>마커를 지우지 말 것</strong> — 원자화에 필요하다.</td></tr>
+                <tr><td><code>doc_name</code></td><td><code>""</code></td><td>청커에 넘길 문서명</td></tr>
+                <tr><td><code>page_spans</code></td><td><code>null</code></td><td><code>/parse</code> 의 <code>page_spans</code>. 주면 청크마다 <code>pages</code> 귀속이 붙는다.</td></tr>
+                <tr><td><code>pages</code></td><td><code>null</code></td><td><code>[{page_number, markdown}]</code> — page 청킹 방법용</td></tr>
+                <tr><td><code>table_blocks</code></td><td><code>null</code></td><td><code>/parse</code> 의 <code>table_blocks</code>. 허브에는 <code>blocks</code> 이름으로 전달된다(e2e 로 <code>table_blocks</code> 이름을 쓰지 말 것 — <code>app.py:166</code>).</td></tr>
+                <tr><td><code>methods</code></td><td><code>null</code></td><td>방법 제한. <code>null</code> = auto(전 방법 경쟁 후 스코어 선택). 키: <code>recursive_1100</code> / <code>recursive_600</code> / <code>page</code> / <code>llm_regex</code> / <code>semantic</code></td></tr>
+                <tr><td><code>skip_scoring</code></td><td><code>false</code></td><td>true 면 경쟁 생략(단일 method 필수)</td></tr>
+                <tr><td><code>llm_regex_pattern</code></td><td><code>null</code></td><td>사용자 지정 정규식. <code>methods==["llm_regex"]</code> 필요</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="kicker">
+            뒤 세 필드가 모두 기본값이면 레거시 요청과 byte-identical 로 전송된다(회귀 보장).
+          </p>
+
+          <h4>Response 200</h4>
+<pre>{
+  <span class="ky">"chunks"</span>: [
+    {"chunk_index":0, "text":"…마커 스트립된 표시용 텍스트…",
+     "titles_context":["1장","1.2절"], "pages":[1,2]}
+  ],
+  <span class="ky">"method_selected"</span>: "recursive_1100",
+  <span class="ky">"scores"</span>: {"recursive_1100": {"total": 0.82, …}, "semantic": {…}},
+  <span class="ky">"methods_compared"</span>: ["recursive_1100","recursive_600","semantic","llm_regex"],
+  <span class="ky">"timing_details"</span>: { … }   <span class="cm">// 허브가 AC_TIMING 일 때만; 아니면 null</span>
+}</pre>
+
+          <div class="note key">
+            <span class="note-label">멱등</span>
+            <p>
+              응답의 <code>text</code> 는 <code>_strip_modal()</code> 로 마커가 제거된 <strong>표시사본</strong>이다
+              (kb-backend 가 <code>chunks_meta</code> 로 저장). 적재용도 같은 값을 그대로 <code>/insert</code> 에
+              넘기면 된다 — <code>/insert</code> 가 한 번 더 스트립하므로 멱등이다.
+            </p>
+          </div>
+        </div>
+
+        <!-- insert -->
+        <div class="endpoint" id="ep-insert">
+          <div class="ep-head">
+            <span class="verb verb-post">POST</span>
+            <span class="ep-path">/insert</span>
+            <span class="ep-tag locked">X-Facade-Key</span>
+            <span class="ep-tag">service/app.py:221</span>
+          </div>
+          <p class="ep-sub">사전 청킹된 텍스트 적재 — U+001E join → passthrough 문서 1건 제출 → 터미널까지 폴링.</p>
+
+          <h4>Request · application/json</h4>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>필드</th><th class="col-narrow">기본</th><th>설명</th></tr></thead>
+              <tbody>
+                <tr><td><code>workspace_id</code></td><td><strong>필수</strong></td><td>소비자의 kb id(문자열). facade 가 edgequake workspace UUID 로 해석한다.</td></tr>
+                <tr><td><code>doc_id</code></td><td><strong>필수</strong></td><td>문서 식별자. <code>title</code> 미지정 시 제목으로도 쓰인다.</td></tr>
+                <tr><td><code>title</code></td><td><code>""</code></td><td>문서 제목</td></tr>
+                <tr><td><code>chunks</code></td><td><strong>필수</strong></td><td><code>list[str]</code>. 순서가 유지되어 저장 후 1:1 대응한다.</td></tr>
+                <tr><td><code>extract_graph</code></td><td><code>true</code></td><td><code>false</code> → <code>metadata.skip_graph_extraction=true</code>. 엔티티·관계 추출만 건너뛴다(임베딩·벡터검색 무영향). <strong>엑셀은 관례상 false</strong>.</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h4>Response 200</h4>
+<pre>{
+  <span class="ky">"document_id"</span>: "3f0e…",
+  <span class="ky">"chunk_count"</span>: 37,
+  <span class="ky">"status"</span>: "indexed",              <span class="cm">// 성공. 실패 시 "failed"</span>
+  <span class="ky">"edgequake_workspace_id"</span>: "b71d…", <span class="cm">// ← KB 에 영속할 것</span>
+  <span class="ky">"entity_count"</span>: 128,             <span class="cm">// skip_graph·구버전·회수실패 시 null</span>
+  <span class="ky">"relationship_count"</span>: 91,
+  <span class="ky">"phases"</span>: [{"name":"chunking","ms":3010.0},
+              {"name":"extracting","ms":184220.5},
+              {"name":"embedding","ms":21400.0},
+              {"name":"storing","ms":900.0}]
+}</pre>
+
+          <ul>
+            <li><code>edgequake_workspace_id</code> 는 <code>KB.edgequake_workspace_id</code> 로 영속해야 한다. "그래프 보기" 팝업이 이 값을 <code>X-Workspace-ID</code> 로 써서 edgequake 를 직접 호출한다.</li>
+            <li><code>phases</code> 는 <strong>폴링 기반 근사</strong>다(edgequake 가 per-phase 타임스탬프를 주지 않아 3초 간격 관측을 구간에 귀속). "적재 중 어디가 느린가"(대개 <code>extracting</code> = 엔티티 LLM)를 드러내는 용도.</li>
+            <li>폴링 타임아웃 <strong>1200s</strong>. 초과 시 <code>status:"failed"</code> + <code>detail:"insert poll timeout after 1200s"</code>.</li>
+          </ul>
+        </div>
+
+        <!-- insert/status -->
+        <div class="endpoint" id="ep-insert-status">
+          <div class="ep-head">
+            <span class="verb verb-get">GET</span>
+            <span class="ep-path">/insert/status</span>
+            <span class="ep-tag locked">X-Facade-Key</span>
+            <span class="ep-tag">query string</span>
+          </div>
+          <p class="ep-sub">적재 진행 상황 릴레이 — edgequake 어휘를 소비자에게 노출하지 않는다.</p>
+
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>파라미터</th><th>설명</th></tr></thead>
+              <tbody>
+                <tr><td><code>workspace_id</code></td><td>kb id</td></tr>
+                <tr><td><code>doc_id</code></td><td><strong><code>/insert</code> 가 반환한 edgequake <code>document_id</code></strong> — 업로드에 쓴 doc_id 가 아니다.</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+<pre>{"phase": "processing", "chunk_count": 0, "terminal": false, "succeeded": false}</pre>
+
+          <p class="kicker">
+            terminal·succeeded 판정은 edgequake 문서 <code>status</code> 기준이며,
+            <code>succeeded</code> 는 <code>chunk_count &gt; 0</code> 까지 요구한다 (<code>service/edgequake.py:290</code>).
+          </p>
+        </div>
+
+        <!-- ingest -->
+        <div class="endpoint" id="ep-ingest">
+          <div class="ep-head">
+            <span class="verb verb-post">POST</span>
+            <span class="ep-path">/ingest</span>
+            <span class="ep-tag locked">X-Facade-Key</span>
+            <span class="ep-tag">service/app.py:276</span>
+          </div>
+          <p class="ep-sub">one-shot — parse→chunk→insert 를 한 호출로. 단계별 경로와 동일한 결과.</p>
+
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>필드 (multipart)</th><th class="col-narrow">필수</th><th>설명</th></tr></thead>
+              <tbody>
+                <tr><td><code>file</code></td><td class="yes">✓</td><td>업로드 원본</td></tr>
+                <tr><td><code>workspace_id</code></td><td class="yes">✓</td><td>kb id</td></tr>
+                <tr><td><code>doc_id</code></td><td class="yes">✓</td><td>문서 식별자(제목·청커 doc_name 으로도 사용)</td></tr>
+                <tr><td><code>content_type</code></td><td class="no">✗</td><td>—</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+<pre>{
+  <span class="ky">"document_id"</span>: "3f0e…", <span class="ky">"chunk_count"</span>: 37, <span class="ky">"status"</span>: "indexed",
+  <span class="ky">"chunking_selection"</span>: {"method_selected":"recursive_1100",
+                         "scores":{…},"methods_compared":[…]},
+  <span class="ky">"edgequake_workspace_id"</span>: "b71d…"
+}</pre>
+
+          <ul>
+            <li>파싱 실패 시 <strong>parse-svc 실패 바디를 그대로 반환</strong>한다(<code>app.py:296</code>) — 빈 컨텐츠로 청킹을 태우지 않는다.</li>
+            <li>Excel(<code>chunk_needed=false</code>)이면 parse-svc 청크를 그대로 적재하고 <code>method_selected: "excel_rag_parser"</code>.</li>
+          </ul>
+
+          <div class="note trap">
+            <span class="note-label">계약 함정 · docs_id 미전달</span>
+            <p>
+              <code>/ingest</code> 는 <code>docs_id</code> 를 parse-svc 로 <strong>전달하지 않는다</strong>
+              (<code>app.py:292</code>). 페이지 이미지 MinIO 키가 parse-svc 자체 계산값이 되어 소비자 계산값과
+              어긋날 수 있다. 키를 맞춰야 하면 단계별 경로(<code>/parse</code> 에 <code>docs_id</code> 명시)를 쓸 것.
+            </p>
+          </div>
+        </div>
+
+        <!-- chunks -->
+        <div class="endpoint" id="ep-chunks">
+          <div class="ep-head">
+            <span class="verb verb-get">GET</span>
+            <span class="ep-path">/chunks</span>
+            <span class="ep-tag locked">X-Facade-Key</span>
+            <span class="ep-tag">query string</span>
+          </div>
+          <p class="ep-sub">적재된 청크 조회 — query <code>workspace_id</code>, <code>doc_id</code>(= edgequake document_id).</p>
+
+          <p>
+            edgequake 에 chunk-list 라우트가 없어, 문서 상세로 <code>chunk_count</code> 를 얻은 뒤
+            <code>{doc_id}-chunk-{i}</code> 를 <strong>i 개 순차 GET</strong> 한다
+            (<code>service/edgequake.py:476</code>). 청크가 많으면 그만큼 느리다. 404 인 청크는 조용히 건너뛴다.
+          </p>
+
+<pre>[{"chunk_id":"3f0e…-chunk-0","text":"…",
+  "hierarchy_path":"문서명","page_number":1}]</pre>
+        </div>
+
+        <!-- doc -->
+        <div class="endpoint" id="ep-doc">
+          <div class="ep-head">
+            <span class="verb verb-delete">DELETE</span>
+            <span class="ep-path">/doc</span>
+            <span class="ep-tag locked">X-Facade-Key</span>
+            <span class="ep-tag">query string</span>
+          </div>
+          <p class="ep-sub">문서 삭제 — query <code>workspace_id</code>, <code>doc_id</code>. 성공 시 <strong>204 No Content</strong>(본문 없음).</p>
+        </div>
+
+        <!-- communities -->
+        <div class="endpoint" id="ep-communities">
+          <div class="ep-head">
+            <span class="verb verb-post">POST</span>
+            <span class="ep-path">/communities/build</span>
+            <span class="ep-tag locked">X-Facade-Key</span>
+            <span class="ep-tag">query string</span>
+          </div>
+          <p class="ep-sub">커뮤니티 리포트 생성 — 즉시 202, 실제 작업은 BackgroundTasks 로.</p>
+
+<pre>{"status": "started", "workspace_id": "b71d…"}   <span class="cm">// edgequake workspace UUID</span></pre>
+
+          <div class="note trap">
+            <span class="note-label">계약 함정 · 202 는 성공이 아니다</span>
+            <p>
+              백그라운드 잡은 <strong>예외를 삼킨다</strong>(<code>logger.exception</code> 만 —
+              <code>app.py:350</code>). 202 는 "접수됨"일 뿐이다. 결과는
+              <code>public.community_reports</code> 행 또는 facade 로그로 확인한다.
+            </p>
+            <p>
+              태스크가 <strong>facade 프로세스 안에서</strong> 돌기 때문에 재기동하면 진행 중 잡은 유실된다.
+              이 경로만 <code>KBP_PG_DSN</code> 으로 Postgres 에 직접 접속한다
+              (networkx + python-louvain, <code>random_state=42</code>).
+            </p>
+          </div>
+        </div>
+
+        <!-- search -->
+        <div class="endpoint" id="ep-search">
+          <div class="ep-head">
+            <span class="verb verb-post">POST</span>
+            <span class="ep-path">/search</span>
+            <span class="ep-tag locked">X-Facade-Key</span>
+            <span class="ep-tag">service/app.py:195</span>
+          </div>
+          <p class="ep-sub">워크스페이스 검색 — edgequake <code>/api/v1/query</code>(hybrid) 위임. local/global 라우팅은 없다.</p>
+
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>필드 (JSON)</th><th class="col-narrow">기본</th><th>설명</th></tr></thead>
+              <tbody>
+                <tr><td><code>workspace_id</code></td><td><strong>필수</strong></td><td>kb id → edgequake workspace UUID 로 해석되어 검색이 워크스페이스로 격리된다.</td></tr>
+                <tr><td><code>query</code></td><td><strong>필수</strong></td><td>질의문</td></tr>
+                <tr><td><code>top_k</code></td><td><code>10</code></td><td>edgequake 의 <code>max_results</code> 로 매핑</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+<pre>{
+  <span class="ky">"answer"</span>: "…생성된 답변…",
+  <span class="ky">"results"</span>: [{"chunk_id":"…","text":"…스니펫…",
+                "score":0.83,"document_id":"3f0e…"}]
+}</pre>
+        </div>
+      </section>
+
+      <!-- ============ 4 ============ -->
+      <section id="s4">
+        <h2><span class="h2-num">04</span>배치 처리</h2>
+
+        <div class="note key">
+          <span class="note-label">요점</span>
+          <p>
+            <strong>facade 가 유량제어를 소유한다(2026-08-04 변경).</strong> 엔드포인트는 여전히
+            문서 1건 단위지만, 무거운 쓰기 경로(<code>/parse</code>·<code>/chunk</code>·
+            <code>/insert</code>·<code>/ingest</code>)는 이제 facade 웹 프로세스가 직접 처리하지
+            않는다. 잡을 postgres <code>kbp.jobs</code> 에 넣고 별도 프로세스
+            <code>facade-worker</code> 가 <strong>슬롯 안에서만</strong> 집어 다운스트림을 호출한다.
+          </p>
+          <p>
+            즉 <strong>파일 N개를 병렬로 밀어넣어도 된다.</strong> 상한을 넘는 건 큐에서 기다리고
+            다운스트림은 상한만큼만 맞는다. 아래 표의 "병렬 난사는 소비자 책임" 서술은
+            <strong>더 이상 사실이 아니다</strong>(이력 참고용으로 남긴다).
+          </p>
+        </div>
+
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>버킷</th><th>기본 상한</th><th>env</th><th>근거</th></tr></thead>
+            <tbody>
+              <tr><td>parse</td><td>4</td><td><code>KBP_JOB_LIMIT_PARSE</code></td>
+                  <td>parse-svc <code>gunicorn -w 4</code></td></tr>
+              <tr><td>chunk</td><td>2</td><td><code>KBP_JOB_LIMIT_CHUNK</code></td>
+                  <td>adaptive_chunk 4방법 경쟁 비용</td></tr>
+              <tr><td>insert</td><td>2</td><td><code>KBP_JOB_LIMIT_INSERT</code></td>
+                  <td>임베딩 서버 처리량</td></tr>
+              <tr><td>테넌트별</td><td>2</td><td><code>KBP_JOB_LIMIT_PER_WORKSPACE</code></td>
+                  <td><code>workspace_id</code> 를 실은 요청에만 적용</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p>
+          <code>/ingest</code> 는 세 구간을 모두 호출하므로 <strong>세 버킷을 동시 점유</strong>한다
+          (동시 ingest = min = 2).
+        </p>
+
+        <div class="note warn">
+          <span class="note-label">주의</span>
+          <p>
+            <code>facade-worker</code> 가 하나도 안 떠 있으면 접수가 <strong>전부 503</strong> 이다
+            (무한 대기 대신 빨리 실패). <code>GET /jobs/workers</code> 의 <code>online</code> 으로
+            확인하고, 호스트 dev 는 <code>bash scripts/run-facade-worker.sh</code> 로 띄운다.
+          </p>
+        </div>
+
+        <p>
+          기존 4경로는 <strong>요청·응답 본문과 인증 요구가 그대로</strong>다(내부만 잡 경유).
+          다만 <code>503</code>(worker 없음·동시 대기 상한 초과) · <code>409</code>(대기 초과, 본문에
+          <code>job_id</code>) · <code>413</code>(업로드 상한 50MB) 이 새로 나올 수 있다. 비동기로
+          쓰려면 <code>POST /jobs/{kind}</code> → <code>GET /jobs/{id}</code> →
+          <code>GET /jobs/{id}/result</code> 를 쓴다. 제출은 <code>Idempotency-Key</code> 를 받고
+          없으면 자동 파생한다(재시도가 잡을 중복 생성하지 않는다).
+        </p>
+
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>계층</th><th>배치 주체</th><th>실체</th></tr></thead>
+            <tbody>
+              <tr>
+                <td><strong>다건 업로드</strong></td>
+                <td>kb-backend(:8088) durable batch worker — <em>facade 밖</em>. <strong>지금은 facade 가 소유한다(§04 위쪽).</strong> Phase 2 에서 kb 배치 워커는 제거 예정</td>
+                <td>별도 프로세스 <code>app.workers.batch_worker</code>. DB 큐 기반, 기본 capacity <strong>2</strong>. 로그 <code>/tmp/kb_batch_worker.log</code>, PID <code>/tmp/kb_batch_worker.pid</code>. 워커가 죽으면 업로드가 <code>queued</code> 에 머문다.</td>
+              </tr>
+              <tr>
+                <td><strong>문서 1건 내부</strong></td>
+                <td>parse-svc 페이지 병렬</td>
+                <td>VL·paddle_gw 페이지 호출 동시 <strong>3</strong>(<code>KBP_VL_MAX_CONCURRENT</code>), 모달 LLM 동시 <strong>3</strong>(<code>KBP_MODAL_MAX_WORKERS</code>)</td>
+              </tr>
+              <tr>
+                <td><strong>청킹</strong></td>
+                <td>adaptive_chunk 비동기 잡</td>
+                <td>facade 가 잡 제출 후 3초 간격 폴링(동기 호출처럼 은폐)</td>
+              </tr>
+              <tr>
+                <td><strong>적재</strong></td>
+                <td>edgequake 비동기 task</td>
+                <td><code>async_processing:true</code> 제출 후 3초 간격 폴링</td>
+              </tr>
+              <tr>
+                <td><strong>커뮤니티</strong></td>
+                <td>오프라인 배치</td>
+                <td><code>/communities/build</code> 온디맨드 202, 또는 global 검색 시 build-if-missing</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p>
+          즉 <strong>facade 에 파일 N개를 병렬로 밀어넣는 것은 소비자 책임</strong>이며, 아래 동시성 한계를
+          반드시 감안해야 한다.
+        </p>
+      </section>
+
+      <!-- ============ 5 ============ -->
+      <section id="s5">
+        <h2><span class="h2-num">05</span>동시 처리량</h2>
+
+        <h3>facade 프로세스</h3>
+
+        <p>
+          <code>scripts/run-facade.sh:44</code> 의 기동 명령에 <code>--workers</code> 가 <strong>없다</strong> →
+          uvicorn <strong>단일 프로세스 · 단일 이벤트루프</strong>. 여기서 성격이 다른 두 동시성이 갈린다.
+        </p>
+
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>엔드포인트</th><th>정의</th><th>실행 위치</th><th>실질 동시성</th></tr></thead>
+            <tbody>
+              <tr>
+                <td><code>/parse</code>, <code>/ingest</code> <em>(구)</em></td>
+                <td><code>async def</code></td>
+                <td>이벤트루프 위</td>
+                <td><strong>더 이상 아니다(2026-08-04).</strong> 네 경로 모두 동기 <code>def</code> 이고 다운스트림을 직접 호출하지 않는다 — 잡을 넣고 DB 만 폴링하므로 이벤트루프를 막지 않는다. 동시 대기 수는 <code>KBP_JOB_MAX_WAITERS</code>(기본 4)로 제한된다</td>
+              </tr>
+              <tr>
+                <td>나머지 전부</td>
+                <td>일반 <code>def</code></td>
+                <td>anyio 스레드풀</td>
+                <td>최대 <strong>40</strong> — 단, 각 요청이 다운스트림 대기 내내 스레드 1개를 점유</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="note trap">
+          <span class="note-label">실무에서 가장 크게 물리는 지점</span>
+          <p>
+            <code>/parse</code> 나 <code>/ingest</code> 가 한 건 돌고 있으면 같은 facade 로 들어온
+            <strong><code>/healthz</code> 조차 응답하지 않는다</strong>(이벤트루프 블로킹).
+            "facade 가 죽은 것 같다"의 대부분은 실제로는 진행 중인 무거운 파싱이다.
+            로그(<code>/tmp/facade-kbp.log</code>)로 확인할 것.
+          </p>
+          <p>
+            근거: <code>service/app.py:113</code>(<code>async def parse</code>)·<code>:277</code>(<code>async def ingest</code>)
+            → <code>pc.parse(…)</code> (<code>service/parse_client.py:33</code>, 동기 <code>httpx.Client.post</code>).
+          </p>
+        </div>
+
+        <h3>다운스트림 상한 — 진짜 병목</h3>
+
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>구간</th><th class="col-narrow">상한</th><th>출처</th></tr></thead>
+            <tbody>
+              <tr><td><strong>parse-svc</strong></td><td>사실상 <strong>1건</strong></td><td>런처도 단일 워커이고 <code>/parse</code> 가 동일한 async-blocking 구조 — <code>parse_service/app.py:366</code></td></tr>
+              <tr><td>VL OCR 페이지 호출</td><td>3</td><td><code>KBP_VL_MAX_CONCURRENT</code> — <code>parsers/ocr/__init__.py:34</code>, <code>parsers/pdf/paddle_gw.py:178</code></td></tr>
+              <tr><td>모달 LLM</td><td>3</td><td><code>KBP_MODAL_MAX_WORKERS</code> — <code>parse_service/app.py:212</code></td></tr>
+              <tr><td>adaptive_chunk</td><td>허브 자체 큐</td><td>—</td></tr>
+              <tr><td>edgequake</td><td>자체 태스크 큐</td><td>—</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="note key">
+          <span class="note-label">결론</span>
+          <p>
+            <strong>2026-08-04 이전:</strong> 실질 처리량이 "동시 파싱 1건"에 수렴했고, 대량 업로드는 kb-backend
+            배치 워커로 직렬화해 넣어야 했다.
+            <br><br>
+            <strong>지금:</strong> facade 가 유량제어를 소유한다(§04). 파일을 병렬로 밀어넣어도
+            <code>facade-worker</code> 가 버킷 상한(parse 4 · chunk 2 · insert 2)만큼만 다운스트림에
+            보내고 나머지는 <code>kbp.jobs</code> 에서 대기한다. 소비자가 직렬화할 필요가 없다.
+            상한을 올리려면 <strong>다운스트림을 먼저 늘려야 한다</strong> — 큐 상한만 올리면
+            병목이 아래로 밀릴 뿐이다.
+          </p>
+        </div>
+
+        <h3>타임아웃 매트릭스</h3>
+
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>구간</th><th class="col-narrow">값</th><th>튜닝</th><th>출처</th></tr></thead>
+            <tbody>
+              <tr><td>facade → parse-svc (read)</td><td><strong>1800s</strong></td><td><code>KBP_PARSE_SVC_TIMEOUT</code></td><td><code>service/app.py:103</code></td></tr>
+              <tr><td>facade → adaptive_chunk (HTTP)</td><td>600s</td><td>코드 기본</td><td><code>service/adaptive_chunk.py:42-43</code></td></tr>
+              <tr><td>adaptive 잡 폴링 총 대기</td><td><strong>3600s</strong></td><td>간격 3s</td><td><code>service/adaptive_chunk.py:42-43</code></td></tr>
+              <tr><td>facade → edgequake (HTTP)</td><td>600s</td><td>코드 기본</td><td><code>service/edgequake.py:50</code></td></tr>
+              <tr><td>edgequake insert 폴링 총 대기</td><td><strong>1200s</strong></td><td>간격 3s</td><td><code>service/edgequake.py:365</code></td></tr>
+              <tr><td>레거시 4경로 내부 대기</td><td><strong>3300s</strong></td><td><code>KBP_JOB_LEGACY_WAIT_SECONDS</code></td><td>초과 시 409 + <code>job_id</code>(잡은 계속 진행). kb 소비자 타임아웃 3600s 보다 작아야 우리 응답이 먼저 도달한다</td></tr>
+              <tr><td>잡 1회 시도 상한</td><td>parse 2100 / chunk 5400 / insert 6600 / ingest 14400</td><td><code>KBP_JOB_MAX_RUNTIME_*</code></td><td>각 kind 의 동기 HTTP 타임아웃 합보다 커야 한다 — 작으면 정상 진행 중인 잡이 회수돼 2중 실행된다</td></tr>
+              <tr><td>kb-backend → facade</td><td>1800s</td><td><code>kb_pipeline_timeout_seconds</code></td><td>kb-backend 설정</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p>
+          <code>httpx.ReadTimeout</code> 이 보이면 대개 <strong>표 여러 개짜리 PDF 의 순차 모달 LLM</strong>,
+          또는 <strong>파싱 2건이 단일 워커 parse-svc 에서 충돌</strong>한 경우다.
+        </p>
+
+        <h3>알아둘 자원 특성</h3>
+
+        <p>
+          <code>get_edgequake()</code> / <code>get_adaptive_chunk()</code> / <code>get_parse_client()</code> 는
+          <strong>요청마다 새 클라이언트</strong>를 만들고(<code>service/app.py:89-104</code>)
+          <code>httpx.Client</code> 를 명시적으로 닫지 않는다. 커넥션 재사용이 없고 GC 시점까지 소켓이 남는다.
+          현재 처리량(동시 1건 수준)에서는 문제되지 않지만, facade 를 다중 워커로 스케일아웃할 때
+          먼저 손봐야 할 지점이다.
+        </p>
+      </section>
+
+      <!-- ============ 6 ============ -->
+      <section id="s6">
+        <h2><span class="h2-num">06</span>환경변수</h2>
+
+        <p>
+          <code>service/app.py</code> 는 <strong>dotenv 를 읽지 않는다</strong> — <code>os.environ</code> 직독이다.
+          반드시 런처(<code>scripts/run-facade.sh</code>)로 띄워야 <code>scripts/facade.env</code>(gitignored)가 주입된다.
+        </p>
+
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>변수</th><th class="col-narrow">기본값</th><th>용도</th></tr></thead>
+            <tbody>
+              <tr><td><code>KBP_PARSE_SVC_URL</code></td><td><code>localhost:19001</code></td><td>parse-svc</td></tr>
+              <tr><td><code>KBP_ADAPTIVE_CHUNK_URL</code></td><td><code>localhost:18060</code></td><td>청킹 허브</td></tr>
+              <tr><td><code>KBP_EDGEQUAKE_URL</code></td><td><code>localhost:8081</code></td><td>edgequake</td></tr>
+              <tr><td><code>KBP_PG_DSN</code></td><td><strong>필수</strong></td><td><code>/communities/build</code> 전용 DB 접속 (런처가 검증)</td></tr>
+              <tr><td><code>KBP_OPENAI_API_KEY</code></td><td><strong>필수</strong></td><td>커뮤니티 리포트 LLM (런처가 검증)</td></tr>
+              <tr><td><code>KBP_OPENAI_BASE_URL</code></td><td>—</td><td>현재 OpenRouter</td></tr>
+              <tr><td><code>KBP_LLM_MODEL</code></td><td>—</td><td>현재 <code>qwen/qwen3.5-122b-a10b</code></td></tr>
+              <tr><td><code>KBP_PARSE_SVC_TIMEOUT</code></td><td><code>1800</code></td><td>parse-svc read timeout(초)</td></tr>
+              <tr><td><code>KBP_FACADE_KEY</code></td><td>미설정</td><td><strong>설정 시에만</strong> X-Facade-Key 게이트 활성. 빈 문자열은 미설정과 동일 취급</td></tr>
+              <tr><td colspan="3" style="background:var(--surface-alt);font-weight:600">잡 큐 (2026-08-04 신규) — facade 와 facade-worker 가 공유</td></tr>
+              <tr><td><code>KBP_PG_DSN</code></td><td>—</td><td><strong>필수.</strong> <code>kbp</code> 스키마가 사는 곳(edgequake 와 같은 postgres)</td></tr>
+              <tr><td><code>MINIO_ENDPOINT</code> 외 4</td><td>—</td><td><strong>필수.</strong> 업로드 staging + 큰 payload/result 오프로딩. 없으면 접수가 전면 실패한다. 호스트 dev 는 <code>localhost:9000</code></td></tr>
+              <tr><td><code>KBP_JOB_LIMIT_PARSE</code></td><td><code>4</code></td><td>parse 버킷 상한(parse-svc <code>-w 4</code> 기준)</td></tr>
+              <tr><td><code>KBP_JOB_LIMIT_CHUNK</code></td><td><code>2</code></td><td>chunk 버킷 상한</td></tr>
+              <tr><td><code>KBP_JOB_LIMIT_INSERT</code></td><td><code>2</code></td><td>insert 버킷 상한</td></tr>
+              <tr><td><code>KBP_JOB_LIMIT_PER_WORKSPACE</code></td><td><code>2</code></td><td>테넌트 상한. <code>workspace_id</code> 를 실은 요청에만 적용</td></tr>
+              <tr><td><code>KBP_JOB_WORKER_CONCURRENCY</code></td><td><code>4</code></td><td>worker 프로세스 1개의 로컬 스레드 슬롯</td></tr>
+              <tr><td><code>KBP_JOB_MAX_WAITERS</code></td><td><code>4</code></td><td>프로세스당 동시 대기 상한. 초과 시 503(잡 미생성)</td></tr>
+              <tr><td><code>KBP_JOB_LEGACY_WAIT_SECONDS</code></td><td><code>3300</code></td><td>레거시 4경로 내부 대기. 초과 시 409 + <code>job_id</code></td></tr>
+              <tr><td><code>KBP_JOB_MAX_UPLOAD_BYTES</code></td><td><code>52428800</code></td><td>50MB. 초과 시 413. 스트리밍을 안 하므로 이 값이 최악 메모리를 정한다</td></tr>
+              <tr><td><code>KBP_JOB_IDEM_WINDOW_SECONDS</code></td><td><code>300</code></td><td>자동 파생 멱등키의 시간 버킷 폭</td></tr>
+              <tr><td><code>KBP_JOB_STALE_LEASE_SECONDS</code></td><td><code>300</code></td><td>heartbeat 끊긴 잡 회수 임계</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="note trap">
+          <span class="note-label">셸 함정</span>
+          <p>
+            <code>export FOO=…</code> 와 <code>uvicorn … &amp;</code> 를 <strong>별개 명령</strong>으로 실행하면
+            서로 다른 셸이라 export 가 기동된 프로세스에 닿지 않는다. 항상 런처 스크립트를 쓸 것.
+          </p>
+        </div>
+      </section>
+
+      <!-- ============ 7 ============ -->
+      <section id="s7">
+        <h2><span class="h2-num">07</span>기동 · 중지 · 헬스체크</h2>
+
+        <h3>기동 — dev 표준</h3>
+
+        <p>facade 와 parse-svc 는 <strong>호스트 프로세스</strong>(라이브 소스 반영), 나머지는 docker 다.</p>
+
+<pre>cd /Users/xxx/workspace/8.kb-pipeline
+
+<span class="cm"># 1) 백킹 서비스</span>
+docker compose up -d --no-build postgres minio edgequake adaptive_chunk gotenberg
+docker compose up -d --no-build edgequake_webui        <span class="cm"># 그래프 보기 UI (호스트 :13000)</span>
+
+<span class="cm"># 2) 애플리케이션 (호스트)</span>
+bash scripts/run-parse-svc.sh    <span class="cm"># :19001 — 반드시 facade 보다 먼저</span>
+bash scripts/run-facade.sh       <span class="cm"># :19000</span></pre>
+
+        <p>
+          <strong>의존 순서</strong>: postgres → edgequake / adaptive_chunk / gotenberg / minio → parse-svc → facade.
+          facade 는 기동 시 다운스트림을 확인하지 않으므로 순서를 어겨도 뜨긴 뜨지만, 첫 요청에서 연결 거부가 난다.
+        </p>
+
+        <p>
+          두 런처가 공통으로 하는 일: <strong>docker-shadow 가드</strong>(같은 이름의 compose 컨테이너 stop) →
+          env 로드 → <strong>포트가 비워질 때까지 대기하며 기존 프로세스 종료</strong> → nohup 기동 →
+          healthz 검증(10초).
+        </p>
+
+        <div class="note trap">
+          <span class="note-label">docker-shadow 함정</span>
+          <p>
+            dev 에서 <code>docker compose up -d</code> 를 통째로 실행하면 facade·parse-svc <strong>컨테이너</strong>
+            (옛 이미지 코드)가 뜨면서 호스트 프로세스를 가린다. facade 는 compose DNS
+            <code>parse-svc:19001</code> 로 부르므로 소스 수정이 무시되고 "옛날 파싱"이 나온다.
+            dev 에서는 이 두 서비스를 <strong>docker 로 올리지 말 것</strong>. 런처가 자동으로 shadow 컨테이너를
+            stop 하지만, 순서상 나중에 compose up 하면 다시 가려진다.
+          </p>
+        </div>
+
+        <h3>중지</h3>
+
+        <p>전용 stop 스크립트는 없다. 재기동은 런처가 알아서 죽이고 다시 띄우므로 <strong>완전 중지</strong>만 아래처럼 한다.</p>
+
+<pre><span class="cm"># 포트 기준 — 권장. 모듈 패턴 kill 은 다른 서비스를 오폭할 수 있다.</span>
+kill "$(lsof -nP -iTCP:19000 -sTCP:LISTEN -t)"   <span class="cm"># facade</span>
+kill "$(lsof -nP -iTCP:19001 -sTCP:LISTEN -t)"   <span class="cm"># parse-svc</span>
+
+<span class="cm"># 패턴 기준 (참고)</span>
+pkill -f "uvicorn service.app:app"
+pkill -f "parse_service.app:app"
+
+<span class="cm"># 백킹 서비스 — 볼륨 보존</span>
+docker compose stop     <span class="cm"># 컨테이너 정지</span>
+docker compose down     <span class="cm"># 컨테이너 제거, 볼륨은 유지</span></pre>
+
+        <div class="note stop">
+          <span class="note-label">데이터 파괴 — 쓰지 말 것</span>
+          <p>
+            <code>docker compose down -v</code> 는 <code>eq_pg_data</code>·<code>minio_data</code> 볼륨을 지운다
+            = <strong>적재 데이터 전소</strong>.
+          </p>
+          <p>
+            <code>service/scripts/start_dedicated_edgequake.sh</code> 도 postgres 를 재생성한다(데이터 소거)
+            — 핫 재기동에는 부적합하다.
+          </p>
+        </div>
+
+        <h3>헬스체크</h3>
+
+<pre>curl -fsS http://localhost:19000/healthz       <span class="cm"># facade    {"status":"ok"}</span>
+curl -fsS http://localhost:19001/healthz       <span class="cm"># parse-svc  deps.vl_ocr = 실 OCR origin</span>
+curl -fsS http://localhost:8081/health         <span class="cm"># edgequake</span>
+curl -fsS http://localhost:18060/healthz       <span class="cm"># adaptive_chunk</span>
+curl -fsS http://localhost:13000/popup/graph   <span class="cm"># edgequake webui (그래프 보기)</span>
+docker compose ps                              <span class="cm"># 컨테이너 healthy 여부</span></pre>
+
+        <p><strong>healthz 는 "프로세스가 떴다"만 증명한다.</strong> 파이프라인이 실제로 도는지는 스모크로 확인한다.</p>
+
+<pre><span class="cm"># ① parse 왕복 — java(OpenDataLoader) + 모달 경로까지 증명</span>
+curl -s -m 1800 -F "file=@sample.pdf;type=application/pdf" \
+  http://localhost:19000/parse \
+  | jq '{status, n_blocks, enriched_len: (.enriched_content|length), page_count}'
+<span class="cm"># 기대: status 키 없음(=성공) + n_blocks &gt; 0 + enriched_len &gt; 0</span>
+<span class="cm"># enriched_len == 0 이면 java 미탑재 의심 ("Unable to locate a Java Runtime")</span>
+
+<span class="cm"># ② e2e 적재 — chunk_count &gt; 0 &amp; status "indexed"</span>
+curl -s -m 3600 -F "file=@sample.pdf" -F "workspace_id=smoke-kb" -F "doc_id=smoke-1" \
+  http://localhost:19000/ingest \
+  | jq '{status, chunk_count, method: .chunking_selection.method_selected}'
+
+<span class="cm"># ③ 검색 왕복</span>
+curl -s -X POST http://localhost:19000/search -H 'Content-Type: application/json' \
+  -d '{"workspace_id":"smoke-kb","query":"핵심 내용 요약","top_k":5}' \
+  | jq '{answer, n: (.results|length)}'</pre>
+
+        <div class="note trap">
+          <span class="note-label">스모크 실행 시점</span>
+          <p>
+            사용자 업로드가 진행 중일 때 돌리지 말 것 — parse-svc 는 단일 워커라 두 파싱이 직렬화되며
+            facade 타임아웃을 유발한다.
+          </p>
+        </div>
+
+        <h3>로그</h3>
+
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>서비스</th><th>위치</th></tr></thead>
+            <tbody>
+              <tr><td>facade</td><td><code>/tmp/facade-kbp.log</code> — <code>FACADE_LOG</code> 로 변경 가능</td></tr>
+              <tr><td>parse-svc</td><td><code>/tmp/parse_svc.log</code> — <code>PARSE_SVC_LOG</code></td></tr>
+              <tr><td>kb-backend batch worker</td><td><code>/tmp/kb_batch_worker.log</code>, PID <code>/tmp/kb_batch_worker.pid</code></td></tr>
+              <tr><td>컨테이너</td><td><code>docker compose logs -f edgequake</code> / <code>adaptive_chunk</code> / …</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>컨테이너 운영 모드 (dev 아님)</h3>
+
+        <p>
+          전 서비스를 compose 로 띄우는 구성. <code>facade</code> 컨테이너는 compose DNS
+          (<code>parse-svc:19001</code>, <code>adaptive_chunk:18060</code>, <code>edgequake:8081</code>)로 배선되고
+          <code>depends_on: service_healthy</code> 로 순서가 보장된다.
+        </p>
+
+<pre>docker compose up -d --build             <span class="cm"># 전체</span>
+docker compose up -d --build facade      <span class="cm"># 단일 서비스 재빌드</span></pre>
+
+        <p class="kicker">
+          전제: <code>edgequake/</code> 서브모듈 체크아웃(<code>git submodule update --init --recursive edgequake</code>)
+          + <code>.env</code> 실값.
+        </p>
+      </section>
+
+      <!-- ============ 8 ============ -->
+      <section id="s8">
+        <h2><span class="h2-num">08</span>트러블슈팅</h2>
+
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>증상</th><th>원인</th><th>조치</th></tr></thead>
+            <tbody>
+              <tr>
+                <td><code>/parse</code> 가 <code>enriched_content: ""</code></td>
+                <td>OpenDataLoader 의 <code>java</code> 부재 (macOS <code>/usr/bin/java</code> 는 스텁)</td>
+                <td><code>brew install openjdk@17</code> 후 <code>run-parse-svc.sh</code> — PATH 를 자동 고정한다</td>
+              </tr>
+              <tr>
+                <td>소스를 고쳤는데 <strong>옛 동작</strong></td>
+                <td>docker-shadow — compose 컨테이너가 호스트 프로세스를 가림</td>
+                <td><code>docker compose stop facade parse-svc</code> 후 런처 재실행</td>
+              </tr>
+              <tr>
+                <td><code>httpx.ReadTimeout</code></td>
+                <td>표 다수 PDF 의 순차 모달 LLM, 또는 파싱 2건 충돌</td>
+                <td><code>KBP_PARSE_SVC_TIMEOUT</code> 상향 / 업로드 직렬화</td>
+              </tr>
+              <tr>
+                <td>facade 가 <code>/healthz</code> 조차 무응답</td>
+                <td><code>/parse</code>·<code>/ingest</code> 가 이벤트루프 블로킹 중</td>
+                <td>로그에서 진행 중 파싱 확인 — 대개 정상이며 기다리면 된다</td>
+              </tr>
+              <tr>
+                <td><code>KeyError: KBP_OPENAI_API_KEY</code></td>
+                <td>런처 없이 uvicorn 직접 기동</td>
+                <td>반드시 <code>scripts/run-facade.sh</code> 사용</td>
+              </tr>
+              <tr>
+                <td><code>/insert</code> 가 <code>status:"failed"</code> + poll timeout</td>
+                <td>edgequake 엔티티 추출(LLM) 지연</td>
+                <td><code>phases</code> 로 병목 확인. 급하면 <code>extract_graph:false</code></td>
+              </tr>
+              <tr>
+                <td>적재는 됐는데 그래프가 빔</td>
+                <td><code>extract_graph:false</code> 또는 edgequake LLM 실패</td>
+                <td><code>entity_count</code>/<code>relationship_count</code> 확인</td>
+              </tr>
+              <tr>
+                <td><strong>HTTP 422 적재 실패</strong></td>
+                <td>edgequake 가 <code>EDGEQUAKE_CHUNKER=adaptive</code> 로 떠서 이중청킹</td>
+                <td><strong>반드시 <code>passthrough</code></strong> — 불변식</td>
+              </tr>
+              <tr>
+                <td>배치가 <code>queued</code> 에 머묾</td>
+                <td>kb-backend batch worker 미기동</td>
+                <td><code>bash scripts/run-kb-backend.sh</code> → <code>kill -0 $(cat /tmp/kb_batch_worker.pid)</code></td>
+              </tr>
+              <tr>
+                <td>"그래프 보기" 실패</td>
+                <td><code>edgequake_webui</code> 미기동</td>
+                <td><code>docker compose up -d --no-build edgequake_webui</code> → <code>:13000</code> 검증</td>
+              </tr>
+              <tr>
+                <td>검색 결과 0건인데 에러 없음</td>
+                <td>RLS 세션 미설정(<code>app.current_tenant_id</code>) 또는 workspace 불일치</td>
+                <td><code>edgequake_workspace_id</code> 가 KB 에 제대로 영속됐는지 확인</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <div class="footer">
+        <p>관련 문서</p>
+        <ul>
+          <li>_workspace/README.md — 인덱스 · ADR · 포트/불변식</li>
+          <li>_workspace/01-architecture.md — 전체 파이프라인 · 컴포넌트 설계 · 데이터 계약</li>
+          <li>_workspace/03-dev-progress.md — 작업항목 상태 · 타이밍 모니터링</li>
+          <li>docs/kb-pipeline-process-definition.md — 프로세스 정의서 v1.0</li>
+          <li>.claude/skills/restart-kbp-stack/SKILL.md — 스택 재기동 절차(배치 워커 · 그래프 UI 포함)</li>
+        </ul>
+      </div>
+
+    </main>
+  </div>
+</div>
