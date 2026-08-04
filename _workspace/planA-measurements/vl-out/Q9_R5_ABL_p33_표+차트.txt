@@ -1,0 +1,53 @@
+# Agent 기반 지식 추출 및 통합 검색 품질
+
+## A.RAG 검색 파이프라인
+
+1. **비정형 문서 파싱** (Document Studio)
+2. **검색 쿼리 재구성** (LUXIA3.5-LLM)
+3. **온톨로지 지식 추출** (LUXIA3.5-LLM)
+4. **쿼리 확장** (LUXIA3.5-LLM)
+5. **Lexical Search** (BM25)
+6. **Semantic Search** (LUXIA-Embedding)
+7. **Reranking** (LUXIA-Reranker)
+
+LLM을 활용한 전처리 작업을 포함한 Advanced RAG 검색 방식
+
+---
+
+### 온톨로지 지식 추출 정확도
+
+개체식별, 관계추출 등의 특화 학습을 통해 온톨로지 지식 추출 정확도 향상
+
+- Nemotron3-120B: 87
+- gpt-oss-120B: 89
+- LUXIA3.5-120B: 91
+
+---
+
+### 임베딩 모델 한/영 검색 정확도
+
+한/영 Cross-lingual 특화 데이터를 활용하여 검색 정확도 확보
+
+- PIXE-Spell-Preview-1.7B: 92
+- Qwen3-Embedding-0.6B: 90
+- luxia-embedding-1.1.0: 93
+
+---
+
+### 전문 도메인 리랭킹 정확도
+
+Hard-negative 샘플이 많은 전문 도메인에서도 우수한 리랭킹 성능
+
+- Bge-reranker-v2-m3: 86
+- Qwen3-0.6B-reranker: 90
+- LUXIA-reranker-v1.0: 93
+
+---
+
+## 2021년 Re-TACRED leaderboard
+
+프린스턴 대학, 워싱턴 대학, 메타AI 상대로 1위 달성
+
+* 문서 수준의 지식추출 부문 경쟁 (Re-TACRED)에서 전세계 1위 달성
+
+<table><thead><tr><th>Rank</th><th>Model</th><th>F1</th><th>Paper</th><th>Code</th><th>Result</th><th>Year</th></tr></thead><tbody><tr><td>1</td><td>Exobrain</td><td>91.4</td><td>Improving Sentence-Level Relation Extraction through Curriculum Learning</td><td>🔗</td><td>🔗</td><td>2021</td></tr><tr><td>2</td><td>RoBERTa-large-typed-marker</td><td>91.1</td><td>An Improved Baseline for Sentence-level Relation Extraction</td><td>🔗</td><td>🔗</td><td>2021</td></tr><tr><td>3</td><td>SpanBERT</td><td>85.3</td><td>SpanBERT: Improving Pre-training by Representing and Predicting Spans</td><td>🔗</td><td>🔗</td><td>2021</td></tr><tr><td>4</td><td>C-GCN</td><td>80.3</td><td>Graph Convolution over Pruned Dependency Trees Improves Relation Extraction</td><td>🔗</td><td>🔗</td><td>2018</td></tr><tr><td>5</td><td>PA-LSTM</td><td>79.4</td><td>Position-aware Attention and Supervised Data Improve Slot Filling</td><td>🔗</td><td>🔗</td><td>2017</td></tr></tbody></table>

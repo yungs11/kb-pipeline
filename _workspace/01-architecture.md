@@ -55,13 +55,13 @@
 
 | 확장자 | 도메인 | 파서(in-process) | `<table>` HTML | `chunk_needed` | 비고 |
 |--------|--------|------------------|----------------|----------------|------|
-| PDF | `pdf` | **문서수준 게이트**(triage) → 순수텍스트=**OpenDataLoader**(`markdown_with_html=True`) / 스캔·혼합=**MinerU**(hybrid-http-client) | ✅ (06=70개, pipe=0) | True | JRE 21 의존(ODL). 문서당 .md 1개 → `<<<ODL_PAGE_BREAK>>>` sentinel 로 페이지 복원. 게이트: `parse_service/parsers/pdf/gate.py` (triage 버킷 집계). MinerU 는 지연 import(로컬 미설치 허용), 실패 시 ODL/VL 폴백 |
+| PDF | `pdf` | **문서수준 게이트**(triage) → 순수텍스트=**OpenDataLoader**(`markdown_with_html=True`) / 스캔=**PaddleOCR-VL 게이트웨이**(원격 GPU) | ✅ (06=70개, pipe=0) | True | JRE 21 의존(ODL). 문서당 .md 1개 → `<<<ODL_PAGE_BREAK>>>` sentinel 로 페이지 복원. 게이트: `parse_service/parsers/pdf/gate.py`(triage 버킷 집계). 게이트웨이 실패 시 ODL/VL 폴백 |
 | XLSX/XLSM/XLS | `excel` | **excel_parser_rag**(vendored, `auto`→전결 openpyxl / 그 외 kordoc) | ✅ | **False** | LLM 없이 parse+chunk 결합 → native 청크. `chunk_strategy=excel_rag_parser` |
 | DOCX | `docx` | **kordoc** CLI(`tools/kordoc.py`) | ✅ (병합표 보존) | True | md→`hybrid_to_blocks(page_idx=1)`(페이지 개념 근사) |
 | PPTX / 단일 이미지 | `ocr` | **in-process VL OCR**(`parsers/ocr`) | ✅ + elements[] | True | 이미지→base64 / pptx→gotenberg→PDF→페이지 base64 → 페이지별 VL 호출. `IMAGE_EXTS`={png,jpg,jpeg,gif,bmp,tif,tiff,webp} |
 | 그 외(폴백) | `fallback` | **kordoc** CLI | ✅ | True | 미지 확장자(hwpx 등)는 kordoc 로(구 markitdown 폴백 제거) |
-| 스캔/혼합 PDF | (pdf 내부, MinerU 레인) | **MinerU** hybrid (PaddleOCR 로컬 layout + **VLM 원격**) | ✅ | True | 게이트가 `OCR_NEEDED` 하나라도 있으면 `parse_method='ocr'` 강제(스캔 텍스트 유실 방지), 스캔 없는 텍스트+이미지 혼합만 `'auto'`. content_list→`elements_to_blocks`. VLM=`MINERU_VLM_SERVER_URL`(별도 GPU). 미설정/실패/빈결과 시 **ODL/in-process VL 폴백**(가용성). 배포서버 전용(`docs/mineru-deploy-notes.md`) |
-| 스캔 PDF 폴백 | (pdf 내부) | **in-process VL OCR** | ✅ | True | MinerU 미가동(로컬/실패) 시 폴백. 글자 거의 없는 페이지만 렌더 → VL OCR 보충(best-effort 비치명) |
+| 스캔 PDF | (pdf 내부, `paddle_gw` 레인) | **PaddleOCR-VL 게이트웨이**(원격 GPU — layout + VL 인식 + 표 조립) | ✅ | True | 게이트가 `OCR_NEEDED` 하나라도 있으면 이 레인(문서 단위 — 네이티브 페이지도 함께 전송). 페이지 이미지 1장씩 `/tasks` 비동기 호출. **layout 이 image/figure/chart 를 (면적 5%↑) 검출한 스캔 페이지는 전면 VL 로 교체하고 paddle 표는 승계**(Plan A, 2026-08-03 — `_hybrid_scan_pages`). 미설정/실패/빈결과 시 **ODL/in-process VL 폴백**(가용성) |
+| 스캔 PDF 폴백 | (pdf 내부) | **in-process VL OCR** | ✅ | True | 게이트웨이 미가동/실패 시 폴백. 글자 거의 없는 페이지만 렌더 → VL OCR 보충(best-effort 비치명) |
 
 - **표준 중간표현**: "markdown + inline HTML 표". 표는 절대 pipe 로 납작화 금지.
 - 문서 ID 폴백 = `sha256(file_bytes).hexdigest()[:16]`(orchestrator 동일 식 → MinIO 키 일치). 파일명 정규화 = `tools.safe_basename`(경로 탈출 차단, 구 `parsing._safe_basename` 이동). 비표시문자 제거 = PUA(U+E000–U+F8FF).

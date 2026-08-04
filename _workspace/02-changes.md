@@ -267,3 +267,47 @@ knowledge_base plan `23_plan_chunk_method_selection.md` §B 반영. adaptive_chu
 **참고(빌드)**: edgequake `docker/Dockerfile` 에 cargo 캐시 마운트(registry+target) 추가했으나, 이번 빌드는 `FROM rust:bookworm` 이 툴체인을 1.95.0 으로 플로팅해 target 캐시 무효화(전량 재컴파일 91분). 캐시 이득 보려면 rust 베이스 태그 핀(`rust:1.xx-bookworm`) 필요 — 미결.
 
 **불변식 유지**: BGE-M3 1024d / 청크 KB당 단일우주 / 단일 Postgres+RLS. 리랭커는 검색 정렬 단계만 변경(적재·청킹 불변).
+
+
+## 10. 스캔 레인 layout 기반 그림·차트 처리 — Plan A (2026-08-02~03)
+
+### 문제
+스캔 레인(`paddle_gw`)이 게이트웨이 markdown 만 소비해 **순서도·차트가 낱말 조각으로 흩어졌다**
+(LICO p10: 22블록/평균 23.5자). 총 글자수·평균 블록길이·bbox 분포 세 신호로 "부서진 순서도"와
+"짧은 불릿 본문"을 가르려 했으나 **셋 다 실패**(ABL p40 불릿 평균 25.8자로 오탐).
+
+### 전환점 — 게이트웨이 layout
+게이트웨이가 `layout[].blocks[]`(`block_label`/`block_bbox`/`block_content`)를 노출하면서
+**영역 라벨로 판별이 가능**해졌다. 26페이지 실측에서 다이어그램 검출 5/6, 대조군 오탐 0.
+
+### 결정
+```
+스캔 페이지에 image/figure/chart 가 (면적 5% 이상) 있으면
+  → 그 페이지를 통째로 VL 1회 (PAGE_HYBRID = 기존 전사 프롬프트 + 그림·차트 조항)
+  → paddle 의 type=="table" 블록은 원래 순서대로 승계
+  → 나머지를 VL 출력으로 교체
+없으면 → 현행 그대로
+```
+- **영역별 crop 이 아니라 페이지 통째**: ABL p17 은 다이어그램 2개 중 왼쪽만 검출되고 오른쪽은
+  text 10개로 분해된다. crop 은 왼쪽만 서술하지만 전면 VL 은 양쪽 다 복원했다.
+- **표 정본은 paddle**: 전면 VL 이 웹 스크린샷형 표(ABL p33 Re-TACRED 5행/42셀)를 세 번 다 놓쳤다.
+- **프롬프트는 신규 작성 금지**: 새로 쓰면 전 페이지 `<table>` 0개 + pipe 평탄화(불변식 위반).
+  기존 프롬프트에 조항만 append 하면 51셀/rowspan·colspan 보존.
+- **`use_chart_recognition` 은 켜지 않는다**: 게이트웨이 기본값이 off 이고, 영역 검출과 데이터
+  인식은 독립이다(라벨 개수 동일). 켜면 간트가 4,981자 거짓 행렬을 만든다(페이지 46,610자).
+- **면적 하한 0.05**: 실측 참양성 최소 5.06% / 차단 대상 0.54%(법원통지서 QR). 여유가 1.01배라
+  좁다 — 표본이 쌓이면 0.02~0.03(공백 한가운데)으로 하향 검토. 0.01 이하는 QR 이 통과한다.
+- **면적 미상은 fail-closed**: 발동은 회귀 위험, 미발동은 현행 유지 — 불확실하면 현행을 택한다.
+- **모델 `qwen/qwen3.5-122b-a10b`**: 표·스캔전사·다이어그램에서 235b 와 동등하거나 우위.
+  9b 는 간트를 215셀 표로 전사해 탈락.
+
+### 코드 변경
+`gate.py`(`ocr_pages` 순수 추가) / `pdf_pages.py`(`page_numbers`) / `paddle_gw.py`(layout 노출) /
+`prompts.py`(`PAGE_HYBRID_*`) / `pdf/__init__.py`(`_hybrid_scan_pages`) /
+`vl_api.py`·`ocr/__init__.py`(모델·`max_tokens` 배선·프로바이더 차단).
+**문서수준 라우팅 구조는 건드리지 않았다** — 페이지수준 혼합 라우팅은 Plan B 로 분리.
+
+### 개발환경 함정 (폐쇄망에선 무관)
+OpenRouter 가 프로바이더를 비전 지원 여부와 무관하게 로드밸런싱한다. 122b 5개 중 **DeepInfra 만
+`prompt_tokens=42` 로 이미지를 폐기**하고 텍스트만 추론해 환각을 낸다. 거부가 아니라 조용한 환각이라
+상류 검출이 불가능하다 → `KBP_VL_BLOCK_PROVIDERS`(기본 DeepInfra)로 차단.
