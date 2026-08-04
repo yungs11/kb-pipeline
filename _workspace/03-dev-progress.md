@@ -231,3 +231,323 @@ GPU 제약(AISP 5GB — MinerU VL+PaddleOCR GPU 동시 탑재 불가)과 CPU pip
 - **폴백**(사용자 결정): 게이트웨이 실패/빈결과 → ODL/in-process VL(**MinerU 폴백 제외**). hybrid 레인은 디지털 차트문서용 유지, pipeline 레인 코드 잔존(미사용).
 - **폴백 실전 검증**: 게이트웨이 vlm worker 장애(대량 채점 세션과 GPU 충돌 추정) 중 e2e → 자동 폴백으로 정상 결과(표 7개, 308s). 가용성 보장 확인.
 - 61 tests. **잔여**: 게이트웨이 회복 후 :19001 경유 e2e 재확인(레인 자체 통과 확인용). 게이트웨이 무인증 접근제한 권고. 안정화 후 torch/mineru 이미지 제거 검토(6GB→경량).
+
+## Plan A — 스캔 레인 layout 기반 그림·차트 처리 (2026-08-02~03)
+
+**상태: 구현 완료, 단위검증 통과(168 passed), 라이브 §V3·§V4 통과.**
+설계 문서 `~/.claude/plans/mighty-whistling-quiche.md`(v10), 인수인계 `_workspace/04-planA-handoff.md`,
+실측물 `_workspace/planA-measurements/`.
+
+게이트웨이가 노출한 `layout[].blocks[]`(block_label/block_bbox/block_content)로 스캔 페이지의
+그림·차트 영역을 판별해, 해당 페이지를 통째로 VL 에 1회 보내 서술로 교체한다. 표는 paddle 정본을
+승계한다. 대상은 `RouteDecision.ocr_pages`(신규 필드)로 실제 스캔 페이지에 한정한다.
+
+라이브 검증 결과:
+| 대상 | 계측 | 결과 |
+|---|---|---|
+| 법원통지서(글자많은 스캔+QR) | layout=1 visual=0 vl=0 | paddle 유지. 사건번호·일시 정확 |
+| AI페르소나 p1-3(스캔 슬라이드) | layout=3 visual=0 vl=0 | paddle 유지(316/721/990자) |
+| 부동산교재 p7·p49(그림 지배) | layout=2 visual=2 vl=2 | hybrid 발동. 6자→10자, 3자→7자 |
+| ABL p17(혼합형) | tbl_backfill=1 vl_extra_tables=1 | 다이어그램 2개 다 복원 + 표 보존 |
+| LICO p3(간트) | — | 997자(chart recognition 켰을 때의 46,610자 아님) |
+
+**남은 검증**: §V5 절단 감시(누적 관측), §V6 대형 스캔 문서 소요시간 대 1800s, §V7 폴백.
+
+### ⚠ 별건 이슈 — `degen_filter` 가 정상 표를 삭제한다 (Plan A 무관, 선행 존재)
+
+`parse_service/parsers/degen_filter.py:is_degenerate_table` 이 **반복값이 많은 정상 표**를 퇴화표로
+오판해 통째로 제거한다. 실관측(2026-08-03, LICO 주간보고 p10 "6. 요구사항" 진행현황 표):
+
+```
+셀 51개, rowspan 2, colspan 1 — paddle 이 병합구조까지 온전히 추출
+상위 셀값: '0건'×18, '1건'×6, '3건'×4, '2건'×4
+is_degenerate_table() → True   → 페이지 blocks 가 0개가 됨
+```
+
+R3 규칙(`dom >= 0.35 and comp < 0.36`)에 걸린다. 진행현황·체크리스트처럼 **같은 값이 반복되는 표는
+정상 업무문서에서 흔하다** — 현재 규칙은 그것을 환각 반복과 구분하지 못한다.
+
+Plan A 와 경로가 겹치지 않는다(그 페이지는 hybrid 미발동, 순수 paddle 경로). Plan A 범위 대장에서
+`degen_filter` 는 명시적 비범위라 손대지 않았다. **별건으로 처리 필요.**
+검토 방향(미확정): 셀값 반복만이 아니라 **행 구조의 규칙성**(열 수 일관성·헤더 존재)을 함께 보거나,
+`rowspan`/`colspan` 이 있는 표는 퇴화 판정에서 제외.
+
+### Plan B 증분 진행 (2026-08-04)
+
+Plan B(페이지수준 라우팅)는 설계 문서를 4라운드 검증했으나 blocking 이 5→4→4→4 로 줄지 않았고,
+후반에는 결함의 주된 출처가 **개정 과정에서 새로 생긴 자기모순**이었다(같은 절에서 같은 상황을
+정반대로 규정, 조건 블록 안에서만 정의한 변수를 밖에서 사용 등). 원인은 `_parse_routed` 가 8가지
+관심사가 얽힌 함수인데 그것을 산문 의사코드로 통째 명세하려 한 것이다.
+→ **증분 5단계로 분할**(사용자 확정). 각 증분은 코드+테스트로 계약을 고정한 뒤 다음으로 넘어간다.
+
+| 증분 | 내용 | 상태 |
+|---|---|---|
+| B-0 | `parsers/ocr` 동시성 정리(loop-aware 세마포어, gather, 배치 진입점) | ✅ |
+| B-1 | `RouteDecision` 에 `page_lanes`·`narrate_pages`·`total_pages` 순수 추가 | ✅ |
+| B-2 | `run_paddle_gateway(page_numbers=)` — 스캔 페이지만 전송 | ✅ |
+| B-3 | 배치 VL seam 배선 — hybrid·서술 양쪽 | ✅ |
+| B-4 | `DIAGRAM_*` 프롬프트 자기판단형 개정 + append 표 처리 | ✅ |
+| B-5 | `_parse_routed` 재작성 + `vl` 레인 삭제 | 대기 |
+
+**B-4 프롬프트 개정 실측**(2026-08-04): 순서도→흐름 서술 236자(주체·분기 정확), 표→74자 요약,
+차트→213자(수치 정확), 간지→빈 배열. 1차 실측에서 "빈 배열을 반환합니다" 메타 문장이 블록으로
+들어가는 것을 발견해 금지 규칙 추가.
+
+**B-1 구현 중 발견**: 새 필드를 채우면서 `vl` 레인도 `diagram_pages` 를 갖게 되는데, 그 레인이 빈
+결과로 ODL 폴백할 때 그 값이 소비돼 **오늘 없던 VL 서술이 새로 붙는다**(INFOCZ 31p, ABL 20p).
+`vl` 레인만 비워 현행 동작을 보존했다(B-5 에서 레인 자체가 사라지면 예외도 제거).
+
+**B-5 완료 (2026-08-04)** — `_parse_routed` 페이지수준 재작성, `_vl_lane`·`_VL_RATIO` 삭제.
+전체 202 passed. 이제 KIS 류(그림 비율 높은 표 문서)가 문서 전체 VL 로 가지 않고 페이지마다
+odl 로 가서 표가 ODL `<table>` 로 보존된다.
+
+구현 단계에서 잡은 결함 3건(설계 문서 4라운드 검증에서는 못 잡았다):
+1. thin 판정을 `page_lanes` 기준으로만 계산 → 게이트 열기 실패 문서에서 스캔 페이지가 VL 전사 누락
+2. ODL 실패 시 `total_pages=0` 이라 병합 루프가 0회 → 페이지 0개 문서
+3. **ODL 폴백 미작동** — `except ToolError` 인데 실제로는 `subprocess.CalledProcessError` 가 온다
+   (`_odl_convert` 가 예외를 감싸지 않음). **자바 없는 환경에서 전 문서 파싱 실패**. 실측으로 발견.
+
+### 미검증 문서 10종 실측 회귀 (2026-08-04)
+
+단위테스트가 통과한 뒤 **한 번도 테스트하지 않은 PDF 10종**으로 돌려 숨은 결함을 찾았다.
+자바가 없는 개발 PC라 전 페이지가 VL 폴백을 타는 최악 조건이었고, 그 덕에 폴백 경로 결함이 드러났다.
+
+발견 3건:
+1. **ODL 폴백 미작동**(위 3번) — 이 회귀에서 처음 드러났다. 10개 문서 전부 실패.
+2. **전사 경로에 `max_tokens` 미전달** — hybrid 경로에는 상한과 실패 판정이 있었는데 전사 경로에는
+   둘 다 없었다. arXiv 논문 p6(2526자)이 기본 2000 토큰에서 절단돼 빈 페이지가 됐다.
+   `KBP_VL_PAGE_MAX_TOKENS` 전달 + `_looks_like_failed_vl` 적용으로 1438자 복구.
+3. **모델측 퇴화 — 상한을 올려도 남는 실패**. 원인은 절단이 아니다:
+   ```
+   arXiv p5(목차)  finish_reason=stop  completion_tokens=226 (상한 8000)
+   ```
+   목차의 leader dot(`. . . .`) 반복 패턴에서 모델이 루프에 빠졌다가 **스스로 종료**한다.
+
+   **재시도는 무효였다 — 실측 회복률 0%(5/5 실패).** 처음에 "실행마다 성공/실패가 갈리니
+   재시도로 회복된다"고 보고 재시도를 넣었으나, `temperature=0.1`(vl_api.py:196)이라 **같은
+   이미지는 같은 실패를 반복**한다. 회귀 실측이 이 가설을 반증했다.
+
+   채택한 해법은 **네이티브 텍스트 폴백**이다. 이 경로에 오는 페이지는 정의상 네이티브 텍스트를
+   가진 odl 레인이고(p5 4002자·p6 2527자), 렌더 시 이미 뽑아둔 `RenderedPage.text`
+   (pdf_pages.py:59)를 쓰므로 추가 비용이 0이다. 그마저 없으면 빈 결과로 둔다(잘린 raw JSON 이
+   본문이 되는 것보다 낫다).
+4. **`degen_filter` 가 폴백을 다시 지웠다** — 폴백은 4001자로 정상 발동했는데도 최종 blocks 가
+   비었다. 목차의 leader dot(`. . . .`)이 5-gram 지배 규칙(degen_filter.py:60-63)에 반복 구절로
+   걸려 **페이지가 통째로 삭제**된다(압축률 규칙은 0.226 > 임계 0.16 으로 통과 — ②만 발동).
+   `degen_filter` 임계는 건드리지 않고(별건 + 진짜 퇴화가 새나갈 위험) **폴백 경로에서만 점선을
+   접었다**(`_strip_leader_dots`). 점선은 의미 없는 조판 장식이라 손실이 없다:
+   `p5 degen True→False, 4002→1787자`(제목·페이지번호 전부 보존).
+   ※ 이는 사용자가 별건으로 남긴 degen_filter 오탐(LICO p10 51셀 표)과 **같은 계열의 두 번째 사례**다.
+
+**최종 회귀(2026-08-04)**: 10문서 전부 파싱 성공, **빈 페이지 0건**, `page_idx`·페이지수 불일치 0건.
+
+**진단이 네 번 바뀐 기록**(각 단계를 실측이 반증했다 — 단위테스트 209개로는 한 층도 못 잡았다):
+`max_tokens 절단`(p6만 맞음) → `모델 비결정 → 재시도`(회복률 0%로 반증) → `네이티브 폴백`
+(발동했으나 삭제됨) → `leader dot 정규화`(해결).
+
+**남은 관측**: 검사 스크립트의 pipe 표 경고가 실행마다 0~3건 오간다. 확인한 1건은 아키텍처
+다이어그램 ASCII 아트 오탐이었고 재현 시도에서는 나오지 않았다. VL 출력 비결정성 때문으로 보이며
+**별건으로 남긴다**.
+
+**성능 관측**: 102페이지 문서가 605초. facade `KBP_PARSE_SVC_TIMEOUT` 1800s 대비 여유 3배뿐이다.
+자바가 있으면 ODL 이 대부분을 처리해 훨씬 빠르지만, **대형 문서 소요시간은 별건으로 봐야 한다**
+(Plan A §V6 과 같은 항목).
+
+**페이지 정합은 깨끗**: 전 문서 `page_idx` 불일치 0건, 페이지수 불일치 0건.
+
+---
+
+## facade 잡 큐 — 동시처리·유량제어를 kbp 로 이관 (2026-08-03~04, 진행 중)
+
+**배경**: kb-backend 가 없어지고 facade 가 유일한 API 서버로 남는다. 지금 facade 는 유량제어
+수단이 **하나도 없다** — 4개 쓰기 경로가 전부 동기 블로킹이고(`service/app.py:112,134,221,276`)
+컨테이너는 `gunicorn -w 2` 라 무거운 요청 2건이면 facade 전체가 멎는다. 반면 kb-backend 는
+durable 큐를 이미 갖고 있다(`batch_ingestion_items` + `FOR UPDATE SKIP LOCKED` + lease
+heartbeat + worker 레지스트리). **그 능력을 kbp 로 옮긴다.**
+
+- 설계: [`docs/superpowers/specs/2026-08-03-facade-job-queue-design.md`](../docs/superpowers/specs/2026-08-03-facade-job-queue-design.md) (v6)
+- 범위 밖(D1~D12): [`...-deferred.md`](../docs/superpowers/specs/2026-08-03-facade-job-queue-deferred.md)
+
+### 핵심 결정
+
+| 항목 | 결정 | 근거 |
+|---|---|---|
+| 기존 4경로 | **202 로 바꾸지 않는다.** 계약 유지, 내부만 잡 경유 | kb 클라이언트가 `raise_for_status()` 후 `body.get("enriched_content") or ""` 라(`kb_pipeline_client.py:175-186`) 202 를 **예외 없이 삼켜 빈 문서를 적재**한다 |
+| 슬롯 위치 | DB(`kbp` 스키마), in-memory 금지 | facade 가 이미 다중 프로세스 — 세마포어는 프로세스 수만큼 샌다 |
+| 제한 단위 | kind 버킷 + 테넌트. `workspace_key IS NULL` 은 테넌트 상한 면제 | 현행 `/parse`·`/chunk` 에 workspace 개념이 없어, 한 버킷에 몰면 처리량이 **현행보다 나빠진다** |
+| ingest | parse·chunk·insert **3버킷 동시 예약** | ingest 는 셋 다 호출한다 — parse 만 잡으면 `LIMIT_INSERT` 의 근거가 무너진다 |
+| insert 재시도 | **하지 않는다**(`max_attempts=1`) | `insert_chunks` 가 호출마다 새 문서를 제출하고 멱등키가 없다(`edgequake.py:379`). 원인을 없애면 `edgequake.py` 를 안 건드려도 된다 |
+| lease 펜싱 | `(claimed_by, attempt_count)` — `attempt_count` 가 세대 토큰 | **`claimed_by` 만으로는 안 된다**(아래) |
+| 커넥션 풀 | 안 쓴다. 연산마다 connect/close | `psycopg_pool` 은 `psycopg[binary]` 에 없는 별도 배포판 → 폐쇄망 기동 실패 |
+| GC·멱등키·스트리밍 | Phase 1 비범위(D1·D2·D3) | 만들지 않으면 그 결함들이 존재하지 않는다 |
+
+### 검증에서 뒤집힌 것 — `claimed_by` 만으로는 펜싱이 안 된다
+
+v2~v5 동안 "`worker_id` 가 프로세스마다 유일하니 `claimed_by` 술어면 충분하고, 같은 프로세스가
+자기 잡을 재claim 하는 경우는 worker 가 하나일 때 발생하지 않는다"고 적어 두었다. **정반대다.**
+worker 가 **하나뿐일 때** 회수된 잡을 다시 집는 주체는 필연적으로 그 하나뿐인 worker 이고,
+`worker_id` 는 프로세스 수명 동안 고정이다. dev·compose·airgap 모두 facade-worker 는 1개다.
+
+```
+attempt 1 (스레드 A) 실행 중 → heartbeat 랩스로 회수 → queued
+같은 worker 가 재claim → attempt 2 (스레드 B). claimed_by 동일
+스레드 A 의 complete 가 술어를 통과 → attempt 1 결과로 종결
+스레드 B 는 계속 진행 → edgequake 에 두 번째 문서 제출   ← 중복 적재
+```
+
+스키마 변경 없이 `attempt_count` 를 세대 토큰으로 쓴다(claim 이 `RETURNING attempt_count`,
+모든 쓰기가 `AND attempt_count = $gen`).
+
+관련해 **lease 상실 처리가 부작용 기준으로 갈린다**: 부작용 *이후*(`complete`/`requeue`)는 결과
+폐기, 부작용 *직전*(`set_stage('inserting')`)은 **다운스트림을 호출하지 않고 중단**. 후자를
+"로그만 남기고 계속" 하면 중복 적재 방어가 통째로 무의미해진다.
+
+### 진행 상황
+
+| 단계 | 파일 | 상태 |
+|---|---|---|
+| 0 | `pyproject.toml` (`testpaths`+`requires_pg` 마커) | ✅ |
+| 1 | `service/jobs/{admission,schema,repo}.py` | ✅ 45 tests |
+| 2 | `service/jobs/{blobs,runner}.py` | ✅ 27 tests |
+| 3 | `service/worker.py` | ✅ 11 tests |
+| 4 | `service/jobs/api.py` 라우터 + `app.py` 등록 | ✅ 20 tests |
+| 5 | 레거시 4경로 잡 래퍼 + `service/tests/conftest.py` 재배선 | ✅ |
+| 6 | compose·런처·문서 | ✅ |
+
+**현재 250 passed.** 기존 엔드포인트 테스트는 **단언을 하나도 고치지 않고** 통과한다 —
+conftest 가 인메모리 repo/blobs + 인라인 디스패처를 자동 주입한다. 응답 계약이 유지된다는
+직접 증거다. 실 Postgres(:5433) 라운드트립으로 버킷 상한·펜싱·세대 토큰·취소 3경로·
+`attempt_count` 가드·기아 회피를 확인했다.
+
+### 실측이 문서 검증을 이긴 사례
+
+claim SQL 에 `coalesce(workspace_key, '\x00anon')` 을 sentinel 로 썼는데, 파이썬 소스에서
+`\x00` 이 **진짜 NUL 바이트**가 되어 SQL 문법 오류를 냈다. ultracode 검증 4라운드가 못 잡았고
+**첫 라이브 실행이 잡았다**. 애초에 sentinel 이 불필요하다 — `PARTITION BY` 는 NULL 을 한
+그룹으로 묶는다. 이후로는 문서 검증보다 실행 검증에 무게를 둔다.
+
+### 부수 정정
+
+`service/tests/test_facade_auth.py` 2건이 **이전부터 깨져 있었다**(`testpaths` 가 `service/tests`
+를 안 봐서 안 보였다). 살아있는 edgequake 에 의존하는 테스트였고 `TestClient` 가 서버 예외를
+재발생시켜 주석("may 5xx if edgequake down — fine")과 다르게 동작했다. fake 주입으로 격리했다.
+
+### 라이브 end-to-end (2026-08-04)
+
+facade(:19000)와 facade-worker 를 실제로 띄우고 스캔 PDF 6건을 동시 제출했다.
+
+```
+t=1..6  {'queued': 2, 'running': 4}   ← parse 버킷 상한 4 가 6회 관측 내내 유지
+이후    슬롯이 비는 대로 queued → running 승격, 순차 완주
+```
+
+결과는 현행 `/parse` 스키마 그대로였다(OCR 한글 884자 + `docs_id`·`page_spans`·`pages`·
+`table_blocks`·`timing_metrics`·`modal_spans`). 레거시 `/parse` 도 동일 본문을 반환했다.
+
+부산물로 §5.1 규칙도 실증됐다 — parse-svc 가 `.md` 를 거부하면(`{status:"failed"}`)
+**잡은 succeeded** 이고 본문이 그대로 보존된다. 현행 `/ingest` 가 200 + 원본을 주는
+정상 경로를 깨지 않는다.
+
+### app.py 배선에서 잡은 결함 둘 (테스트가 아니라 실행이 잡았다)
+
+1. **`dependency_overrides` 우회** — `_job_runner` 가 `get_parse_client` 함수를 그대로
+   넘겨서, FastAPI 오버라이드가 무시됐다. 단위 테스트가 fake 대신 **진짜 parse-svc·
+   MinIO 를 때렸다**(MinIO `AccessDenied` 로 드러남). `app.dependency_overrides` 를
+   존중하는 `_resolve()` 팩토리로 고쳤다.
+2. **`importlib.reload` 가 다른 모듈을 오염** — `test_facade_auth.py` 의 reload 가 `app`
+   객체를 갈아치워, 알파벳 순으로 뒤에 오는 `test_insert_endpoint`·`test_parse_endpoint`
+   가 든 옛 `app` 참조에 오버라이드가 걸렸다. 게이트 키를 **요청 시점 읽기**로 바꿔
+   reload 자체를 없앴다(빈 문자열도 미설정과 동일 취급 — D12 의 함정 방지).
+
+### 6단계(배포·문서)에서 실측이 잡은 것
+
+**런처 프로세스 패턴 함정 둘** — facade-worker 는 HTTP 포트가 없어 포트로 스코프할 수
+없는데, 처음 쓴 패턴이 둘 다 틀렸다.
+
+* `pkill -f "python -m service.worker"` → **안 맞는다.** Homebrew 파이썬의 실제 cmdline 은
+  `/usr/local/Cellar/.../MacOS/Python -m service.worker` 로 **대문자 Python** 이다. 이것
+  때문에 e2e 검증용으로 띄웠던 worker 가 살아남아 같은 큐를 이중 소비했다(`ps` 로 발견).
+* `pgrep -f "service.worker"` → **너무 넓다.** 정규식 `.` 이 아무 문자나 매치해 VS Code 의
+  `--service-worker-schemes=...` 까지 잡혔다.
+
+정답은 `pgrep -f -- '-m service\.worker'`. 그리고 `stop_worker` 가 PID 파일**만** 보면
+런처를 안 거치고 띄운 고아가 살아남으므로, PID 파일과 패턴 매치를 **둘 다** 모아 죽인다.
+
+**pytest 가 공용 dev DB 를 오염시켰다** — `test_job_repo_pg` fixture 가 앞만 비우고 뒤를
+안 비워서 `pytest:*` worker 행과 running 잡이 남았다. `GET /jobs/workers` 가 없는 worker 를
+capacity 에 더해 보고했다. fixture 에 teardown 을 넣었다.
+
+**stale 회수 라이브 확인** — heartbeat 가 10분 지난 유령 worker 행을 직접 주입했더니
+(a) 집계는 즉시 제외했고(60s 창), (b) 다음 claim 틱이 행 자체를 DELETE 했다. 설계 §3.1(1c)
+와 §4.2 가 주장하는 자가치유가 실제로 돈다.
+
+**라이브 최종 확인**: `scripts/run-facade.sh` + `scripts/run-facade-worker.sh` 로 띄운 뒤
+잡 제출 → `succeeded`(attempt 1). `docker compose config` 로 dev·airgap 양쪽 문법과
+**airgap 이미지 9종 불변**(facade/facade-worker 가 `kbp-facade:airgap` 공유)을 확인했다.
+
+## Phase 2 시작 — kb 클라이언트 잡 경로 (2026-08-04, 비파괴 증분)
+
+**선행 D1(제출 멱등키) 완료** 후 착수. kb 레포에 미커밋 31파일(`pipeline.py` 422줄)이
+진행 중이라 **전면 전환 대신 플래그 뒤 증분**으로 갔다.
+
+- `kb_pipeline_use_jobs`(기본 `False`) — 켜면 `POST /jobs/{kind}` → 폴링 → `/result`.
+- 건드린 파일: `kb_pipeline_client.py`·`config.py`·`dependencies.py` **셋뿐**.
+  `pipeline.py`·`batch_worker.py`·프론트는 미접촉.
+- 롤백: env 하나. 코드 변경 불필요.
+- 응답 본문이 레거시와 동일해 **매핑 코드를 손대지 않았다** — 세 호출 지점의
+  `_request → raise_for_status → body` 를 `_post_body()` 하나로 갈아끼웠다.
+- 멱등키를 kb 가 직접 준다(`kb-parse:{docs_id}`, `kb-insert:{ws}:{doc_id}`). insert 는
+  edgequake 에 멱등키가 없어 재시도가 곧 중복 문서라 반드시 필요하다.
+- 잡 실패는 **예외로 표면화**한다. 조용히 빈 결과를 돌려주면 빈 문서가 적재된다
+  (이 프로젝트가 202 전환을 포기한 바로 그 이유).
+
+kb 테스트: 클라이언트 31 passed(신규 6), 클라이언트를 쓰는 파이프라인 포함 81 passed.
+
+**남은 것**: 플래그를 켠 라이브 검증 → `batch_worker` 제거 → 프론트 배치 화면을
+`GET /jobs?batch_key=` 로 전환.
+
+### Phase 2 라이브 검증 (2026-08-04, 플래그 ON)
+
+`KB_PIPELINE_USE_JOBS=true` 로 kb-backend 를 띄우고 실제 문서를 kb API 로 업로드했다.
+
+```
+POST /kb/{id}/documents  →  200 {job_id, status:"queued"}
+kbp.jobs:  parse succeeded  legacy=False  attempt=1  52.9s
+           idem_key = h:kb-parse:5ac76890503439cb
+```
+
+**검증된 것**
+
+- kb 가 레거시 `/parse` 가 아니라 **신규 `/jobs/parse` 로 갔다**(`legacy=False` 가 증거 —
+  레거시 래퍼가 만드는 잡은 `legacy=True` 다).
+- kb 가 **명시 멱등키를 실었다**(`h:` 접두사 = `Idempotency-Key` 헤더 경유). 자동 파생이면
+  `a:` 접두사에 시간 버킷이 붙는다.
+- 제출 → 폴링 → `/result` 회수가 전부 돌았고, `attempt=1` 이라 재시도 없이 한 번에 끝났다.
+- **플래그 off 회귀**: 같은 클라이언트를 `use_jobs=False` 로 만들어 레거시 경로가 그대로
+  동작함을 확인(885자). 롤백이 실제로 된다.
+
+**1차 시도(임베딩 다운)**: `chunk` 잡이 `AllMethodsFailedError ... HTTP 429 No deployments
+available. Passed model=bge-m3` 로 실패했다. 레거시 `/chunk` 도 **동일하게 500** 이라
+내 변경과 무관한 환경 문제로 확정하고 보류했다.
+
+**2차 시도(임베딩 복구 후) — 전체 체인 완주**
+
+```
+parse   succeeded  44.8s  attempt=1  legacy=False  idem=h:kb-parse:5ac76890503439c
+chunk   succeeded  60.3s  attempt=1  legacy=False  idem=a:159ffc1672a1ba410c9beb75
+insert  succeeded  43.8s  attempt=1  legacy=False  idem=h:kb-insert:1d9c9928-31c9-
+```
+
+kb 문서 상태 `ready`, 청크 1건이 실제 OCR 한글 내용으로 적재됐다. 세 단계 모두
+`legacy=False`(신규 `/jobs/*` 경로) · `attempt=1`(재시도 없음)이다.
+
+멱등키 접두사가 kind 별로 다른 것도 의도대로다 — parse·insert 는 kb 가 명시 키를 싣고
+(`h:`), chunk 는 kb 가 안 실어서 facade 가 자동 파생했다(`a:` + 시간 버킷). chunk 는
+선행 parse 결과가 정해지면 내용이 결정적이라 자동 키로 충분하다.
+
+**부수 관측 — 잡 경로의 실익이 드러났다.** 레거시 `/chunk` 를 curl 로 부르면 4방법 경쟁이
+180s 를 넘겨 클라이언트가 먼저 끊긴다(`code=000`). 잡 경로는 제출이 즉시 끝나고
+`stage=chunking` 을 폴링으로 보다가 48~60s 뒤 결과를 회수한다 — 소비자 타임아웃과
+무관해진다.
+
+(관련: `_workspace` 의 "LLM 백엔드 현황" 메모 — OpenRouter/litellm 가용성이 오락가락한다.)
