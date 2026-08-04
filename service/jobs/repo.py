@@ -673,6 +673,127 @@ class JobRepo:
                 )
                 return int(cur.fetchone()["n"])
 
+    # ── GC (D2) ────────────────────────────────────────────────────────────
+
+    def purge_expired(self, *, ttl_seconds: int, batch: int) -> list[dict[str, Any]] | None:
+        """TTL 경과 terminal 잡을 지우고 **커밋된 뒤** 그 행들을 돌려준다.
+
+        반환값의 ``*_ref`` 를 호출자가 트랜잭션 **밖에서** MinIO 에서 지운다. 한
+        트랜잭션 안에서 객체까지 지우면, 커밋이 실패·롤백했을 때 행은 살아남고 객체만
+        사라져 ``GET /jobs/{id}/result`` 가 "결과 있음" 이라 응답해놓고 복원에 실패한다.
+
+        ``NOT EXISTS`` 는 반드시 ``LIMIT`` 서브쿼리 **안**에 둔다. 밖에 두면 보호 대상
+        (비종료 자식을 가진 부모)까지 포함해 상위 N건을 뽑고 바깥에서 걸러내는데, 보호
+        행은 정의상 가장 오래된 축이라 정렬 앞머리에 쌓여 매 사이클 0건 삭제로 **GC 가
+        영구 정체**한다.
+
+        ``coalesce(completed_at, created_at)`` 인 이유: ``completed_at IS NULL`` 인
+        terminal 행은 ``<`` 비교가 false 라 TTL 대상이 아니고, 행이 있으니 스윕 대상도
+        아니어서 영구 잔류한다.
+
+        :returns: 삭제된 행들(``id``·``kind``·``legacy``·``completed_at``·refs 3종).
+            ``ttl_seconds <= 0`` 이면 ``None``(GC 정지 신호 — 아무것도 지우지 않았다).
+        """
+        if ttl_seconds is None or ttl_seconds <= 0:
+            return None
+
+        def _run() -> list[dict[str, Any]]:
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SET LOCAL lock_timeout = '5s'")
+                    cur.execute("SET LOCAL statement_timeout = '30s'")
+                    got = cur.execute(
+                        "SELECT pg_try_advisory_xact_lock(%s, %s)",
+                        (schema.LOCK_CLASSID, schema.LOCK_OBJ_GC),
+                    ).fetchone()
+                    if not got["pg_try_advisory_xact_lock"]:
+                        return []          # 다른 worker 가 도는 중
+                    cur.execute(
+                        """
+                        DELETE FROM kbp.jobs j
+                         WHERE j.id IN (
+                           SELECT c.id FROM kbp.jobs c
+                            WHERE c.status IN ('succeeded','failed','canceled')
+                              AND coalesce(c.completed_at, c.created_at)
+                                  < now() - make_interval(secs => %s)
+                              AND NOT EXISTS (
+                                    SELECT 1 FROM kbp.jobs k
+                                     WHERE k.parent_job_id = c.id
+                                       AND k.status NOT IN
+                                           ('succeeded','failed','canceled'))
+                            ORDER BY coalesce(c.completed_at, c.created_at)
+                            LIMIT %s)
+                        RETURNING id, kind, legacy, completed_at,
+                                  input_ref, payload_ref, result_ref
+                        """,
+                        (ttl_seconds, max(1, batch)),
+                    )
+                    rows = list(cur.fetchall())
+                conn.commit()          # ← 여기까지 성공해야 키를 넘긴다
+            return rows
+
+        return _run()
+
+    def job_ids_present(self, job_ids: Sequence[uuid.UUID]) -> set[uuid.UUID] | None:
+        """주어진 id 중 실제 존재하는 것. **조회 실패는 ``None``**(fail-closed 신호).
+
+        "빈 결과"와 "조회 실패"를 코드상 구분해야 한다 — 스윕은 증거의 부재로 삭제를
+        결정하므로, 예외를 삼켜 빈 set 을 돌려주면 postgres 순간 장애만으로 살아있는
+        객체가 전량 삭제된다.
+        """
+        if not job_ids:
+            return set()
+        try:
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SET LOCAL statement_timeout = '30s'")
+                    cur.execute(
+                        "SELECT id FROM kbp.jobs WHERE id = ANY(%s)", (list(job_ids),)
+                    )
+                    return {r["id"] for r in cur.fetchall()}
+        except psycopg.Error:
+            log.exception("job_ids_present failed — sweep must abort (fail-closed)")
+            return None
+
+    def refs_in_use(self, keys: Sequence[str]) -> set[str] | None:
+        """주어진 키 중 어떤 행이든 참조 중인 것. **조회 실패는 ``None``**.
+
+        job_id 존재 확인만으로는 부족하다 — 행 id 와 객체 키가 어긋난 행이 과거에
+        만들어졌을 수 있어(멱등 재삽입 버그) 키를 직접 대조하는 방어를 한 겹 더 둔다.
+        """
+        if not keys:
+            return set()
+        try:
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SET LOCAL statement_timeout = '30s'")
+                    cur.execute(
+                        """
+                        SELECT input_ref, payload_ref, result_ref FROM kbp.jobs
+                         WHERE input_ref = ANY(%s) OR payload_ref = ANY(%s)
+                            OR result_ref = ANY(%s)
+                        """,
+                        (list(keys), list(keys), list(keys)),
+                    )
+                    used: set[str] = set()
+                    for r in cur.fetchall():
+                        used.update(
+                            v for v in (r["input_ref"], r["payload_ref"], r["result_ref"])
+                            if v
+                        )
+                    return used
+        except psycopg.Error:
+            log.exception("refs_in_use failed — sweep must abort (fail-closed)")
+            return None
+
+    def count_jobs(self) -> int | None:
+        try:
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    return int(cur.execute("SELECT count(*) n FROM kbp.jobs").fetchone()["n"])
+        except psycopg.Error:
+            return None
+
     # ── staging 정리 (GC 없음 — §5.3) ──────────────────────────────────────
 
     def legacy_refs_to_purge(self, job_id: uuid.UUID) -> tuple[str | None, str | None]:

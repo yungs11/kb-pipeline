@@ -503,3 +503,124 @@ def test_idem_reinsert_race_path_preserves_job_id():
     assert "job_id=job_id" in recursive[:recursive.index(")")], (
         "재귀 재삽입이 job_id 를 안 넘긴다 — 행 id 와 객체 키가 어긋난다"
     )
+
+
+# ── TTL GC (D2) ────────────────────────────────────────────────────────────
+
+def _age(job_id, seconds):
+    """completed_at·created_at 을 과거로 민다."""
+    with psycopg.connect(DSN) as conn:
+        conn.execute(
+            "UPDATE kbp.jobs SET completed_at = now() - make_interval(secs => %s),"
+            "                   created_at   = now() - make_interval(secs => %s)"
+            " WHERE id = %s", (seconds, seconds, job_id))
+        conn.commit()
+
+
+def _terminal(repo, worker, *, kind="parse", status="succeeded", **kw):
+    job_id = repo.submit(kind=kind, **kw)
+    claimed = [c for c in repo.claim(worker_id=worker, local_free=10) if c.id == job_id]
+    if claimed:
+        repo.complete(job_id, worker_id=worker, attempt=claimed[0].attempt,
+                      status=status, result={})
+    return job_id
+
+
+def test_purge_removes_expired_and_returns_refs(repo, worker):
+    job_id = _terminal(repo, worker, input_ref="kbp-jobs/x/input.bin")
+    _age(job_id, 10_000)
+    rows = repo.purge_expired(ttl_seconds=3600, batch=10)
+    assert [r["id"] for r in rows] == [job_id]
+    assert rows[0]["input_ref"] == "kbp-jobs/x/input.bin"
+    assert repo.get(job_id) is None
+
+
+def test_purge_keeps_fresh_jobs(repo, worker):
+    job_id = _terminal(repo, worker)
+    assert repo.purge_expired(ttl_seconds=3600, batch=10) == []
+    assert repo.get(job_id) is not None
+
+
+def test_purge_disabled_returns_none(repo, worker):
+    """TTL<=0 은 비상 정지다 — 전량 삭제 레버가 되면 안 된다."""
+    job_id = _terminal(repo, worker)
+    _age(job_id, 10_000)
+    assert repo.purge_expired(ttl_seconds=0, batch=10) is None
+    assert repo.purge_expired(ttl_seconds=-1, batch=10) is None
+    assert repo.get(job_id) is not None
+
+
+def test_purge_recovers_terminal_rows_with_null_completed_at(repo, worker):
+    """completed_at 이 NULL 인 terminal 행도 created_at 기준으로 회수된다."""
+    job_id = _terminal(repo, worker)
+    with psycopg.connect(DSN) as conn:
+        conn.execute("UPDATE kbp.jobs SET completed_at = NULL,"
+                     " created_at = now() - interval '10 hours' WHERE id = %s", (job_id,))
+        conn.commit()
+    rows = repo.purge_expired(ttl_seconds=3600, batch=10)
+    assert [r["id"] for r in rows] == [job_id]
+    assert rows[0]["completed_at"] is None      # WARN 재료가 실려 온다
+
+
+def test_purge_protects_parent_of_non_terminal_child(repo, worker):
+    parent = _terminal(repo, worker)
+    _age(parent, 10_000)
+    repo.submit(kind="chunk", parent_job_id=parent)      # queued 자식
+    assert repo.purge_expired(ttl_seconds=3600, batch=10) == []
+    assert repo.get(parent) is not None
+
+
+def test_purge_deletes_parent_when_child_is_terminal(repo, worker):
+    parent = _terminal(repo, worker)
+    child = _terminal(repo, worker, kind="chunk", parent_job_id=parent)
+    _age(parent, 10_000); _age(child, 10_000)
+    purged = {r["id"] for r in repo.purge_expired(ttl_seconds=3600, batch=10)}
+    assert parent in purged
+
+
+def test_purge_protected_rows_do_not_stall_gc(repo, worker):
+    """head-of-line 방지 — 보호 대상이 배치만큼 앞에 쌓여도 뒤가 지워진다.
+
+    NOT EXISTS 를 LIMIT 밖에 두면 보호 행(정의상 가장 오래된 축)이 정렬 앞머리를
+    채워 매 사이클 0건 삭제로 GC 가 영구 정체한다.
+    """
+    protected = []
+    for _ in range(3):
+        p = _terminal(repo, worker)
+        _age(p, 20_000)                      # 가장 오래됨 = 정렬 앞머리
+        repo.submit(kind="chunk", parent_job_id=p)   # queued 자식으로 보호
+        protected.append(p)
+    victim = _terminal(repo, worker)
+    _age(victim, 10_000)
+
+    rows = repo.purge_expired(ttl_seconds=3600, batch=3)   # batch < 보호 수 + 1
+    assert [r["id"] for r in rows] == [victim], "보호 행이 GC 를 정체시켰다"
+    for p in protected:
+        assert repo.get(p) is not None
+
+
+def test_purge_respects_batch_limit(repo, worker):
+    ids = []
+    for _ in range(5):
+        j = _terminal(repo, worker)
+        _age(j, 10_000); ids.append(j)
+    first = repo.purge_expired(ttl_seconds=3600, batch=2)
+    assert len(first) == 2
+    rest = repo.purge_expired(ttl_seconds=3600, batch=10)
+    assert len(rest) == 3
+
+
+def test_job_ids_present_distinguishes_empty_from_failure(repo, worker):
+    job_id = _terminal(repo, worker)
+    assert repo.job_ids_present([job_id]) == {job_id}
+    assert repo.job_ids_present([uuid.uuid4()]) == set()      # 빈 결과
+    broken = JobRepo("postgres://nobody:nobody@127.0.0.1:1/none", connect_timeout=1)
+    assert broken.job_ids_present([uuid.uuid4()]) is None      # 조회 실패
+    assert broken.refs_in_use(["k"]) is None
+
+
+def test_refs_in_use_matches_any_ref_column(repo):
+    repo.submit(kind="parse", input_ref="a", payload_ref="b")
+    repo.submit(kind="chunk", payload_ref="c")
+    used = repo.refs_in_use(["a", "b", "c", "zzz"])
+    assert used == {"a", "b", "c"}

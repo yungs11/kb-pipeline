@@ -14,6 +14,9 @@ facade API 와 **별도 프로세스**다. API 를 재기동해도 진행 중인
   claim 이 advisory lock 에서 지연될 때 함께 멎는다 — 어느 쪽이든 그 worker 의 전 잡이
   동시에 stale 로 오판된다.
 * **executor**(잡 실행) — ``KBP_JOB_WORKER_CONCURRENCY`` 개.
+* **GC 스레드**(전용) — TTL 삭제 + 고아 객체 스윕. 틱 루프에 넣으면 GC 가 도는 동안
+  ``claim``·``_reap`` 이 멎어 큐가 정지하고 ``_inflight`` 가 안 비워져 용량이 줄어든다.
+  스윕은 MinIO 전체 나열이라 수 초~수 분이 걸릴 수 있다.
 """
 from __future__ import annotations
 
@@ -22,11 +25,13 @@ import os
 import signal
 import socket
 import threading
+import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from service.jobs import blobs as blobs_mod
+from service.jobs import gc as gc_mod
 from service.jobs.repo import JobRepo, LeaseLost
 from service.jobs.runner import JobAborted, JobFailed, JobRetryable, JobRunner
 from service.jobs.schema import ensure_schema
@@ -68,6 +73,7 @@ class Worker:
         self._inflight: dict[Future, tuple[uuid.UUID, int]] = {}
         self._lock = threading.Lock()
         self._hb_thread: threading.Thread | None = None
+        self._gc_thread: threading.Thread | None = None
 
     # ── heartbeat (전용 스레드) ────────────────────────────────────────────
 
@@ -101,6 +107,42 @@ class Worker:
             self._heartbeat_once()
         except Exception:  # noqa: BLE001
             log.exception("final heartbeat failed")
+
+    # ── GC (전용 스레드) ───────────────────────────────────────────────────
+
+    def _gc_loop(self) -> None:
+        """TTL 삭제 + 고아 스윕. **어떤 예외로도 이 스레드는 죽지 않는다.**
+
+        주기 기준시각은 프로세스 메모리다.
+          * TTL 삭제 — 기동 후 첫 사이클에 1회, 이후 ``GC_INTERVAL`` 마다.
+          * 고아 스윕 — 기동 후 ``BOOT_DELAY``(기본 600s) 뒤 첫 실행, 이후
+            ``SWEEP_INTERVAL`` 마다. 부팅 지연에 SWEEP_INTERVAL(6h)을 재사용하면
+            재기동이 잦은 환경에서 **한 번도 안 돈다** — 고아가 쌓이는 게 정확히 그
+            환경이다.
+        """
+        gc_interval = _env_int("KBP_JOB_GC_INTERVAL_SECONDS", 3600)
+        sweep_interval = _env_int("KBP_JOB_ORPHAN_SWEEP_INTERVAL_SECONDS", 21600)
+        boot_delay = _env_int("KBP_JOB_ORPHAN_SWEEP_BOOT_DELAY_SECONDS", 600)
+        tick = min(60.0, max(1.0, self.poll_interval))
+
+        next_gc = 0.0                                   # 첫 사이클에 바로
+        next_sweep = time.monotonic() + boot_delay
+        while not self._shutdown.is_set():
+            now = time.monotonic()
+            try:
+                if now >= next_gc:
+                    gc_mod.run_ttl_gc(self.repo, self.blobs)
+                    next_gc = time.monotonic() + gc_interval
+                if now >= next_sweep:
+                    gc_mod.run_orphan_sweep(self.repo, self.blobs)
+                    # lock 을 못 잡아 건너뛴 경우에도 타이머는 리셋한다
+                    # (매 사이클 try-lock 을 두드리지 않게).
+                    next_sweep = time.monotonic() + sweep_interval
+            except Exception:  # noqa: BLE001 - GC 실패로 스레드를 잃지 않는다
+                log.exception("gc cycle failed; continuing")
+                next_gc = time.monotonic() + gc_interval
+                next_sweep = time.monotonic() + sweep_interval
+            self._shutdown.wait(tick)
 
     # ── 틱 ─────────────────────────────────────────────────────────────────
 
@@ -202,6 +244,11 @@ class Worker:
             target=self._heartbeat_loop, name="kbp-heartbeat", daemon=True)
         self._hb_thread.start()
 
+        # GC 는 전용 스레드다 — 틱에 넣으면 claim 이 멎는다.
+        self._gc_thread = threading.Thread(
+            target=self._gc_loop, name="kbp-gc", daemon=True)
+        self._gc_thread.start()
+
         while not self._stop.is_set():
             try:
                 self._tick()
@@ -242,8 +289,9 @@ class Worker:
             self._shutdown.wait(self.poll_interval)
         # 드레인이 끝난 뒤에야 heartbeat 를 멈춘다.
         self._shutdown.set()
-        if self._hb_thread is not None:
-            self._hb_thread.join(timeout=self.poll_interval * 2)
+        for t in (self._hb_thread, self._gc_thread):
+            if t is not None:
+                t.join(timeout=self.poll_interval * 2)
 
 
 def main() -> None:

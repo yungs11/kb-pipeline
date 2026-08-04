@@ -31,6 +31,7 @@ log = logging.getLogger("kb_pipeline.service.jobs.schema")
 LOCK_CLASSID = 0x6B6270      # 7037552
 LOCK_OBJ_SCHEMA = 1          # 기동 시 DDL
 LOCK_OBJ_CLAIM = 2           # claim 틱 (repo.py)
+LOCK_OBJ_GC = 3              # TTL GC / 고아 스윕 (gc.py)
 
 #: 동시 DDL 경합에서만 나오는 SQLSTATE. 다른 프로세스가 먼저 만든 것이므로 무해하다.
 _RACE_SQLSTATES = frozenset({
@@ -82,6 +83,15 @@ ALTER TABLE kbp.jobs ADD COLUMN IF NOT EXISTS idem_key text;
 -- 부분 유니크 조건은 "NULL 이 아닌 것"만으로 충분하다. 고친 뒤 같은 파일을 다시 올리면
 -- 새 잡이 만들어진다 — 실패가 영구히 캐시되지 않는다.
 CREATE UNIQUE INDEX IF NOT EXISTS jobs_idem_idx ON kbp.jobs (idem_key) WHERE idem_key IS NOT NULL;
+
+-- TTL GC 용. **표현식 인덱스**여야 한다 — GC 쿼리의 술어·정렬이
+-- `coalesce(completed_at, created_at)` 식이라 단일 컬럼 `(completed_at)` 인덱스는
+-- WHERE 에도 ORDER BY 에도 매칭되지 않고 seq scan + sort 로 떨어진다. 그러면 jobs 가
+-- 커진 배포에서 GC 가 매 사이클 statement_timeout 에 걸려 영구히 0건이 된다.
+-- (coalesce 는 IMMUTABLE, 두 컬럼 모두 timestamptz 라 식 인덱스가 가능하다.)
+CREATE INDEX IF NOT EXISTS jobs_gc_idx
+    ON kbp.jobs ((coalesce(completed_at, created_at)))
+ WHERE status IN ('succeeded','failed','canceled');
 
 CREATE TABLE IF NOT EXISTS kbp.job_workers (
   worker_id    text PRIMARY KEY,

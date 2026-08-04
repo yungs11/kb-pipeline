@@ -10,12 +10,14 @@ MinIO 는 이미 스택에 있다(페이지 이미지용). 같은 버킷(``docum
 """
 from __future__ import annotations
 
+import datetime as dt
 import io
 import json
 import logging
 import os
+import re
 import uuid
-from typing import Any
+from typing import Any, Iterator
 
 log = logging.getLogger("kb_pipeline.service.jobs.blobs")
 
@@ -70,8 +72,12 @@ class JobBlobStore:
         return cls(
             client,
             bucket=os.environ.get("KBP_JOB_MINIO_BUCKET")
-            or os.environ.get("MINIO_BUCKET", DEFAULT_BUCKET),
-            prefix=os.environ.get("KBP_JOB_MINIO_PREFIX", DEFAULT_PREFIX),
+            or os.environ.get("MINIO_BUCKET")
+            or DEFAULT_BUCKET,
+            # 빈 문자열 = 미설정 = 기본값. compose 에서 `${VAR}` 가 미정의면 빈 문자열이
+            # 주입되는데, 그대로 쓰면 key() 가 `/{job_id}/name` 선행 슬래시 키를 만들어
+            # 키 레이아웃·파싱 계약이 깨진다.
+            prefix=os.environ.get("KBP_JOB_MINIO_PREFIX") or DEFAULT_PREFIX,
         )
 
     # ── 키 ─────────────────────────────────────────────────────────────────
@@ -132,6 +138,36 @@ class JobBlobStore:
             self._client.remove_object(self._bucket, key)
         except Exception:  # noqa: BLE001
             log.warning("failed to remove job object %r", key, exc_info=True)
+
+    # ── 나열 (고아 스윕용) ─────────────────────────────────────────────────
+
+    #: `{prefix}/{uuid}/{name}` 만 우리 것으로 인정한다.
+    _KEY_RE_TMPL = r"^{prefix}/([0-9a-fA-F-]{{36}})/"
+
+    def iter_job_objects(self) -> Iterator[tuple[uuid.UUID | None, str, dt.datetime | None]]:
+        """``(job_id, key, last_modified)`` 를 흘린다. 프리픽스 해석을 여기 가둔다.
+
+        ``recursive=True`` **고정**이다. 기본값(False)이면 실제 객체가 아니라
+        common-prefix 유사객체(``{prefix}/{uuid}/``)가 나오고 그 ``last_modified`` 는
+        ``None`` 이라, 호출자가 grace 비교에서 터지거나 None 을 "오래됨" 으로 흡수해
+        **살아있는 staging 을 지운다**.
+
+        키가 우리 형식이 아니면 ``job_id=None`` 을 낸다 — 호출자는 그런 객체를 절대
+        건드리지 않는다(같은 버킷에 페이지 이미지 등 남의 객체가 있다).
+        """
+        pattern = re.compile(self._KEY_RE_TMPL.format(prefix=re.escape(self._prefix)))
+        for obj in self._client.list_objects(
+            self._bucket, prefix=f"{self._prefix}/", recursive=True
+        ):
+            key = obj.object_name
+            m = pattern.match(key)
+            job_id: uuid.UUID | None = None
+            if m:
+                try:
+                    job_id = uuid.UUID(m.group(1))
+                except ValueError:
+                    job_id = None
+            yield (job_id, key, getattr(obj, "last_modified", None))
 
     # ── JSON (인라인 / 오프로딩) ───────────────────────────────────────────
 

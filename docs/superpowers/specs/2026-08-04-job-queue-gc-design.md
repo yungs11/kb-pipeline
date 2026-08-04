@@ -1,10 +1,15 @@
-<!-- plan-version: v2 -->
+<!-- plan-version: v3 -->
 <!-- ultracode-validation: PENDING -->
 
 # 잡 큐 TTL GC (D2) — 완료 잡 + MinIO 객체 정리
 
 > 짝 문서: [`2026-08-03-facade-job-queue-design.md`](2026-08-03-facade-job-queue-design.md)
 > (설계 §2·§5.3), [`...-deferred.md`](2026-08-03-facade-job-queue-deferred.md) D2.
+>
+> v2 → v3: 2차 검증에서 범위 내 must-fix 11건. 가장 큰 것은 **sanity 가드가 §0 의
+> 상태에서 스윕을 영구 무력화**하던 것(§2.4) — 잡 행 0 + 고아 100% 는 스윕이 필요한
+> 유일한 상태인데 그게 정확히 보류 조건이었다. 그 밖에 스윕의 트랜잭션 경계(§2.1),
+> 객체 삭제의 커밋 경계(§2.2), 표현식 인덱스(§3), fail-closed 범위(§2.4).
 >
 > v1 → v2: 4렌즈 검증에서 범위 내 must-fix 11건. 그중 둘은 **GC 이전에 이미 있던 결함**
 > 이라 이 작업에 포함한다 — 멱등 재삽입이 행 id 와 객체 키를 어긋나게 만드는 버그(§2.6)
@@ -53,23 +58,48 @@ GC 가 도는 동안 `claim()`·`_reap()` 이 정지해 큐가 멎고, `_infligh
 **주기 기준시각**은 프로세스 메모리에 둔다.
 
 - TTL 삭제: 기동 후 **첫 사이클에 1회 실행**(초기값 0), 이후 `GC_INTERVAL` 마다.
-- 고아 스윕: 기동 직후엔 돌지 않고 **기동시각 + `SWEEP_INTERVAL`** 부터. 재기동이
-  잦을 때 매번 전체 나열을 도는 것을 막는다.
+- 고아 스윕: 기동 직후엔 돌지 않고 **기동시각 + `ORPHAN_SWEEP_BOOT_DELAY`(기본 600s)**
+  부터, 이후 `SWEEP_INTERVAL` 마다. 부팅 지연에 `SWEEP_INTERVAL`(6h)을 재사용하면
+  **재기동 간격이 그보다 짧은 환경에서 스윕이 한 번도 안 돈다** — 코드/설정 변경마다
+  worker 를 재기동하는 개발 환경이 정확히 그렇고, §0 의 고아가 쌓인 환경이 바로 거기다.
+  안전성은 `$orphan_grace`(6h)와 fail-closed 가 이미 담당하므로 부팅 지연은 짧아도 된다.
 - lock 을 못 잡아 건너뛴 경우에도 **타이머는 리셋**한다(매 사이클 try-lock 두드리기 방지).
 
 worker 가 여럿이어도 하나만 돌게 **advisory lock `(LOCK_CLASSID, LOCK_OBJ_GC=3)`**.
-`pg_try_advisory_xact_lock` 으로 **비차단** 획득 — 못 잡으면 건너뛴다. objid 가 claim(2)
-과 달라 GC 가 claim 을 막지 않는다.
+비차단(`try`)으로 잡고 못 잡으면 건너뛴다. objid 가 claim(2)과 달라 GC 가 claim 을
+막지 않는다.
 
-**GC 트랜잭션도 `SET LOCAL lock_timeout='5s'` + `statement_timeout='30s'`** 를 건다
-(claim 과 동일 관행). 같은 DB 를 edgequake 와 공유하므로 상한 없이 붙잡으면 안 된다.
+**lock 스코프가 둘로 갈린다 — 이게 중요하다.**
+
+| | lock | 트랜잭션 |
+|---|---|---|
+| TTL 삭제 | `pg_try_advisory_xact_lock` | 짧은 단일 트랜잭션(수 ms~수 s) |
+| 고아 스윕 | `pg_try_advisory_lock` + `finally: pg_advisory_unlock` (**세션 스코프**) | **나열·MinIO 삭제는 트랜잭션 밖**. 판정 질의만 짧은 트랜잭션 |
+
+**불변식: 나열 중에는 postgres 트랜잭션을 열어두지 않는다.** xact 스코프로 스윕
+전체를 감싸면 "수 초~수 분" 걸리는 MinIO 전체 나열 동안 트랜잭션이 열려 있어야 하고,
+그러면 edgequake 와 공유하는 DB 에 분 단위 idle-in-transaction + xmin 고정(autovacuum
+정체)이 생긴다. `repo.py` 가 커넥션 풀조차 거부한 근거가 정확히 이 실패 양식이다
+("대기 핸들러가 커넥션을 붙잡고 자면 edgequake 가 커넥션을 못 얻는다"). `statement_timeout`
+은 개별 statement 만 제한하므로 나열 동안의 idle-in-transaction 을 전혀 막지 못한다.
+
+모든 GC 트랜잭션에 `SET LOCAL lock_timeout='5s'` + `statement_timeout='30s'` 를 건다.
 
 ### 2.2 삭제 순서 — 행 먼저, 객체 나중
 
 ```
-1) 행 DELETE ... RETURNING input_ref, payload_ref, result_ref
-2) 반환된 키들을 MinIO 에서 삭제 (실패는 로그만)
+1) 행 DELETE ... RETURNING (짧은 트랜잭션) → COMMIT
+2) 커밋 성공 후에만, 반환된 키들을 MinIO 에서 삭제 (실패는 로그만)
 ```
+
+**커밋 경계가 핵심이다. `RETURNING` 으로 받은 키는 커밋이 성공한 뒤에만 지운다.**
+한 트랜잭션 안에서 DELETE→RETURNING→`blobs.delete` 를 다 하는 게 자연스러운 구현이지만
+(이 코드베이스 관행이 `with conn: ... conn.commit()` 안에서 부수효과를 처리한다),
+커밋이 실패·롤백하면 **행은 살아남고 객체만 사라진다** — 아래에서 배제하겠다고 한 바로
+그 상태다. 커밋 실패 시 키 목록은 버린다(다음 사이클이나 스윕이 회수한다).
+
+따라서 `repo.purge_expired()` 는 **커밋 완료된 키 리스트만 반환**하고, MinIO 삭제는
+`gc.py` 가 트랜잭션 밖에서 수행한다.
 
 행을 먼저 지운다. 반대면 객체가 사라진 행이 남아 `GET /jobs/{id}/result` 가 "결과 있음"
 이라 응답해놓고 복원에 실패한다. 행을 먼저 지우면 그 잡은 404 가 되어 계약이 명확하다
@@ -77,23 +107,31 @@ worker 가 여럿이어도 하나만 돌게 **advisory lock `(LOCK_CLASSID, LOCK
 
 ### 2.3 TTL 삭제 SQL
 
-**`ttl_hours <= 0` 이거나 파싱 실패면 TTL 삭제·고아 스윕을 둘 다 즉시 반환한다**
-(어떤 삭제도 하지 않음). 비상 정지 레버가 전량 삭제 레버가 되면 안 된다 —
-`completed_at < now() - interval '0'` 은 모든 terminal 잡을 즉시 지운다.
+**`ttl <= 0` 이거나 파싱 실패면 TTL 삭제·고아 스윕을 둘 다 즉시 반환한다**(어떤 삭제도
+하지 않음). 비상 정지 레버가 전량 삭제 레버가 되면 안 된다 — `now() - interval '0'` 은
+모든 terminal 잡을 즉시 지운다.
+
+**TTL 은 `_env_int` 를 쓰지 않는다.** 그 헬퍼는 `ValueError` 를 삼키고 기본값을 돌려주므로
+(`repo.py`), `KBP_JOB_TTL_HOURS=off` 같은 오타가 **정지가 아니라 기본 72h 동작**이 된다 —
+이 절이 내세운 안전 규칙이 성립하지 않는다. 전용 파서로 읽고 파싱 실패는 `None` 을
+돌려 GC 전체를 정지시킨다.
+
+내부 단위는 **초**다(`KBP_JOB_TTL_SECONDS` 우선, 없으면 `KBP_JOB_TTL_HOURS × 3600`).
+시간 미만 TTL 을 표현할 수 있어야 §4 의 경계 테스트가 성립한다.
 
 ```sql
 DELETE FROM kbp.jobs j
  WHERE j.id IN (
    SELECT c.id FROM kbp.jobs c
     WHERE c.status IN ('succeeded','failed','canceled')
-      AND coalesce(c.completed_at, c.created_at) < now() - make_interval(hours => %s)
+      AND coalesce(c.completed_at, c.created_at) < now() - make_interval(secs => %s)
       AND NOT EXISTS (                      -- 보호 조건을 LIMIT **안**에 둔다
             SELECT 1 FROM kbp.jobs k
              WHERE k.parent_job_id = c.id
                AND k.status NOT IN ('succeeded','failed','canceled'))
     ORDER BY coalesce(c.completed_at, c.created_at)
     LIMIT %s)
-RETURNING input_ref, payload_ref, result_ref;
+RETURNING id, kind, legacy, completed_at, input_ref, payload_ref, result_ref;
 ```
 
 **`NOT EXISTS` 가 `LIMIT` 서브쿼리 안에 있어야 한다.** 밖에 두면 보호 대상까지 포함해
@@ -107,7 +145,10 @@ RETURNING input_ref, payload_ref, result_ref;
 행은 `<` 비교가 false 라 TTL 대상이 아니고, 행이 있으니 스윕 대상도 아니어서 **영구
 잔류**한다. 현행 전이 경로는 모두 `completed_at` 을 채우지만 스키마에 `NOT NULL`·`CHECK`
 가 없어 불변식이 코드 관행에만 의존한다. `created_at` 은 `NOT NULL DEFAULT now()` 다.
-위반 행을 회수할 때 WARN 을 남긴다.
+위반 행을 회수할 때 WARN 을 남긴다 — 그래서 `RETURNING` 에 `id`·`kind`·`legacy`·
+`completed_at` 을 함께 넣는다. 키만 돌려받으면 "어떤 행이 `completed_at IS NULL` 이었나"
+를 알 수 없어 약속한 로그가 성립하지 않는다(§7 이 지표를 비범위로 뒀으므로 로그가 유일한
+관측 수단이다). 같은 맥락으로 "비종료 자식 보호로 건너뛴 건수" 도 로그에 남긴다.
 
 `parent_job_id` 는 **전용 컬럼**이라 SQL 로 보인다(Phase 1 에서 payload jsonb 대신
 컬럼으로 뺀 이유가 이것이다).
@@ -126,8 +167,12 @@ def iter_job_objects() -> Iterator[tuple[uuid.UUID | None, str, datetime | None]
 - `list_objects(bucket, prefix=f"{prefix}/", recursive=True)` **고정**. `recursive=False`
   면 common-prefix 유사객체가 나오고 그 `last_modified` 는 `None` 이다.
 - 키가 `^{prefix}/{uuid}/...` 로 파싱되지 않으면 `job_id=None` 을 낸다.
-- `KBP_JOB_MINIO_PREFIX` 가 빈 문자열이면 **기동 시 거부**한다(버킷 전체가 스윕 대상이
-  된다). 프리픽스에 슬래시가 들어도 `blobs` 안에서 일관되게 처리한다.
+- `KBP_JOB_MINIO_PREFIX` 가 빈 문자열이면 **기본값으로 되돌린다**(`from_env` 를
+  `os.environ.get(...) or DEFAULT_PREFIX` 로 — 빈 문자열 = 미설정 = 기본값). 빈 프리픽스가
+  위험한 이유는 "버킷 전체가 스윕 대상이 되어서"가 **아니다**(나열이 `prefix=f"{prefix}/"`
+  고정이라 `/` 로 시작하는 키만 나온다) — `key()` 가 `/{job_id}/name` 같은 선행 슬래시
+  키를 만들어 **키 레이아웃·파싱 계약이 깨지는 것**이 실제 결함이다.
+- 프리픽스에 슬래시가 들어도 `blobs` 안에서 일관되게 처리한다.
 
 **삭제 조건 — 아래를 모두 만족할 때만 지운다.**
 
@@ -143,18 +188,43 @@ def iter_job_objects() -> Iterator[tuple[uuid.UUID | None, str, datetime | None]
 **`$orphan_grace`(기본 6h)** 는 제출 창을 덮는다 — `submit_job` 은 객체를 먼저 올리고
 행을 나중에 INSERT 하므로 그 사이에 스윕이 돌면 살아있는 잡의 입력을 지운다.
 
-**fail-closed.** 존재 확인이 실패하면 **그 사이클 전체를 중단하고 아무것도 지우지
-않는다**. `job_ids_present()` 반환형을 `set[UUID] | None` 으로 두어 "빈 결과"와 "조회
-실패"를 코드상 구분한다. 이 코드베이스의 지배 스타일이 예외를 삼키는 것이라
-(`blobs.delete` 는 WARN, `worker._safe` 는 조용히 return) 자연스러운 구현이 fail-open 이
-되기 쉽다 — postgres 순간 장애만으로 살아있는 객체가 전량 삭제된다.
+**fail-closed — 판정 입력 전부에 적용한다.** 이 사이클의 **어느 하나라도** 실패하면
+삭제 0건으로 사이클을 종료한다: 나열(`iter_job_objects`), `job_ids_present()`,
+`refs_in_use()`. 둘 다 반환형을 `set[...] | None` 으로 두어 **"빈 결과"와 "조회 실패"를
+코드상 구분**한다.
 
-**sanity 가드.** 후보 대비 고아 비율이 `KBP_JOB_ORPHAN_MAX_RATIO`(기본 0.9)를 넘거나
-`kbp.jobs` 행 수가 0 이면 WARN 만 남기고 **삭제를 보류**한다.
+`job_ids_present()` 하나에만 걸면 부족하다 — 이 코드베이스의 지배 스타일이 예외를
+삼키는 것이라(`blobs.delete` 는 WARN, `worker._safe` 는 조용히 return) `refs_in_use()`
+가 빈 set 을 돌려주고 4번 방어가 무력화되는 구현이 자연스럽게 나온다. postgres 순간
+장애만으로 살아있는 객체가 전량 삭제된다.
+
+**sanity 가드 — 비율의 분모가 핵심이다.**
+
+v2 는 "후보(= grace 를 넘긴 객체) 대비 고아 비율 > 0.9 면 보류" 였는데, **이러면 §0 의
+상태에서 스윕이 영원히 안 돈다.** TTL GC 가 행과 객체를 함께 지우므로 grace 를 넘겨
+남은 객체는 사실상 고아뿐이다 → 비율이 구조적으로 1.0 에 붙는다. §0 의 실측(잡 행 0 +
+오래된 `input.bin` 14개)을 대입하면 14/14 = 1.0 > 0.9 로 보류다. 스윕이 필요한 유일한
+상태가 정확히 스윕이 안 도는 상태였다.
+
+고쳐서:
+
+- **분모를 grace 필터 이전의 "파싱 성공한 전체 나열 객체 수"** 로 둔다.
+- **절대 하한** `KBP_JOB_ORPHAN_MIN_FOR_RATIO`(기본 100) — 고아 후보가 그 미만이면 비율
+  가드를 **적용하지 않는다**. 소규모에서 비율은 의미가 없다.
+- **`kbp.jobs` 행 수 0 은 보류 사유에서 뺀다.** 빈 테이블은 정상 상태이고(유휴 시스템 +
+  TTL GC 가 다 회수한 뒤가 그렇다), "조회 실패"는 fail-closed 가 `None` 으로 이미 구분한다.
 
 **나열은 끝까지, 삭제만 상한.** `KBP_JOB_GC_BATCH` 는 **삭제 수**만 제한한다. 나열까지
 자르면 키 사전순 + UUIDv4 특성상 앞쪽이 살아있는 잡이면 고아가 영영 조회 범위 밖이라
-스윕이 수렴하지 않는다 — 객체가 쌓이는 상황(§0 의 동기)에서 기능이 무력화된다.
+스윕이 수렴하지 않는다.
+
+**판정 질의는 청크로 나눈다.** `job_ids_present()`·`refs_in_use()` 를 고정 크기
+(`KBP_JOB_GC_QUERY_CHUNK`, 기본 1000키)로 나눠 여러 statement 로 수행하고, 나열도 청크
+단위로 스트리밍해 상주 메모리를 청크 크기로 제한한다. `input_ref`/`payload_ref`/
+`result_ref` 에는 인덱스가 없어 대형 배열 3중 OR 는 seq scan 3회이고,
+`statement_timeout='30s'` 를 넘기면 fail-closed 규칙에 따라 사이클 전체가 중단되어
+**객체가 많이 쌓인 상태 = 기능이 필요한 상태**에서 스윕이 영영 수렴하지 않는다.
+청크 하나라도 실패하면 fail-closed. 삭제 누계가 배치 상한에 닿으면 그 사이클을 끝낸다.
 
 ### 2.5 설정
 
@@ -164,8 +234,13 @@ def iter_job_objects() -> Iterator[tuple[uuid.UUID | None, str, datetime | None]
 | `KBP_JOB_GC_INTERVAL_SECONDS` | 3600 | TTL 삭제 주기 |
 | `KBP_JOB_ORPHAN_SWEEP_INTERVAL_SECONDS` | 21600 | 고아 스윕 주기(기동 후 이 시간 뒤 첫 실행) |
 | `KBP_JOB_ORPHAN_GRACE_SECONDS` | 21600 | 이보다 최근 객체는 스윕 제외 |
-| `KBP_JOB_ORPHAN_MAX_RATIO` | 0.9 | 고아 비율이 이보다 크면 삭제 보류(sanity) |
+| `KBP_JOB_ORPHAN_SWEEP_BOOT_DELAY_SECONDS` | 600 | 기동 후 첫 스윕까지 지연 |
+| `KBP_JOB_ORPHAN_MAX_RATIO` | 0.9 | 고아 비율(분모=전체 나열)이 이보다 크면 보류 |
+| `KBP_JOB_ORPHAN_MIN_FOR_RATIO` | 100 | 고아가 이 미만이면 비율 가드 미적용 |
 | `KBP_JOB_GC_BATCH` | 500 | 한 사이클 최대 **삭제** 수(나열은 제한 안 함) |
+| `KBP_JOB_GC_QUERY_CHUNK` | 1000 | 판정 질의 한 번에 넣는 키 수 |
+
+`KBP_JOB_TTL_SECONDS` 를 주면 `KBP_JOB_TTL_HOURS` 보다 우선한다(테스트·미세조정용).
 
 ### 2.6 선행 결함 — 멱등 재삽입이 행 id 와 객체 키를 어긋나게 한다
 
@@ -181,13 +256,13 @@ GC 이전부터 있던 버그다(키와 행이 어긋나는 것 자체가 잘못
 
 | 파일 | 변경 |
 |---|---|
-| `service/jobs/schema.py` | `LOCK_OBJ_GC = 3` 추가. `CREATE INDEX IF NOT EXISTS jobs_gc_idx ON kbp.jobs (completed_at) WHERE status IN ('succeeded','failed','canceled')` |
+| `service/jobs/schema.py` | `LOCK_OBJ_GC = 3` 추가. **표현식 인덱스** `CREATE INDEX IF NOT EXISTS jobs_gc_idx ON kbp.jobs ((coalesce(completed_at, created_at))) WHERE status IN ('succeeded','failed','canceled')` — §2.3 의 술어·정렬이 `coalesce(...)` 식이라 단일 컬럼 인덱스는 **매칭되지 않는다**(seq scan + sort → `statement_timeout` 에 걸려 GC 가 영구 0건이 된다). 둘 다 `timestamptz`, `coalesce` 는 IMMUTABLE 이라 식 인덱스가 가능하다 |
 | `service/jobs/repo.py` | `purge_expired()`(§2.3), `job_ids_present()`(`set|None`), `refs_in_use()`(§2.4-4), **§2.6 버그 수정** |
 | `service/jobs/blobs.py` | `iter_job_objects()`(§2.4 계약), 빈 프리픽스 거부 |
 | `service/jobs/gc.py` (신규) | `run_ttl_gc()` · `run_orphan_sweep()` — 조율·판정 |
 | `service/worker.py` | `kbp-gc` 데몬 스레드 + 주기 제어 |
-| `service/jobs/memory.py` | 더블 보강(§5) |
-| `docker-compose.yml` · `docker-compose.airgap.yml` | **`x-facade-env` 앵커에 `KBP_JOB_*` 추가** |
+| `service/jobs/memory.py` | 더블 보강(§5) — `purge_expired()`·`job_ids_present()`(실패 스위치)·`refs_in_use()`·`created_at`/`completed_at` 실기록 |
+| `docker-compose.yml` · `docker-compose.airgap.yml` | **`x-facade-env` 앵커에 `KBP_JOB_*` 추가.** 반드시 `${VAR:-<기본값>}` 형식으로 — 앵커의 기존 `${KBP_OPENAI_API_KEY}` 처럼 기본값 없이 쓰면 미정의 시 **빈 문자열**이 주입되어 코드 기본값이 아니라 빈 값으로 동작한다(D12 에서 `KBP_FACADE_KEY` 로 이미 겪은 함정) |
 | `.env.airgap.example` · `scripts/facade.env` | 같은 키 |
 
 **배포 통로가 없었다.** `KBP_JOB_*` 은 compose·facade.env 에 **0개**다(실측). 컨테이너는
@@ -228,8 +303,14 @@ GC 이전부터 있던 버그다(키와 행이 어긋나는 것 자체가 잘못
 - `InMemoryBlobStore.store_json()` 이 **항상 인라인** → `*_ref` 가 영원히 `None`
 - `InMemoryBlobStore.key()` 가 `mem/{job_id}/{name}` → **프로덕션 키 레이아웃과 다르다**
 
-보강: `completed_at` 실제 기록 + 조작 경로, 프로덕션과 동일한 `{prefix}/{job_id}/{name}`
-키, 오프로딩 강제 스위치, `iter_job_objects()`.
+보강:
+
+- `created_at`·`completed_at` **실제 기록** + 조작 경로(현재 둘 다 항상 `None` 이라
+  §2.3 의 coalesce 폴백 경로를 더블에서 태울 수 없다)
+- 프로덕션과 동일한 `{prefix}/{job_id}/{name}` 키(프리픽스는 `blobs` 의 기본값을 읽는다)
+- 오프로딩 강제 스위치, `iter_job_objects()`
+- **`purge_expired()`·`job_ids_present()`(`set|None` + 실패 시뮬레이션 스위치)·
+  `refs_in_use()`** — 이게 없으면 §4 의 스윕 판정 테스트가 더블 위에서 성립하지 않는다
 
 **키 파싱·TTL 경계·head-of-line 은 `requires_pg` 실 DB 테스트로 못박는다** — 더블로
 검증하면 실제 SQL·키 형식을 검증하지 못한다.

@@ -266,3 +266,66 @@ def _wait(pred, timeout=2.0):
             return
         time.sleep(0.01)
     raise AssertionError("condition not met in time")
+
+
+# ── GC 스레드 (D2) ─────────────────────────────────────────────────────────
+
+def test_gc_runs_in_its_own_thread_and_does_not_block_claims(monkeypatch):
+    """GC 가 오래 걸려도 claim 이 계속 돈다.
+
+    틱 루프에 GC 를 넣으면 그동안 claim·reap 이 멎어 큐가 정지하고 `_inflight` 가
+    안 비워져 free 가 실제보다 작게 계산된다.
+    """
+    monkeypatch.setenv("KBP_JOB_GC_INTERVAL_SECONDS", "1")
+    monkeypatch.setenv("KBP_JOB_ORPHAN_SWEEP_BOOT_DELAY_SECONDS", "99999")
+    slow = threading.Event()
+    from service.jobs import gc as gc_mod
+    monkeypatch.setattr(gc_mod, "run_ttl_gc", lambda *a, **k: slow.wait(timeout=10))
+
+    repo = FakeRepo(to_claim=_claim(3))
+    w = _worker(repo, FakeRunner(), capacity=3)
+    gc = threading.Thread(target=w._gc_loop, daemon=True); gc.start()
+    try:
+        time.sleep(0.2)                 # GC 가 slow 안에서 붙잡혀 있다
+        w._tick()                       # 틱은 영향받지 않아야 한다
+        assert len(w._inflight) == 3, "GC 가 claim 을 막았다"
+    finally:
+        slow.set(); w._shutdown.set(); gc.join(timeout=2)
+
+
+def test_gc_thread_survives_exceptions(monkeypatch):
+    """GC 가 매번 던져도 스레드가 살아 다음 사이클을 돈다."""
+    monkeypatch.setenv("KBP_JOB_GC_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("KBP_JOB_ORPHAN_SWEEP_BOOT_DELAY_SECONDS", "99999")
+    calls = []
+    from service.jobs import gc as gc_mod
+
+    def boom(*a, **k):
+        calls.append(1)
+        raise RuntimeError("minio down")
+
+    monkeypatch.setattr(gc_mod, "run_ttl_gc", boom)
+    w = _worker(FakeRepo(), FakeRunner())
+    t = threading.Thread(target=w._gc_loop, daemon=True); t.start()
+    try:
+        _wait(lambda: len(calls) >= 2, timeout=3)
+        assert t.is_alive()
+    finally:
+        w._shutdown.set(); t.join(timeout=2)
+
+
+def test_orphan_sweep_waits_for_boot_delay(monkeypatch):
+    """기동 직후엔 스윕이 돌지 않는다(TTL 은 돈다)."""
+    monkeypatch.setenv("KBP_JOB_GC_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("KBP_JOB_ORPHAN_SWEEP_BOOT_DELAY_SECONDS", "99999")
+    ttl, sweep = [], []
+    from service.jobs import gc as gc_mod
+    monkeypatch.setattr(gc_mod, "run_ttl_gc", lambda *a, **k: ttl.append(1))
+    monkeypatch.setattr(gc_mod, "run_orphan_sweep", lambda *a, **k: sweep.append(1))
+    w = _worker(FakeRepo(), FakeRunner())
+    t = threading.Thread(target=w._gc_loop, daemon=True); t.start()
+    try:
+        _wait(lambda: ttl, timeout=3)
+        assert sweep == [], "부팅 직후 스윕이 돌았다"
+    finally:
+        w._shutdown.set(); t.join(timeout=2)
