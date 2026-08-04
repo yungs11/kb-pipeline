@@ -203,7 +203,15 @@ curl -s http://localhost:19000/jobs/workers   # {"online":true,"capacity":4,...}
 런처가 쓰는 정답은 `pgrep -f -- '-m service\.worker'` 이고, PID 파일과 패턴 매치를
 **둘 다** 모아 죽인다(고아 정리).
 
-**dev 주의 — edgequake 런처가 큐를 지운다.** `service/scripts/start_dedicated_edgequake.sh`
-는 postgres 컨테이너를 **볼륨 없이** 재생성하므로 `kbp` 스키마가 통째로 사라진다. repo 가
-`42P01` 을 만나면 스키마를 다시 만들지만, 진행 중이던 잡 행은 복구되지 않는다. 큐를
-살려야 하면 바이너리-온리 재기동을 쓴다.
+**잡 큐가 사는 곳** — `localhost:5433` → DB `edgequake` → 스키마 `kbp`(`jobs`,
+`job_workers`). **kb-backend 는 같은 서버의 다른 DB**(`kb_orchestrator`)라 서로 영향이
+없다. 서버만 공유하므로 커넥션 예산은 edgequake 와 나눠 쓴다.
+
+| postgres 관리 주체 | 컨테이너 | 볼륨 | 큐 수명 |
+|---|---|---|---|
+| `docker compose` (현행) | `kbp-postgres-1` | named `kbp_eq_pg_data` | 재기동해도 **보존** |
+| `start_dedicated_edgequake.sh` | `eq-pg-kbp` | 없음 | 재기동 시 **소멸** |
+
+compose 가 5433 을 잡고 있는 현행에서 런처를 돌리면 포트 충돌로 실패한다(데이터는 안
+지워진다). 런처-관리 컨테이너를 쓰는 환경에서만 재기동이 곧 큐 소멸이다. 어느 쪽이든
+repo 가 `42P01` 을 만나면 스키마를 다시 만들지만 **진행 중이던 잡 행은 복구되지 않는다**.

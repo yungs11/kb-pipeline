@@ -141,10 +141,12 @@ def _apply(dsn: str) -> None:
 
 #: 스키마가 통째로 사라졌을 때 나오는 SQLSTATE.
 #:
-#: dev 의 ``service/scripts/start_dedicated_edgequake.sh`` 는 postgres 컨테이너를
-#: **볼륨 없이** 재생성하므로(:8-11) edgequake 를 한 번 재기동하면 ``kbp`` 스키마가
-#: 행이 아니라 **정의째** 사라진다. 이미 떠 있는 facade·worker 는 lifespan 을 다시 타지
-#: 않아 영구히 깨진 상태로 남는다 — 그래서 런타임에도 복구 경로가 필요하다.
+#: ``kbp`` 스키마는 edgequake 가 쓰는 DB 안에 산다(``:5433``, DB ``edgequake``). 그 DB 를
+#: **볼륨 없이** 재생성하는 경로가 있어서(``start_dedicated_edgequake.sh`` 가 띄우는
+#: ``eq-pg-kbp`` 컨테이너 — compose 로 관리하는 현행에서는 포트 충돌로 실패하지만
+#: 런처-관리 환경에서는 실제로 소멸한다) 스키마가 행이 아니라 **정의째** 사라질 수 있다.
+#: 그때 이미 떠 있는 facade·worker 는 lifespan 을 다시 타지 않아 영구히 깨진 상태로
+#: 남으므로, 런타임에도 복구 경로가 필요하다.
 MISSING_SCHEMA_SQLSTATES = frozenset({
     "42P01",  # undefined_table
     "3F000",  # invalid_schema_name

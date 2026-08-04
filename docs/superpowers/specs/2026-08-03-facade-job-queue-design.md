@@ -183,9 +183,9 @@ facade-worker 가 동시에 부팅한다(재기동마다 5개 이상이 같은 D
   `restart: unless-stopped` 가 자가치유한다.
 - **런타임 복구**: repo 의 제출·claim 경로가 `42P01`(undefined_table) 또는
   `3F000`(invalid_schema_name) 을 만나면 `ensure_schema()` 를 1회 재실행하고 재시도한다.
-  dev 에서 `start_dedicated_edgequake.sh` 가 postgres 를 **볼륨 없이 재생성**하면
-  (`:8-11`) 행이 아니라 **스키마 자체가 사라지는데**, 이미 떠 있는 facade·worker 는
-  lifespan 을 다시 타지 않아 영구히 깨진 상태로 남는다.
+  postgres 가 **볼륨 없이 재생성**되면 행이 아니라 **스키마 자체가 사라지는데**, 이미
+  떠 있는 facade·worker 는 lifespan 을 다시 타지 않아 영구히 깨진 상태로 남는다.
+  (어느 경로에서 그런 일이 생기는지는 §7.3 표.)
 
 ### 2.2 payload·result 오프로딩
 
@@ -900,11 +900,23 @@ worker 는 포트가 없다. `pgrep -f '[p]ython -m service.worker'` + PID 파�
 `run-facade.sh`·`run-facade-worker.sh` 양쪽에 `: "${MINIO_ENDPOINT:?...}"` fail-fast
 가드를 넣는다. `.claude/skills/restart-kbp-stack/SKILL.md` 에 필수 서비스로 등록한다.
 
-**dev 경고 — edgequake 런처가 큐를 소거한다.** `service/scripts/start_dedicated_edgequake.sh:8-9`
-는 `docker rm -f eq-pg-kbp` 후 볼륨 없이 재생성한다. `KBP_PG_DSN` 이 바로 그 DB 라
-edgequake 를 한 번 재기동하면 `kbp.jobs` 전체가 소멸한다. §4.4 의 "잡 행이 조회되지
-않으면 즉시 5xx" 규칙이 이 경우 대기 중인 레거시 요청을 3600s 매달리지 않게 한다.
-런처 문서와 restart 스킬에 "큐가 살아 있어야 하면 바이너리-온리 재기동" 을 적는다.
+**dev 주의 — 큐가 사는 곳과 그 수명.**
+
+잡 큐(`kbp` 스키마)는 **edgequake 가 쓰는 바로 그 DB** 안에 있다(`:5433`, DB `edgequake`).
+kb-backend 는 같은 서버의 **다른 DB**(`kb_orchestrator`)라 서로 영향이 없다 — 서버만
+공유한다(그래서 커넥션 예산을 나눠 쓴다, §2.3).
+
+| postgres 관리 주체 | 컨테이너 | 볼륨 | 큐 수명 |
+|---|---|---|---|
+| `docker compose` (현행) | `kbp-postgres-1` | named `kbp_eq_pg_data` | **재기동해도 보존** |
+| `start_dedicated_edgequake.sh` | `eq-pg-kbp` | **없음**(`-v` 미지정) | 재기동 시 소멸 |
+
+현행처럼 compose 가 5433 을 점유한 상태에서 런처를 돌리면 `docker rm -f eq-pg-kbp` 가
+아무것도 못 지우고 `docker run -p 5433:5432` 가 **포트 충돌로 실패**한다 — 데이터는
+지워지지 않는다. 런처-관리 컨테이너를 쓰는 환경에서만 재기동이 곧 큐 소멸이다.
+
+어느 쪽이든 §2.1 의 `42P01` 복구(스키마 재생성)와 §4.4 의 "잡 행이 조회되지 않으면 즉시
+5xx" 가 방어한다 — 다만 진행 중이던 잡 **행**은 복구되지 않는다.
 
 ### 7.4 gunicorn 워커 수
 
