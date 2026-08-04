@@ -43,7 +43,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from service.jobs import admission, schema
+from service.jobs import admission
 
 log = logging.getLogger("kb_pipeline.service.jobs.repo")
 
@@ -129,21 +129,6 @@ class JobRepo:
             self._dsn, connect_timeout=self._connect_timeout, row_factory=dict_row
         )
 
-    def _retry_missing_schema(self, fn, *args, **kwargs):
-        """``42P01``/``3F000`` 이면 스키마를 다시 만들고 한 번 재시도한다.
-
-        dev 의 edgequake 런처가 postgres 를 볼륨 없이 재생성하면 스키마가 정의째
-        사라지는데, 이미 떠 있는 프로세스는 lifespan 을 다시 타지 않아 영구히 깨진다.
-        """
-        try:
-            return fn(*args, **kwargs)
-        except psycopg.Error as exc:
-            if not schema.is_missing_schema(exc):
-                raise
-            log.warning("kbp schema missing (%s); recreating and retrying once", exc)
-            schema.ensure_schema(self._dsn)
-            return fn(*args, **kwargs)
-
     # ── 제출 ───────────────────────────────────────────────────────────────
 
     def submit(
@@ -211,7 +196,7 @@ class JobRepo:
                 conn.commit()
             return job_id
 
-        return self._retry_missing_schema(_run)
+        return _run()
 
     def get(self, job_id: uuid.UUID | str) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -329,7 +314,7 @@ class JobRepo:
                 conn.commit()
                 return claimed
 
-        return self._retry_missing_schema(_run)
+        return _run()
 
     @staticmethod
     def _recover(cur, kinds, attempts, runtimes, stale) -> None:

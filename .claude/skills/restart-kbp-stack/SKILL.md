@@ -207,11 +207,11 @@ curl -s http://localhost:19000/jobs/workers   # {"online":true,"capacity":4,...}
 `job_workers`). **kb-backend 는 같은 서버의 다른 DB**(`kb_orchestrator`)라 서로 영향이
 없다. 서버만 공유하므로 커넥션 예산은 edgequake 와 나눠 쓴다.
 
-| postgres 관리 주체 | 컨테이너 | 볼륨 | 큐 수명 |
-|---|---|---|---|
-| `docker compose` (현행) | `kbp-postgres-1` | named `kbp_eq_pg_data` | 재기동해도 **보존** |
-| `start_dedicated_edgequake.sh` | `eq-pg-kbp` | 없음 | 재기동 시 **소멸** |
+**postgres 는 `docker compose` 가 관리한다는 전제다** — 컨테이너 `kbp-postgres-1`,
+named volume `kbp_eq_pg_data`. 컨테이너를 지워도 볼륨에 남으므로 **큐는 재기동을 견딘다**.
 
-compose 가 5433 을 잡고 있는 현행에서 런처를 돌리면 포트 충돌로 실패한다(데이터는 안
-지워진다). 런처-관리 컨테이너를 쓰는 환경에서만 재기동이 곧 큐 소멸이다. 어느 쪽이든
-repo 가 `42P01` 을 만나면 스키마를 다시 만들지만 **진행 중이던 잡 행은 복구되지 않는다**.
+`start_dedicated_edgequake.sh` 는 `eq-pg-kbp` 를 볼륨 없이 띄우는 대안 경로라 그쪽에서는
+재기동이 곧 큐 소멸이지만, 그 런처는 **"compose 미사용 시에만"** 쓰는 것이고 compose 가
+5433 을 잡고 있으면 포트 충돌로 실패한다. 잡 큐는 **compose 전제로만 지원한다**.
+
+진행 중이던 잡 **행**은 어느 경우에도 복구되지 않는다.

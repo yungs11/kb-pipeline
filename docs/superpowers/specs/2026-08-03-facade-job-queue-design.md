@@ -181,11 +181,12 @@ facade-worker 가 동시에 부팅한다(재기동마다 5개 이상이 같은 D
   podman 은 이 조건을 무시하고(`docs/airgap-deploy.md:126`), 이 postgres 이미지는 init
   중 서버를 재시작해 `pg_isready` 가 과도기 서버에 붙는다. 끝내 실패하면
   `restart: unless-stopped` 가 자가치유한다.
-- **런타임 복구**: repo 의 제출·claim 경로가 `42P01`(undefined_table) 또는
-  `3F000`(invalid_schema_name) 을 만나면 `ensure_schema()` 를 1회 재실행하고 재시도한다.
-  postgres 가 **볼륨 없이 재생성**되면 행이 아니라 **스키마 자체가 사라지는데**, 이미
-  떠 있는 facade·worker 는 lifespan 을 다시 타지 않아 영구히 깨진 상태로 남는다.
-  (어느 경로에서 그런 일이 생기는지는 §7.3 표.)
+- **런타임 스키마 복구는 하지 않는다.** postgres 를 볼륨 없이 재생성하면 스키마가
+  정의째 사라지고, 이미 떠 있는 facade·worker 는 lifespan 을 다시 타지 않아 영구히
+  깨진 상태로 남는다 — 그래서 `42P01` 을 만나면 `ensure_schema()` 를 다시 부르는 경로를
+  넣었었다. **전제가 바뀌어 뺐다**(§7.3): 이 스택의 postgres 는 compose 가 named
+  volume 으로 관리하므로 그런 소멸이 일어나지 않는다. 넣어두면 검증하지 않은 경로가
+  코드에 남을 뿐이다.
 
 ### 2.2 payload·result 오프로딩
 
@@ -906,17 +907,18 @@ worker 는 포트가 없다. `pgrep -f '[p]ython -m service.worker'` + PID 파�
 kb-backend 는 같은 서버의 **다른 DB**(`kb_orchestrator`)라 서로 영향이 없다 — 서버만
 공유한다(그래서 커넥션 예산을 나눠 쓴다, §2.3).
 
-| postgres 관리 주체 | 컨테이너 | 볼륨 | 큐 수명 |
-|---|---|---|---|
-| `docker compose` (현행) | `kbp-postgres-1` | named `kbp_eq_pg_data` | **재기동해도 보존** |
-| `start_dedicated_edgequake.sh` | `eq-pg-kbp` | **없음**(`-v` 미지정) | 재기동 시 소멸 |
+**전제: postgres 는 `docker compose` 가 관리한다**(컨테이너 `kbp-postgres-1`, named
+volume `kbp_eq_pg_data`). 컨테이너를 지워도 볼륨에 데이터가 남으므로 **큐는 재기동을
+견딘다**.
 
-현행처럼 compose 가 5433 을 점유한 상태에서 런처를 돌리면 `docker rm -f eq-pg-kbp` 가
-아무것도 못 지우고 `docker run -p 5433:5432` 가 **포트 충돌로 실패**한다 — 데이터는
-지워지지 않는다. 런처-관리 컨테이너를 쓰는 환경에서만 재기동이 곧 큐 소멸이다.
+`service/scripts/start_dedicated_edgequake.sh` 는 `eq-pg-kbp` 를 **볼륨 없이** 띄우는
+대안 경로이고, 그쪽에서는 edgequake 재기동이 곧 큐 소멸이다. 다만 그 런처는 문서상
+**"compose 미사용 시에만"** 이고(`docs/HANDOVER-kb-pipeline-provider.md:154`), compose 가
+5433 을 점유한 상태에서는 포트 충돌로 실패한다. **이 설계는 compose 전제로만 지원한다** —
+런처-관리 postgres 는 비범위다(그래서 §2.1 의 런타임 스키마 복구 경로를 뺐다).
 
-어느 쪽이든 §2.1 의 `42P01` 복구(스키마 재생성)와 §4.4 의 "잡 행이 조회되지 않으면 즉시
-5xx" 가 방어한다 — 다만 진행 중이던 잡 **행**은 복구되지 않는다.
+잡 **행** 자체는 어느 쪽이든 복구되지 않는다. 진행 중이던 요청은 §4.4 의 "잡 행이
+조회되지 않으면 즉시 5xx" 로 끝난다.
 
 ### 7.4 gunicorn 워커 수
 
