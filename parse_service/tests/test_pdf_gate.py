@@ -4,10 +4,16 @@ from parse_service.parsers.pdf import gate
 from parse_service.parsers.pdf.triage import PageSignals, Bucket
 
 
-def _sig(bucket):
-    s = PageSignals(page_number=1, width=600, height=800)
+def _sig(bucket, page_number: int = 1, *, is_diagram: bool = False):
+    s = PageSignals(page_number=page_number, width=600, height=800)
     s.bucket = bucket
+    s.is_diagram = is_diagram
     return s
+
+
+def _sigs(*buckets):
+    """페이지 번호를 1,2,3… 으로 자동 부여 — 페이지수준 필드 검증용."""
+    return [_sig(b, i) for i, b in enumerate(buckets, start=1)]
 
 
 T, L, O, S = Bucket.TEXT_ONLY, Bucket.LLM_NEEDED, Bucket.OCR_NEEDED, Bucket.SKIP
@@ -20,11 +26,13 @@ T, L, O, S = Bucket.TEXT_ONLY, Bucket.LLM_NEEDED, Bucket.OCR_NEEDED, Bucket.SKIP
     ([S], "odl"),
     ([], "odl"),
     # 차트/그림 페이지 비율 ≥0.5 → VL 레인 (스캔 여부 무관 — 2026-07-15 결정)
-    ([L, L], "vl"),
-    ([T, L], "vl"),                         # 1/2 = 0.5 ≥ 0.5
-    ([L], "vl"),
-    ([O, L], "vl"),                         # 스캔+차트 혼합도 비율 충족 시 VL
-    ([O, L, L], "vl"),                      # 2/3 ≥ 0.5
+    # `vl` 레인 삭제(2026-08-04) — 차트/그림 비율과 무관하게 스캔 유무로만 갈린다.
+    # 그림 많은 문서도 이제 페이지마다 odl 로 가서 표가 ODL <table> 로 보존된다.
+    ([L, L], "odl"),
+    ([T, L], "odl"),
+    ([L], "odl"),
+    ([O, L], "paddle_gw"),                  # 스캔이 있으면 paddle_gw
+    ([O, L, L], "paddle_gw"),
     # 스캔 페이지 존재(OCR_NEEDED, 차트비율 미달) → paddle_gw(게이트웨이)
     ([O, O], "paddle_gw"),
     ([O, S], "paddle_gw"),
@@ -84,3 +92,59 @@ def test_paddle_gw_route_carries_diagram_pages(monkeypatch):
     d = gate.decide_route(b"%PDF")
     assert d.lane == "paddle_gw"      # 스캔 존재, 차트 1/7 < 0.5
     assert d.diagram_pages == (4,)
+
+
+# ── Plan B-1 (2026-08-04): 페이지수준 필드 — **순수 추가**(lane 판정 무변경) ────────────
+def test_page_lanes_maps_each_bucket(monkeypatch):
+    """SKIP→skip / OCR_NEEDED→paddle_gw / TEXT_ONLY·LLM_NEEDED→odl, 페이지 번호 보존."""
+    monkeypatch.setattr(gate, "triage_document",
+                        lambda b: _sigs(T, S, O, L))
+    d = gate.decide_route(b"%PDF")
+    assert d.page_lanes == ((1, "odl"), (2, "skip"), (3, "paddle_gw"), (4, "odl"))
+    assert d.total_pages == 4
+
+
+def test_narrate_pages_is_diagram_not_llm_needed(monkeypatch):
+    """narrate_pages 는 is_diagram 페이지다 — LLM_NEEDED 상위집합이 아니다.
+
+    LLM_NEEDED 는 두 갈래다: ① is_diagram(순서도) ② 혼합 콘텐츠(텍스트+큰 이미지).
+    ②까지 넣으면 순서도가 아닌 페이지에 DIAGRAM 서술 프롬프트가 붙는 동작 확장이 된다.
+    """
+    # LLM 비율을 0.5 미만으로 둬 odl 레인을 태운다(vl 레인은 diagram_pages 를 비우므로 별도 테스트).
+    sigs = [_sig(L, 1, is_diagram=True), _sig(L, 2), _sig(T, 3), _sig(T, 4), _sig(T, 5)]
+    monkeypatch.setattr(gate, "triage_document", lambda b: sigs)   # p2 = 혼합 콘텐츠
+    d = gate.decide_route(b"%PDF")
+    assert d.lane == "odl"
+    assert d.narrate_pages == (1,), "혼합 콘텐츠(p2)는 서술 대상이 아니다"
+    assert d.narrate_pages == d.diagram_pages, "odl 레인에서는 현행 diagram_pages 와 같다"
+
+
+def test_page_level_fields_do_not_change_lane(monkeypatch):
+    """B-1 은 순수 추가 — 기존 lane/diagram_pages/ocr_pages 판정이 그대로여야 한다."""
+    sigs = [_sig(O, 1), _sig(T, 2), _sig(L, 3, is_diagram=True)]
+    monkeypatch.setattr(gate, "triage_document", lambda b: sigs)
+    d = gate.decide_route(b"%PDF")
+    assert d.lane == "paddle_gw"          # n_ocr > 0 (LLM 비율 1/3 < 0.5)
+    assert d.diagram_pages == (3,) and d.ocr_pages == (1,)
+
+
+def test_chart_heavy_document_goes_to_odl_not_vl(monkeypatch):
+    """차트/그림 비율이 높아도 스캔이 없으면 odl 이다(`vl` 레인 삭제, B-5).
+
+    이전에는 `n_llm/total >= 0.5` 면 문서 전체가 VL 로 갔고, 그 경로에서 KIS 같은 표 문서가
+    표 테두리 curve 를 순서도로 오탐당해 통째로 재전사되며 표가 깨졌다.
+    """
+    monkeypatch.setattr(gate, "triage_document",
+                        lambda b: [_sig(L, 1, is_diagram=True), _sig(L, 2, is_diagram=True)])
+    d = gate.decide_route(b"%PDF")
+    assert d.lane == "odl"
+    assert d.page_lanes == ((1, "odl"), (2, "odl"))
+    assert d.narrate_pages == (1, 2), "서술 보충 대상으로는 잡힌다"
+
+
+def test_gate_failure_returns_empty_page_level_fields(monkeypatch):
+    def boom(b):
+        raise RuntimeError("pymupdf 부재")
+    monkeypatch.setattr(gate, "triage_document", boom)
+    d = gate.decide_route(b"%PDF")
+    assert d.lane == "odl" and d.page_lanes == () and d.total_pages == 0

@@ -1,4 +1,4 @@
-"""PDF 문서수준 라우팅 — triage 버킷 집계로 ODL / VL / Paddle gateway 결정.
+"""PDF **페이지수준** 라우팅 — triage 버킷을 페이지마다 레인으로 매핑한다(Plan B, 2026-08-04).
 
 실측 근거(2026-07-14, 신탁/약관 문서 페이지별 triage 신호 덤프):
 - 디지털 페이지(네이티브 텍스트 있음)는 triage 싼 신호(char_count/image_coverage)로
@@ -6,36 +6,59 @@
 - 스캔 페이지(char=0)는 전부 통짜 래스터라 신호가 동일(image_coverage≈0/1 고정) →
   "텍스트냐 순서도냐"를 **싼 신호로 구분 불가**. 픽셀 안을 봐야(=layout) 알 수 있음.
 
-라우팅(문서수준, 2026-07-15 확정):
-- 차트/그림 페이지 비율 ≥ KBP_GATE_VL_RATIO(0.5) — **스캔 여부 무관** → **vl** 레인
-    (페이지별 in-process VL(qwen) — 차트/순서도 중심 문서는 페이지 전체를 VL 이 읽는 게 최선).
-- 스캔 페이지 존재(OCR_NEEDED, 위 비율 미달) → **paddle_gw**(PaddleOCR-VL 게이트웨이, GPU 전체
-    파이프라인). 실패 시 ODL/in-process VL 폴백.
-- 그 외(디지털 텍스트, 차트 소수) → ODL(기존 빠른 경로; 다이어그램 페이지는 VL 서술 보충).
+페이지별 레인:
+- SKIP                     → skip       (ODL md 있으면 블록화, 없으면 빈 blocks. VL 미호출)
+- OCR_NEEDED               → paddle_gw  (PaddleOCR-VL 게이트웨이 + layout 기반 hybrid)
+- TEXT_ONLY / LLM_NEEDED   → odl        (ODL 이 표·텍스트 보존. 빈약하면 그 페이지만 VL 전사)
 
-paddle_gw 는 KBP_PADDLE_OCR_GATEWAY_URL, vl 은 MODEL_API_URL(in-process VL) 필요.
+**문서수준 `vl` 레인은 삭제**(2026-08-04). 그림 비율(`KBP_GATE_VL_RATIO`)만 보고 문서 전체를
+VL 로 넘기던 경로인데, KIS(11p)처럼 표가 많은 문서가 표 테두리 벡터선(curve=350)을 순서도로
+오탐당해 통째로 VL 재전사되며 표 구조가 깨졌다. 이제 그런 문서는 페이지마다 odl 로 간다.
+
+paddle_gw 는 KBP_PADDLE_OCR_GATEWAY_URL, 페이지 VL 전사는 MODEL_API_URL 필요.
 """
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
 from parse_service.parsers.pdf.triage import triage_document, Bucket
 
-# 차트/그림 페이지(LLM_NEEDED) 비율이 이 이상이면 문서 전체 VL 레인(스캔 여부 무관),
-# 미만이면 스캔유무로 paddle_gw/ODL. 큰 텍스트 문서가 그림 몇 장 때문에 통째로 VL(느림)로
-# 가는 회귀를 막는 가드. 실측: 292p 약관은 LLM 22/285=0.08 → ODL 유지.
-_VL_RATIO = float(os.environ.get("KBP_GATE_VL_RATIO", "0.5"))
-
-
 @dataclass(frozen=True)
 class RouteDecision:
-    lane: str                 # "odl" | "vl" | "paddle_gw"
+    lane: str                 # "odl" | "paddle_gw" — 하위호환 요약값(B-5 는 page_lanes 를 본다)
     # 다이어그램(순서도/차트) 페이지 번호(1-based) — ODL 레인이 페이지 단위 VL 서술 보충에 사용.
     diagram_pages: tuple = ()
+    # 스캔 페이지 번호(1-based, bucket == OCR_NEEDED). paddle_gw 레인의 layout 기반 hybrid 처리
+    # 대상을 **실제 스캔 페이지로 한정**하는 데 쓴다(Plan A §A0, 2026-08-02).
+    #   gate 는 스캔 페이지가 1장만 있어도 문서 전체를 paddle_gw 로 보내므로(아래 ②) pages 에는
+    #   네이티브 텍스트 페이지가 섞인다. hybrid 판정의 면적 임계는 스캔 페이지에서만 실측했기에
+    #   그 대상을 좁히지 않으면 근거 없는 적용이 된다. **lane 판정에는 전혀 관여하지 않는 순수 추가.**
+    ocr_pages: tuple = ()
+    # ── Plan B-1 (2026-08-04): 페이지수준 라우팅용 **순수 추가 필드**. ────────────────
+    # 아직 아무도 소비하지 않는다 — B-5 에서 `_parse_routed` 가 페이지별로 병합할 때 쓴다.
+    # `lane` 판정 로직에는 전혀 관여하지 않으므로 기존 동작이 그대로 유지된다.
+    #   page_lanes    : ((1-based pno, "skip"|"odl"|"paddle_gw"), …)
+    #                   SKIP→skip / OCR_NEEDED→paddle_gw / TEXT_ONLY·LLM_NEEDED→odl.
+    #                   frozen dataclass 라 dict 대신 tuple — 소비 측에서 dict(...) 로 변환한다.
+    #   narrate_pages : is_diagram 페이지(= 현행 diagram_pages 와 같은 의미). 서술 보충 대상.
+    #                   `bucket == LLM_NEEDED` 로 잡으면 혼합 콘텐츠(텍스트+큰 이미지) 페이지까지
+    #                   포함하는 상위집합이 되어 순서도가 아닌 페이지에 DIAGRAM 프롬프트가 붙는다.
+    #   total_pages   : SKIP 포함 전체 페이지 수(= len(sigs)). page_lanes 의 상한.
+    page_lanes: tuple = ()
+    narrate_pages: tuple = ()
+    total_pages: int = 0
 
 
 _ODL = RouteDecision(lane="odl")
+
+
+def _page_lane(bucket) -> str:
+    """페이지 bucket → 레인. B-5 의 페이지수준 병합이 소비한다."""
+    if bucket == Bucket.SKIP:
+        return "skip"
+    if bucket == Bucket.OCR_NEEDED:
+        return "paddle_gw"
+    return "odl"          # TEXT_ONLY / LLM_NEEDED
 
 
 def decide_route(pdf_bytes: bytes) -> RouteDecision:
@@ -51,18 +74,20 @@ def decide_route(pdf_bytes: bytes) -> RouteDecision:
     n_llm = buckets.count(Bucket.LLM_NEEDED)
     # 다이어그램(순서도/차트) 페이지 — ODL 라우팅 시 페이지 단위 VL 서술 보충 대상.
     diagram_pages = tuple(s.page_number for s in sigs if getattr(s, "is_diagram", False))
+    # 스캔 페이지 — paddle_gw 레인의 hybrid 처리 대상 한정용(§A0). diagram_pages 와는
+    # 상호배타적이다(triage: is_diagram 은 has_native_text 분기 안에서만, OCR_NEEDED 는 그 밖에서만).
+    ocr_pages = tuple(s.page_number for s in sigs if s.bucket == Bucket.OCR_NEEDED)
+    # B-1: 페이지수준 필드(순수 추가 — 아래 lane 판정에는 쓰이지 않는다).
+    page_lanes = tuple((s.page_number, _page_lane(s.bucket)) for s in sigs)
+    narrate_pages = diagram_pages          # is_diagram 페이지 — 의미가 같다
+    total_pages = len(sigs)
+    _extra = dict(diagram_pages=diagram_pages, ocr_pages=ocr_pages,
+                  page_lanes=page_lanes, narrate_pages=narrate_pages,
+                  total_pages=total_pages)
 
-    # ① 차트/그림 페이지 비율이 높으면 — 스캔 여부 무관 — 문서 전체 VL 레인(페이지별 in-process VL).
-    #    차트/순서도 중심 문서는 페이지 전체를 VL 이 읽는 게 최선(2026-07-15 결정, hybrid 대체).
-    if n_llm > 0 and (n_llm / total) >= _VL_RATIO:
-        return RouteDecision(lane="vl")
-
-    # ② 스캔 페이지(네이티브 텍스트 없음)가 하나라도 있으면 → PaddleOCR-VL 게이트웨이(GPU).
-    #    layout+VL+표 조립 전부 게이트웨이 서버 — parse-svc 로컬 의존 0. 실패 시 ODL/VL 폴백.
-    #    diagram_pages 전달 — 게이트웨이는 순서도를 이미지 참조로만 내므로(서술 없음)
-    #    paddle_gw 레인도 해당 페이지에 VL 서술을 보충한다(2026-07-15, 소유권 p4 실측).
-    if n_ocr > 0:
-        return RouteDecision(lane="paddle_gw", diagram_pages=diagram_pages)
-
-    # ③ 디지털 텍스트(+차트/다이어그램 소수) → ODL. 다이어그램 페이지는 ODL 레인이 VL 서술 보충.
-    return RouteDecision(lane="odl", diagram_pages=diagram_pages)
+    # `lane` 은 **하위호환용 요약값**이다(B-5 의 `_parse_routed` 는 page_lanes 만 본다).
+    #   스캔 페이지가 있으면 paddle_gw, 없으면 odl.
+    # 문서수준 `vl` 레인은 삭제했다 — 그림 비율만 보고 문서 전체를 VL 로 넘겨 표를 깨뜨리던
+    # 경로다(KIS 11p: 표 테두리 curve=350 이 순서도로 오탐 → 전 페이지 VL 재전사).
+    lane = "paddle_gw" if n_ocr > 0 else "odl"
+    return RouteDecision(lane=lane, **_extra)

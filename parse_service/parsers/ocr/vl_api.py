@@ -2,7 +2,7 @@
 
 원본의 call_vl_api_with_base64 경로만 이식(multimodal/batch 제외).
 치환(plan 이식 규칙 1): core.config/get_config_value → env 직독
-- MODEL_API_URL / MODEL_API_KEY / MODEL_NAME(기본 qwen/qwen3-vl-235b-a22b-instruct)
+- MODEL_API_URL / MODEL_API_KEY / MODEL_NAME(기본 qwen/qwen3.5-122b-a10b)
 - VL_MAX_TOKENS(기본 2000) / USE_GUIDED_JSON(기본 "1") / GUIDED_JSON_MODE(기본 extra_body)
 - VL_MODEL_TIMEOUT(기본 600)
 
@@ -29,7 +29,7 @@ _HTTP_RETRY_COUNT = 1           # 일시적 오류 시 최대 재시도 횟수
 _HTTP_RETRY_DELAY = 1.0         # 재시도 전 대기 (초)
 _RETRYABLE_STATUS_CODES = {429, 502, 503, 504}  # 재시도 대상 상태코드
 
-_DEFAULT_MODEL_NAME = "qwen/qwen3-vl-235b-a22b-instruct"
+_DEFAULT_MODEL_NAME = "qwen/qwen3.5-122b-a10b"
 
 # =============================================================================
 # Guided JSON Schema — OCR 응답 구조 (인퍼런스 엔진 레벨 강제용)
@@ -123,14 +123,17 @@ async def close_http_client():
 async def call_vl_api_with_base64(
     base64_image: str,
     user_prompt: str,
-    system_prompt: str
+    system_prompt: str,
+    max_tokens: int | None = None,
 ) -> Tuple[str, float]:
     """base64 이미지로 Vision-Language 모델 API를 호출합니다.
+
+    ``max_tokens`` 는 None 이면 ``VL_MAX_TOKENS``(기본 2000). 기존 호출부 무변경.
 
     Returns:
         (모델 응답 문자열, 호출 소요 시간(초)) 튜플
     """
-    payload = _build_payload(base64_image, user_prompt, system_prompt)
+    payload = _build_payload(base64_image, user_prompt, system_prompt, max_tokens)
     response_json, elapsed_time = await _request_vl_api(payload)
     return _extract_result(response_json), elapsed_time
 
@@ -161,10 +164,16 @@ def _apply_guided_json(payload: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
-def _build_payload(base64_image: str, user_prompt: str, system_prompt: str) -> Dict[str, Any]:
-    """Vision-Language 모델 API 호출 페이로드를 구성합니다."""
+def _build_payload(base64_image: str, user_prompt: str, system_prompt: str,
+                   max_tokens: int | None = None) -> Dict[str, Any]:
+    """Vision-Language 모델 API 호출 페이로드를 구성합니다.
+
+    ``max_tokens`` 를 주면 ``VL_MAX_TOKENS`` 보다 우선한다. 스캔 페이지 전면 VL(Plan A §A4)은
+    본문·표·서술을 한 응답에 담으므로 기본 2000 에서는 절단이 정상 동작이 된다.
+    """
     model_name = os.environ.get("MODEL_NAME", _DEFAULT_MODEL_NAME)
-    max_tokens = os.environ.get("VL_MAX_TOKENS", "2000")
+    if max_tokens is None:
+        max_tokens = os.environ.get("VL_MAX_TOKENS", "2000")
 
     payload = {
         "model": model_name,
@@ -190,6 +199,15 @@ def _build_payload(base64_image: str, user_prompt: str, system_prompt: str) -> D
     # 생성해 느려지는 것 방지(KBP_VL_DISABLE_REASONING, 기본 on). edgequake 와 동일 정책.
     if os.environ.get("KBP_VL_DISABLE_REASONING", "1").lower() not in ("0", "false", "off", ""):
         payload["reasoning"] = {"enabled": False}
+    # OpenRouter 프로바이더 차단 — 같은 모델을 여러 업체에 분산시키는데 그중 일부가 **이미지를
+    # 조용히 버리고** 텍스트만 추론해 그럴듯한 환각을 낸다(2026-08-02 실측: qwen3.5-122b 의
+    # DeepInfra 는 prompt_tokens=42 로 이미지 폐기. qwen3-vl-235b 는 Venice 에서 동일). 거부가
+    # 아니라 조용한 환각이라 상류에서 검출이 불가능하므로 라우팅 후보에서 뺀다.
+    # **폐쇄망 자체 서빙에서는 무의미한 필드**다 — 빈 문자열로 끌 수 있게 해 둔다.
+    blocked = os.environ.get("KBP_VL_BLOCK_PROVIDERS", "DeepInfra")
+    ignore = [x.strip() for x in blocked.split(",") if x.strip()]
+    if ignore:
+        payload["provider"] = {"ignore": ignore}
     return _apply_guided_json(payload)
 
 

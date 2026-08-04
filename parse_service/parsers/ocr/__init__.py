@@ -15,14 +15,24 @@ from parse_service.parsers import RouteResult, ParserError
 
 IMAGE_EXTS = {"png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "webp"}
 _VL_SEM: asyncio.Semaphore | None = None
+_VL_SEM_LOOP = None
 
 log = logging.getLogger("kb_pipeline.parse_service.parsers.ocr")
 
 
 def _sem() -> asyncio.Semaphore:
-    global _VL_SEM
-    if _VL_SEM is None:
+    """VL 동시성 제한 세마포어 — **현재 이벤트루프에 바인딩**해서 돌려준다.
+
+    `asyncio.Semaphore` 는 `_LoopBoundMixin` 이라 경합 시 생성 루프를 붙잡는다. 전역 하나를
+    재사용하면 다른 루프에서 `is bound to a different event loop` RuntimeError 가 난다 —
+    parse-svc 는 호출마다 `asyncio.run`(ocr_elements_sync)으로 루프를 새로 만들 수 있어
+    실제로 밟는 경로다. `vl_api.get_http_client()` 가 쓰는 재바인딩 패턴과 동일하게 처리한다.
+    """
+    global _VL_SEM, _VL_SEM_LOOP
+    loop = asyncio.get_running_loop()
+    if _VL_SEM is None or _VL_SEM_LOOP is not loop:
         _VL_SEM = asyncio.Semaphore(int(os.environ.get("KBP_VL_MAX_CONCURRENT", "3")))
+        _VL_SEM_LOOP = loop
     return _VL_SEM
 
 
@@ -47,9 +57,12 @@ async def _file_to_base64_pages(file_bytes: bytes, filename: str) -> list[str]:
 
 
 async def ocr_file_to_elements(file_bytes: bytes, filename: str,
-                               prompt_override: tuple[str, str] | None = None) -> dict:
+                               prompt_override: tuple[str, str] | None = None,
+                               max_tokens: int | None = None) -> dict:
     """VL OCR — file_bytes 를 elements[] 로. prompt_override=(system, user) 주면 그 프롬프트로
-    호출한다(다이어그램 전용 서술 등). None 이면 기본 전사 프롬프트."""
+    호출한다(다이어그램 전용 서술 등). None 이면 기본 전사 프롬프트.
+
+    ``max_tokens`` 는 None 이면 ``VL_MAX_TOKENS``(기본 2000). 스캔 페이지 전면 VL 만 상향한다."""
     from parse_service.parsers.ocr import vl_api, elements_parser, prompts
     b64_pages = await _file_to_base64_pages(file_bytes, filename)
     if prompt_override is not None:
@@ -58,15 +71,28 @@ async def ocr_file_to_elements(file_bytes: bytes, filename: str,
         system_p, user_p = prompts.build_system_prompt(), prompts.build_user_prompt()
     all_elements: list[dict] = []
     next_id = 0
-    for page_num, b64 in enumerate(b64_pages, start=1):
+
+    # 페이지 VL 호출은 **동시**에 돌린다(`_sem()` 으로 KBP_VL_MAX_CONCURRENT 제한).
+    # 이전에는 sequential await 라 세마포어가 아무 일도 하지 않았다 — 코루틴이 하나뿐이었다.
+    async def _call(b64: str) -> str:
+        async with _sem():
+            vl_resp, _t = await vl_api.call_vl_api_with_base64(
+                b64, user_p, system_p, max_tokens)
+            return vl_resp
+
+    responses = await asyncio.gather(*(_call(b) for b in b64_pages),
+                                     return_exceptions=True)
+    # **파싱은 순서대로** — `next_id` 가 순차 상태이고 elements 순서가 페이지 순서여야 한다.
+    for page_num, resp in enumerate(responses, start=1):
+        if isinstance(resp, BaseException):     # 페이지 실패 비치명(기존 계약 유지)
+            log.error("VL OCR failed page %d", page_num, exc_info=resp)
+            continue
         try:
-            async with _sem():
-                vl_resp, _t = await vl_api.call_vl_api_with_base64(b64, user_p, system_p)
             els, next_id = elements_parser.parse_vision_language_response_to_elements(
-                vl_resp, page_num, next_id)
+                resp, page_num, next_id)
             all_elements.extend(els)
-        except Exception:  # noqa: BLE001 — 페이지 실패 비치명
-            log.exception("VL OCR failed page %d", page_num)
+        except Exception:  # noqa: BLE001 — 파싱 실패도 그 페이지만 비치명
+            log.exception("VL element parse failed page %d", page_num)
     elements_parser.normalize_all_elements(all_elements)
     for el in all_elements:
         el["page_idx"] = int(el.get("page", 1)) - 1  # elements_to_blocks 규약(0-based)
@@ -86,12 +112,58 @@ async def ocr_file_to_elements(file_bytes: bytes, filename: str,
 
 
 def ocr_elements_sync(file_bytes: bytes, filename: str,
-                      prompt_override: tuple[str, str] | None = None) -> list[dict]:
+                      prompt_override: tuple[str, str] | None = None,
+                      max_tokens: int | None = None) -> list[dict]:
     # parse-svc /parse 핸들러는 async def 라 이벤트루프가 도는 스레드에서 호출될 수 있다 —
     # 그 안에서 asyncio.run() 은 RuntimeError. 루프가 돌고 있으면 별도 스레드에서
     # asyncio.run 을 실행해 안전하게 블로킹한다.
     def _run():
-        return asyncio.run(ocr_file_to_elements(file_bytes, filename, prompt_override))["elements"]
+        return asyncio.run(
+            ocr_file_to_elements(file_bytes, filename, prompt_override, max_tokens)
+        )["elements"]
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return _run()
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(_run).result()
+
+
+Job = tuple  # (file_bytes, filename, prompt_override | None, max_tokens | None)
+
+
+async def ocr_elements_many(jobs: list[Job]) -> list[list[dict]]:
+    """여러 건을 **한 이벤트루프에서** 동시 처리 — jobs 순서대로 elements 리스트를 돌려준다.
+
+    호출 건마다 `asyncio.run` 을 돌리면(=`ocr_elements_sync` 를 N 번) 루프가 N 개 생겨
+    `_VL_SEM` 과 `vl_api._http_client` 가 매번 재생성된다. 그러면 동시성도 없고 전역 상태만
+    흔들린다. 이 진입점은 루프 하나를 공유해 그 둘을 일관되게 유지한다.
+
+    건별 실패는 비치명 — 그 자리에 빈 리스트가 들어간다(인덱스 정렬 보존).
+    """
+    async def _one(job: Job) -> list[dict]:
+        file_bytes, filename = job[0], job[1]
+        prompt_override = job[2] if len(job) > 2 else None
+        max_tokens = job[3] if len(job) > 3 else None
+        return (await ocr_file_to_elements(
+            file_bytes, filename, prompt_override, max_tokens))["elements"]
+
+    results = await asyncio.gather(*(_one(j) for j in jobs), return_exceptions=True)
+    out: list[list[dict]] = []
+    for job, r in zip(jobs, results):
+        if isinstance(r, BaseException):
+            log.error("VL OCR job failed (%s)", job[1], exc_info=r)
+            out.append([])
+        else:
+            out.append(r)
+    return out
+
+
+def ocr_elements_many_sync(jobs: list[Job]) -> list[list[dict]]:
+    """`ocr_elements_many` 의 동기 래퍼 — `asyncio.run` 을 **배치 전체에 1회**만 쓴다."""
+    def _run():
+        return asyncio.run(ocr_elements_many(jobs))
     try:
         asyncio.get_running_loop()
     except RuntimeError:

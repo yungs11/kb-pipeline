@@ -6,7 +6,7 @@ from parse_service.parsers import ocr as ocr_parser
 
 @pytest.fixture
 def fake_vl(monkeypatch):
-    async def fake_call(base64_image, user_prompt, system_prompt):
+    async def fake_call(base64_image, user_prompt, system_prompt, max_tokens=None):
         return json.dumps({"elements": [
             {"category": "figure",
              "content": {"html": "", "markdown": "hello", "text": ""},
