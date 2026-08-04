@@ -330,8 +330,20 @@ parse-svc(18081)·postgres(5433) 로 줄었다.
 - kb 클라이언트로 3 scope 왕복 후 `delete_prefix` 2건 → 잔여 0
 - kbp `service/tests` 219 passed / kb 회귀 0건(기존 실패 19건 그대로)
 
-**미검증**: PDF 전 구간은 chunk 에서 막혀 확인 못 했다 — adaptive_chunk 의 bge-m3 임베딩
-백엔드가 502/500(litellm). 이 변경과 무관한 기존 장애다.
+**전 구간 라이브(2026-08-04, 임베딩 백엔드 복구 후)**:
+
+| 레인 | 결과 | 경로 |
+|---|---|---|
+| 단건 PDF | `ready` 556s (gate 0→parse 4→chunk 12→insert 379→persist_meta 556) | 원본 승격 없음(이 레인의 기존 동작) |
+| 배치 PDF | `completed` 508s, `succeeded` 1건 | staging PUT/GET → **원본 승격 PUT** → staging DELETE, 전부 facade 경유 |
+
+- 원본 객체 `c762afe0…/original/3-8. 직장 내 괴롭힘·성희롱 예방 규정(2023.10.23.개정).pdf`
+  117,862B = 원본 크기 일치. `documents.minio_object` 도 같은 키. 한글·`·`·괄호 보존.
+- 이번 배치 staging 은 정리됨(남은 3건은 이 변경 이전 배치의 기존 잔여물).
+- 인용 이미지는 데이터평면 그대로 200 — `chunks_meta.minio_image_object` 에 기록된 키
+  (`{parse-svc docs_id}/{docs_id}_{p}.jpeg`)가 MinIO 에서 읽힌다. **주의**: 이 키의
+  docs_id 는 kb 의 `documents.docs_id` 가 아니라 parse-svc 의 content-hash 다.
+- 인코딩: PUT 은 경로 `%20`, GET 은 쿼리 `+` 로 나가는데 facade 가 같은 키로 해석한다(확인함).
 
 **보류(D19)**: doc_guard 룰 14개 중 docx 13·pdf 11 로 **엑셀 전용이 아닌데**, kb 는
 `xlsx/xlsm` 에서만 `check_excel` 을 부른다. 즉 pdf·docx 는 게이트를 통과하는 게 아니라
