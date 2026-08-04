@@ -289,3 +289,26 @@ GC 가 조용히 안 도는 상태를 감지할 수단이 없다. 로그로 시�
 `legacy=true` 잡의 staging 을 즉시 지운 뒤 `input_ref`/`payload_ref` 를 NULL 로 안 비워,
 TTL GC 가 이미 없는 키를 다시 지우며 WARN 오탐이 상시 발생한다. 기능적으로는 무해(멱등).
 "존재하지 않는 객체 삭제는 WARN 을 남기지 않는다" 정도로 구현 시 처리한다.
+
+### D19. facade `/gate/check` — pdf·docx 게이트 (전 포맷 multipart)
+
+doc_guard 는 엑셀 전용이 아니다. 실측(2026-08-04, `:8001/v1/rules`) 14개 룰 중
+docx 13 · pdf 11 · xlsx 10 이고, 3.1 띄어쓰기 · 3.2 특수문자 · 3.4 생략표현 ·
+5.1/5.2 금액 · 3.6 별지는 세 포맷 공통이다. 엔드포인트도 둘이다 —
+`POST /v1/check`(multipart 원본, 전 포맷) 와 `POST /v1/check-excel`(JSON gate_summary).
+
+그런데 소비자는 `check_excel` 만 부른다. kb `pipeline.py:504` 의 게이트 분기가
+`ext in ("xlsx","xlsm") and provider=="kb_pipeline"` 이고, multipart 를 쓰는
+`DocGuardClient.check()` 는 정의만 있고 **호출부가 없다**(dead code). 즉 pdf·docx 는
+게이트를 통과하는 게 아니라 아예 거치지 않는다.
+
+**왜 범위 밖**: 이번 범위는 "kb 가 doc_guard 를 직접 부르지 않게 한다"는 **전송 경로
+은닉**이다. pdf·docx 게이트를 켜는 건 새 기능이고, 판정 실패 시 문서를 rejected 로
+떨어뜨리는 정책·팝업 문구·기존 적재분 소급 여부까지 따라온다.
+
+**할 일**: pdf·docx 게이트를 실제로 켤 때 `/gate/check` 패스스루를 함께 설계한다.
+설계 시 짚을 것 — (a) multipart 원본 전송이라 `/gate/check-excel`(JSON) 과 성격이
+다르다(파일 바이트가 facade 를 통과한다), (b) `/v1/check` 는 LLM 룰을 포함해 지연이
+초 단위이므로 잡 큐 kind 로 넣을지 동기로 둘지 결정이 필요하다, (c) 엑셀은 파서가
+계산한 `gate_summary` 로 판정하는데 pdf·docx 는 doc_guard 가 원본을 직접 파싱하므로
+파싱이 두 번 일어난다.

@@ -20,7 +20,7 @@ import re
 from contextlib import asynccontextmanager
 
 from fastapi import (FastAPI, UploadFile, File, Form, Depends, BackgroundTasks,
-                     Body, Header, HTTPException, Query)
+                     Body, Header, HTTPException, Query, Response)
 
 from service.jobs.api import get_job_blobs as _job_blobs
 from service.jobs.api import get_job_repo as _job_repo
@@ -126,6 +126,13 @@ def get_edgequake():
 
 def get_adaptive_chunk():
     return AdaptiveChunkClient(os.environ.get("KBP_ADAPTIVE_CHUNK_URL", "http://localhost:18060"))
+
+
+def get_doc_guard():
+    """doc_guard 클라이언트. 소비자는 이 주소를 알 필요가 없다(§0)."""
+    from service.doc_guard import get_doc_guard as _factory
+
+    return _factory()
 
 
 def get_parse_client():
@@ -381,6 +388,108 @@ def chunks(workspace_id: str, doc_id: str, eq=Depends(get_edgequake)):
 def delete(workspace_id: str, doc_id: str, eq=Depends(get_edgequake)):
     eq_ws = eq.ensure_workspace(workspace_id, name=workspace_id)
     eq.delete_doc(eq_ws, doc_id)
+
+
+# ── 게이트 (doc_guard 은닉) ────────────────────────────────────────────────
+#
+# kb 가 doc_guard 를 직접 찌르던 것을 facade 뒤로 넣는다. 응답은 doc_guard 원형을 그대로
+# 통과시킨다 — 소비자가 `result`/`findings`/`customer_message` 를 직접 읽는다.
+#
+# `/parse` 에 합치지 않는 이유: 소비자가 **파싱 없이** 게이트만 돌리고 싶을 수 있고
+# (룰 변경 후 재검증), 산출(parse-svc)과 판정(doc_guard)이 다른 서비스라 판정 룰이
+# 바뀔 때마다 재파싱하게 만들면 안 된다.
+
+
+@app.post("/gate/check-excel", dependencies=[Depends(require_facade_key)])
+def gate_check_excel(filename: str = Body(..., embed=True),
+                     gate_summary: dict = Body(..., embed=True),
+                     dg=Depends(get_doc_guard)):
+    """파서-후단 엑셀 게이트 판정. ``gate_summary`` 는 ``/parse`` 응답의 그 필드다."""
+    return dg.check_excel(filename=filename, gate_summary=gate_summary)
+
+
+@app.get("/gate/rules", dependencies=[Depends(require_facade_key)])
+def gate_rules(dg=Depends(get_doc_guard)):
+    """룰 카탈로그 패스스루 — 소비자 UI 체크박스 구성용."""
+    return dg.list_rules()
+
+
+# ── 오브젝트 (MinIO 은닉) ──────────────────────────────────────────────────
+#
+# **제어평면만** 여기로 온다(설계 §3.3). 브라우저의 썸네일·인용 이미지 읽기는 계속
+# `/obj/*` same-origin 프록시로 간다 — 실측상 검색 1회에 최대 ~4MB 라 facade 를 정적
+# 파일 서버로 만들면 잡 접수·`/healthz` 가 스레드를 못 얻는다.
+#
+# 여기서 얻는 값은 **키 규칙 소유**다. `{docs_id}/original/{name}` 같은 규칙을 지금은
+# kb·parse-svc·facade 셋이 각자 알고 있어, 한 곳이 바뀌면 조용히 어긋난다.
+
+
+def get_object_store():
+    from service.objects import ObjectStore
+
+    return ObjectStore.from_env()
+
+
+def _object_error(exc: Exception) -> HTTPException:
+    # 키 규칙 위반은 소비자 잘못이다 — 400 으로 돌려줘야 원인이 보인다.
+    return HTTPException(status_code=400, detail=str(exc))
+
+
+@app.put("/objects/{scope}/{rest:path}", dependencies=[Depends(require_facade_key)])
+def object_put(scope: str, rest: str,
+               file: UploadFile = File(...),
+               content_type: str | None = Form(None),
+               store=Depends(get_object_store)):
+    """바이트 업로드 → ``{"key": ...}``.
+
+    ``rest`` 는 scope 마다 다르게 쪼갠다 — ``original``/``page`` 는 첫 세그먼트가
+    ``doc_id``, 나머지가 이름이다. ``staging`` 은 kb `BlobStore` 계약이 **평평한 키**라
+    ``rest`` 전체가 이름이다.
+    """
+    from service.objects import ObjectStoreError, build_key
+
+    if scope == "staging":
+        doc_id, name = "", rest
+    else:
+        doc_id, _, name = rest.partition("/")
+    try:
+        key = build_key(scope, doc_id, name)
+    except ObjectStoreError as exc:
+        raise _object_error(exc) from exc
+    data = file.file.read()
+    mime = content_type or file.content_type or "application/octet-stream"
+    return {"key": store.put(key, data, content_type=mime)}
+
+
+@app.get("/objects", dependencies=[Depends(require_facade_key)])
+def object_get(key: str, store=Depends(get_object_store)):
+    """바이트 회수 — **staging 회수용**이지 썸네일 서빙용이 아니다(§3.3)."""
+    if not key.strip():
+        raise HTTPException(status_code=400, detail="key is required")
+    data = store.get(key)
+    if data is None:
+        raise HTTPException(status_code=404, detail="object not found")
+    return Response(content=data, media_type="application/octet-stream")
+
+
+@app.delete("/objects", dependencies=[Depends(require_facade_key)])
+def object_delete(key: str | None = None, prefix: str | None = None,
+                  store=Depends(get_object_store)):
+    """단건(``key``) 또는 프리픽스(``prefix``) 삭제.
+
+    둘 다 주거나 둘 다 없으면 거부한다 — 어느 쪽이 무시됐는지 모른 채 "지웠다"는
+    응답을 받으면 남은 객체가 고아로 쌓인다.
+    """
+    from service.objects import ObjectStoreError
+
+    if bool(key) == bool(prefix):
+        raise HTTPException(status_code=400, detail="pass exactly one of key, prefix")
+    if key:
+        return {"deleted": 1 if store.delete(key) else 0}
+    try:
+        return {"deleted": store.delete_prefix(prefix)}
+    except ObjectStoreError as exc:
+        raise _object_error(exc) from exc
 
 
 def _build_communities_job(workspace_id: str) -> None:
