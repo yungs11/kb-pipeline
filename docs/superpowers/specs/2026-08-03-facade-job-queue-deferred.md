@@ -227,3 +227,65 @@ healthcheck 가 unhealthy 로 넘어간다.
 
 **언제 필요해지나**: 폐쇄망 배포 보안 검토 시. D8(배포 검증 스크립트)과 같은 시점에
 묶어서 하는 게 자연스럽다.
+
+---
+
+## GC(D2) 검증에서 나온 범위 밖 항목 (2026-08-04)
+
+[`2026-08-04-job-queue-gc-design.md`](2026-08-04-job-queue-gc-design.md) v1 검증에서
+타당하지만 GC 범위를 넘는다고 판정된 것들. GC plan §7 에도 요약돼 있고 여기 상세를 남긴다.
+
+### D13. 소진 후 `queued` 로 정체하는 좀비 행
+
+**지적**: `worker._execute` 는 `JobRetryable` 이면 `attempt_count` 를 유지한 채 `requeue`
+하는데, `attempt_count >= max` 인지 보지 않는다. 그러면 `_candidates` 가
+`attempt_count < max` 로 그 행을 영구 배제해 **`queued` 인 채 아무도 안 집는 좀비**가
+된다. terminal 이 아니라 GC 대상도 아니고, 자식이면 부모의 TTL 삭제까지 영구 차단한다.
+
+**왜 범위 밖**: 큐 본체(claim/requeue) 설계 결함이지 GC 책임이 아니다. GC 는 §2.3 에서
+`NOT EXISTS` 를 `LIMIT` 안으로 옮겨 **정체는 피하도록** 했다(head-of-line 방지).
+
+**고칠 곳**: `worker._execute` 의 `JobRetryable` 분기에서 `attempt_count >= max` 면
+`requeue` 대신 `failed` 로 종결. 또는 claim 유지보수에 "소진된 queued 행 종결" 추가.
+
+### D14. 멱등 dedupe 수명 = `KBP_JOB_TTL_HOURS`
+
+**지적**: `succeeded` 잡이 TTL 로 지워지면 `idem_key` 도 함께 사라져, 명시
+`Idempotency-Key` 로 72h 뒤 재제출하면 새 잡이 된다. 설계 §4.4 는 "명시 헤더는 소비자가
+수명을 정한다" 고 적어 두 서술이 어긋난다.
+
+**왜 범위 밖**: 72h 뒤 같은 문서 재업로드가 새 잡이 되는 것은 대체로 의도된 동작이다.
+계약 재정의는 잡 큐 설계 §4.4 소관.
+
+**할 일**: §4.4 에 "멱등 dedupe 수명 = TTL" 각주 한 줄.
+
+### D15. 부모가 TTL 로 지워진 뒤 자식이 참조하는 창
+
+`_validate_parent`(접수)와 자식 INSERT 사이에 GC 가 부모를 지우면 `parent_job_id` 가
+dangling 이 된다. 결과는 자식 잡의 명시적 `JobFailed`(§5.1 "참조 잡 소실") — 무결성
+훼손도 중복 적재도 없다. TTL(72h) 경과 부모를 새로 참조하는 것 자체가 드물어 수용한다.
+
+### D16. 같은 MinIO 버킷+프리픽스를 공유하는 두 배포
+
+서로 다른 `kbp.jobs` DB 를 보면서 같은 버킷·프리픽스를 쓰면 스윕이 서로의 살아있는
+staging 을 지운다. 기본값 조합(호스트 dev `localhost:9000`/`:5433`, compose
+`minio:9000`/`postgres:5432`)은 분리돼 있지만, airgap 문서가 외부 공유 MinIO 전환을 정식
+절차로 안내하고 버킷·프리픽스 기본값은 배포 불변이다.
+
+**왜 범위 밖**: 배포 토폴로지 문제다. GC 의 fail-closed·sanity 가드와 "이 프리픽스를
+단독 소유한다" 전제로 실질 위험을 덮는다.
+
+**할 일**: 스윕을 opt-in env(`KBP_JOB_ORPHAN_SWEEP_ENABLED`)로 둘지는 폐쇄망 배포 검토
+시점에 결정한다(D8 과 같은 시점).
+
+### D17. GC 관측 — 연속 실패 ERROR 승격 / `last_gc_at` 노출
+
+GC 가 조용히 안 도는 상태를 감지할 수단이 없다. 로그로 시작하고, 주기 상태를 DB 에
+두게 되면(`kbp.job_gc_state`) 관측 수단이 자연히 생기므로 그때 `/jobs/workers` 에
+`last_gc_at` 을 얹는 것을 재검토한다.
+
+### D18. `_purge_legacy_inputs` 가 참조 컬럼을 비우지 않는다
+
+`legacy=true` 잡의 staging 을 즉시 지운 뒤 `input_ref`/`payload_ref` 를 NULL 로 안 비워,
+TTL GC 가 이미 없는 키를 다시 지우며 WARN 오탐이 상시 발생한다. 기능적으로는 무해(멱등).
+"존재하지 않는 객체 삭제는 WARN 을 남기지 않는다" 정도로 구현 시 처리한다.

@@ -452,3 +452,54 @@ def test_schema_and_claim_locks_do_not_block_each_other(repo):
     finally:
         holder.execute("SELECT pg_advisory_unlock_all()")
         holder.close()
+
+
+def test_idem_reinsert_keeps_job_id_aligned_with_object_keys(repo, worker):
+    """멱등 재삽입이 행 id 와 객체 키를 어긋나게 하면 안 된다.
+
+    submit 은 호출자가 만든 job_id 로 `{prefix}/{job_id}/...` 객체를 이미 올려둔 상태로
+    불린다(api.submit_job). 멱등 충돌 뒤 키가 비워져 재삽입할 때 새 uuid 를 만들면,
+    행의 input_ref/payload_ref 는 여전히 **옛 uuid** 경로를 가리킨다.
+
+    그러면 고아 스윕이 "이 job_id 로 된 행이 없다" 고 판단해 **살아있는 잡의 입력을
+    지운다**. GC 이전부터 있던 버그다.
+    """
+    job_id = uuid.uuid4()
+    refs = {"input_ref": f"kbp-jobs/{job_id}/input.bin",
+            "payload_ref": f"kbp-jobs/{job_id}/payload.json"}
+
+    # 1) 같은 키로 먼저 하나 만들고 실패로 종결시켜 키를 비운다
+    first = repo.submit(kind="parse", idem_key="k-align")
+    claimed = repo.claim(worker_id=worker, local_free=1)[0]
+    repo.complete(claimed.id, worker_id=worker, attempt=claimed.attempt,
+                  status="failed", error="boom")
+    assert repo.get(first)["idem_key"] is None
+
+    # 2) 같은 idem_key 로 재제출 — INSERT 는 충돌하지만 기존 행이 키를 비운 상태라
+    #    재삽입 경로를 탄다
+    created = repo.submit(kind="parse", job_id=job_id, idem_key="k-align", **refs)
+
+    row = repo.get(created)
+    assert created == job_id, "재삽입이 호출자의 job_id 를 버렸다"
+    assert str(job_id) in row["input_ref"], "행 id 와 객체 키가 어긋난다"
+    assert str(job_id) in row["payload_ref"]
+
+
+def test_idem_reinsert_race_path_preserves_job_id():
+    """재귀 재삽입 경로가 호출자의 job_id 를 보존하는지 소스로 확인한다.
+
+    이 경로는 "INSERT 는 충돌했는데 SELECT 시점엔 키가 없다"는 **경합에서만** 도달해서
+    결정적으로 재현할 수 없다(키가 비워지면 INSERT 가 애초에 충돌하지 않는다). 그래서
+    재귀 호출이 job_id 를 넘기는지를 직접 단언한다 — 이게 빠지면 행 id 와 객체 키가
+    어긋나 고아 스윕이 살아있는 입력을 지운다.
+    """
+    import inspect
+
+    from service.jobs.repo import JobRepo as _R
+
+    src = inspect.getsource(_R.submit)
+    body = src[src.index("if existing is None"):]
+    recursive = body[body.index("return self.submit("):]
+    assert "job_id=job_id" in recursive[:recursive.index(")")], (
+        "재귀 재삽입이 job_id 를 안 넘긴다 — 행 id 와 객체 키가 어긋난다"
+    )

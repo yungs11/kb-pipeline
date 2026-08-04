@@ -184,13 +184,21 @@ class JobRepo:
                         )
                         existing = cur.fetchone()
                         if existing is None:
-                            # 그 사이 실패로 끝나 키가 비워졌다 — 재삽입.
+                            # INSERT 는 충돌했는데 SELECT 시점엔 키가 없다 = 그 사이
+                            # 다른 세션이 그 잡을 실패로 종결시켜 키를 비웠다(경합).
+                            # 멱등 없이 재삽입한다.
+                            #
+                            # **job_id 를 반드시 그대로 넘긴다.** 호출자(api.submit_job)는
+                            # 이미 `{prefix}/{job_id}/...` 로 객체를 올려둔 상태다. 여기서
+                            # 새 uuid 를 만들면 행 id 와 객체 키가 어긋나고, 고아 스윕이
+                            # "이 job_id 로 된 행이 없다"고 판단해 **살아있는 잡의 입력을
+                            # 지운다**.
                             conn.rollback()
                             return self.submit(
                                 kind=kind, payload=payload, payload_ref=payload_ref,
                                 input_ref=input_ref, workspace_key=workspace_key,
                                 batch_key=batch_key, parent_job_id=parent_job_id,
-                                legacy=legacy, idem_key=None,
+                                legacy=legacy, idem_key=None, job_id=job_id,
                             )
                         conn.commit()
                         return existing["id"]
