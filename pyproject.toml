@@ -25,4 +25,9 @@ build-backend = "setuptools.build_meta"
 include = ["kb_pipeline*"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# service/tests 는 facade(잡 큐 포함) 테스트. 기본 수집 대상에 넣어 `pytest` 한 번으로
+# 회귀가 잡히게 한다 — 잡 큐 도입 전에는 명시 경로로만 돌아 누락되기 쉬웠다.
+testpaths = ["tests", "service/tests"]
+markers = [
+    "requires_pg: 실 Postgres(KBP_PG_DSN)가 필요한 테스트. DSN 미설정 시 skip.",
+]
