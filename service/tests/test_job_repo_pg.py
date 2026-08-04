@@ -383,3 +383,72 @@ def test_recovered_exhausted_job_releases_idem_key(repo, worker):
     row = repo.get(first)
     assert row["status"] == "failed"
     assert row["idem_key"] is None
+
+
+# ── advisory lock 격리 (edgequake 와 같은 DB 를 쓰므로) ────────────────────
+#
+# advisory lock 은 **DB 단위**다 — 스키마로 안 갈린다(pg_locks 에 schema 컬럼이 없다).
+# 이 DB 는 edgequake 본체와 공유하고, edgequake 의 sqlx 마이그레이션은 1-인자 bigint
+# 형식을 쓴다. Postgres 는 1-인자와 2-인자 lock 공간을 분리해 관리하므로, 우리가
+# 2-인자 (classid, objid) 를 쓰면 값이 겹쳐도 구조적으로 충돌하지 않는다.
+
+
+def test_claim_uses_two_arg_advisory_lock(repo):
+    """claim 이 실제로 (LOCK_CLASSID, LOCK_OBJ_CLAIM) 을 잡는다."""
+    import threading
+
+    from service.jobs import schema as sch
+
+    holder = psycopg.connect(DSN, autocommit=True)
+    holder.execute("SELECT pg_advisory_lock(%s, %s)",
+                   (sch.LOCK_CLASSID, sch.LOCK_OBJ_CLAIM))
+    done = threading.Event()
+    threading.Thread(
+        target=lambda: (repo.claim(worker_id="locktest:1:a", local_free=1), done.set()),
+        daemon=True,
+    ).start()
+    try:
+        assert not done.wait(2.0), "claim 이 우리 advisory lock 을 안 잡는다"
+    finally:
+        holder.execute("SELECT pg_advisory_unlock_all()")
+        done.wait(5)
+        holder.close()
+
+
+def test_claim_is_isolated_from_bigint_lock_space(repo):
+    """동일 비트의 1-인자 bigint lock 을 누가 쥐어도 claim 은 막히지 않는다.
+
+    edgequake(sqlx)가 bigint 형식을 쓰므로, 이 격리가 깨지면 edgequake 기동이
+    facade-worker 의 claim 을 막거나 그 반대가 된다.
+    """
+    import threading
+
+    from service.jobs import schema as sch
+
+    combined = (sch.LOCK_CLASSID << 32) | sch.LOCK_OBJ_CLAIM
+    holder = psycopg.connect(DSN, autocommit=True)
+    holder.execute("SELECT pg_advisory_lock(%s::bigint)", (combined,))
+    done = threading.Event()
+    threading.Thread(
+        target=lambda: (repo.claim(worker_id="locktest:2:b", local_free=1), done.set()),
+        daemon=True,
+    ).start()
+    try:
+        assert done.wait(3.0), "1-인자 bigint lock 이 claim 을 막았다 — 공간 분리 실패"
+    finally:
+        holder.execute("SELECT pg_advisory_unlock_all()")
+        holder.close()
+
+
+def test_schema_and_claim_locks_do_not_block_each_other(repo):
+    """기동 DDL lock 이 운영 중 claim 을 막으면 안 된다(objid 로 갈린다)."""
+    from service.jobs import schema as sch
+
+    holder = psycopg.connect(DSN, autocommit=True)
+    holder.execute("SELECT pg_advisory_lock(%s, %s)",
+                   (sch.LOCK_CLASSID, sch.LOCK_OBJ_SCHEMA))
+    try:
+        repo.claim(worker_id="locktest:3:c", local_free=1)   # 막히지 않아야 한다
+    finally:
+        holder.execute("SELECT pg_advisory_unlock_all()")
+        holder.close()

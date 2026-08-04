@@ -43,12 +43,13 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from service.jobs import admission
+from service.jobs import admission, schema
 
 log = logging.getLogger("kb_pipeline.service.jobs.repo")
 
-#: claim 직렬화용 advisory lock. DDL 용(`kbp.schema`)과 다른 키다.
-_CLAIM_LOCK_KEY = "kbp.jobs.claim"
+#: claim 직렬화용 advisory lock. DDL 용과 objid 로 갈린다(`schema.LOCK_OBJ_*`).
+#: 2-인자 형식을 쓰는 이유는 schema.py 주석 참조 — edgequake 와 같은 DB 라 1-인자
+#: bigint 공간을 피한다.
 
 KINDS: tuple[str, ...] = ("parse", "chunk", "insert", "ingest")
 
@@ -283,9 +284,8 @@ class JobRepo:
                     # 매달린다. heartbeat 는 별도 스레드지만 claim 이 굶는 것도 막는다.
                     cur.execute("SET LOCAL lock_timeout = '5s'")
                     cur.execute("SET LOCAL statement_timeout = '30s'")
-                    cur.execute(
-                        "SELECT pg_advisory_xact_lock(hashtext(%s))", (_CLAIM_LOCK_KEY,)
-                    )
+                    cur.execute("SELECT pg_advisory_xact_lock(%s, %s)",
+                                (schema.LOCK_CLASSID, schema.LOCK_OBJ_CLAIM))
 
                     self._recover(cur, kinds, attempts, runtimes, stale)
                     self._finish_cancelled_queued(cur)

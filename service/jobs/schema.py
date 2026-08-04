@@ -19,9 +19,18 @@ import psycopg
 
 log = logging.getLogger("kb_pipeline.service.jobs.schema")
 
-#: DDL 직렬화용 advisory lock 키. claim 용(`kbp.jobs.claim`)과 다른 키를 쓴다 —
-#: 기동 중 DDL 이 운영 중 claim 을 막으면 안 된다.
-_DDL_LOCK_KEY = "kbp.schema"
+#: advisory lock 은 **DB 단위**다(스키마로 안 갈린다 — pg_locks 에 schema 컬럼이 없다).
+#: 이 DB 는 edgequake 본체와 공유하므로 키 공간이 겹칠 수 있다.
+#:
+#: 그래서 **2-인자 형식** `pg_advisory_xact_lock(classid, objid)` 를 쓴다. Postgres 는
+#: 1-인자(bigint) 형식과 2-인자 형식의 lock 공간을 **분리**해서 관리하므로(실측 확인),
+#: bigint 형식을 쓰는 쪽(edgequake 의 sqlx 마이그레이션 lock)과는 **구조적으로 충돌하지
+#: 않는다** — 값이 우연히 겹쳐도 무관하다.
+#:
+#: classid = 0x6B6270 = ASCII "kbp". objid 로 용도를 가른다.
+LOCK_CLASSID = 0x6B6270      # 7037552
+LOCK_OBJ_SCHEMA = 1          # 기동 시 DDL
+LOCK_OBJ_CLAIM = 2           # claim 틱 (repo.py)
 
 #: 동시 DDL 경합에서만 나오는 SQLSTATE. 다른 프로세스가 먼저 만든 것이므로 무해하다.
 _RACE_SQLSTATES = frozenset({
@@ -125,7 +134,8 @@ def _apply(dsn: str) -> None:
         with conn.cursor() as cur:
             # 트랜잭션 종료 시 자동 해제되는 lock. DDL 전체가 한 트랜잭션이므로
             # 여러 프로세스가 동시에 들어와도 한 번에 하나만 실행한다.
-            cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (_DDL_LOCK_KEY,))
+            cur.execute("SELECT pg_advisory_xact_lock(%s, %s)",
+                        (LOCK_CLASSID, LOCK_OBJ_SCHEMA))
             try:
                 cur.execute(DDL)
             except psycopg.Error as exc:

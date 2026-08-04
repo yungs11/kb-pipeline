@@ -235,6 +235,22 @@ PostgreSQL 은 `FOR UPDATE` 와 윈도우 함수를 한 쿼리에 못 쓴다. �
 advisory lock 으로 직렬화**한다. claim 안에서는 다운스트림을 호출하지 않으므로(수 ms)
 직렬화 비용이 없다.
 
+**lock 은 2-인자 `(classid, objid)` 형식을 쓴다.** advisory lock 은 **DB 단위**라
+스키마로 갈리지 않는데(`pg_locks` 에 schema 컬럼이 없다) 이 DB 는 edgequake 본체와
+공유한다. Postgres 는 1-인자(bigint) 공간과 2-인자 공간을 **분리해서 관리**하므로,
+bigint 형식을 쓰는 쪽(edgequake 의 sqlx 마이그레이션 lock)과 **구조적으로 충돌하지
+않는다** — 값이 우연히 겹쳐도 무관하다. 실측으로 확인했다:
+
+```
+(int4,int4) 잡은 뒤 동일비트 bigint 획득 → True   ← 두 공간이 분리됨
+동일 (classid,objid) 획득               → False  ← 정상 직렬화
+같은 classid, 다른 objid 획득           → True   ← 용도별 분리 가능
+pg_locks: classid=7037552 objid=2 objsubid=2     ← objsubid=2 가 2-인자 형식의 표식
+```
+
+`classid = 0x6B6270`(ASCII `"kbp"`), `objid` 로 용도를 가른다 — `1`=기동 DDL,
+`2`=claim 틱. 기동 중 DDL 이 운영 중 claim 을 막지 않는다.
+
 ```
 BEGIN;
   SELECT pg_advisory_xact_lock(hashtext('kbp.jobs.claim'));
