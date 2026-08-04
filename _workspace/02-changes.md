@@ -345,6 +345,29 @@ parse-svc(18081)·postgres(5433) 로 줄었다.
   docs_id 는 kb 의 `documents.docs_id` 가 아니라 parse-svc 의 content-hash 다.
 - 인코딩: PUT 은 경로 `%20`, GET 은 쿼리 `+` 로 나가는데 facade 가 같은 키로 해석한다(확인함).
 
+**4건 혼합 배치(2026-08-05)** — 전용 KB 에 텍스트층 PDF 3 + xlsx 1:
+
+```
+[   5s] 워커 capacity=2 → 2건 processing / 2건 queued   (수용 제어 동작)
+[ 544s] 3-8 succeeded
+[ 731s] 3-3 succeeded
+[ 756s] 2-1.xlsx gate_failed          ← 배치 안에서 게이트 차단
+[1308s] 소유권이전 succeeded → completed_with_errors (3 성공 / 1 차단)
+```
+
+facade 경유 집계(내 배치분): staging PUT 4 → GET 4 → **원본 승격 PUT 3** → staging DELETE 3.
+게이트 차단된 xlsx 는 원본 승격 대상이 아니므로 PUT 3 이 맞다. 원본 3건 모두 소스와
+**바이트 일치**(74,239 / 117,862 / 1,423,727B)하고 `documents.minio_object` 키가 facade 가
+돌려준 키와 같다. 청크 7·18·17, 검색 응답도 정답(연차휴가 15일·1개월 개근 1일·2년마다 1일 가산).
+
+동시에 사용자 UI 배치 2건(`3d8da3c5…`, `cb59813f…`)이 돌았는데 그쪽도 전부 facade 경유였다.
+
+**발견(범위 밖, 기존 결함)**: `batch_worker.py:217` 이 `status == "succeeded" and canonical_path`
+일 때만 staging 을 지운다. 게이트 차단·실패 항목의 staging 객체는 **영구히 남는다**. 이번
+xlsx 도 남았고, 이전 배치 잔여 3건 중 2건이 같은 원인(위임전결기준표.xlsx)이다. 커밋
+c785964(배치 워커 도입) 시점부터의 동작이며 이번 변경과 무관하다. facade GC 의 고아 스윕은
+`kbp-jobs/` 프리픽스만 보므로 `parse-staging/` 은 수거하지 않는다.
+
 **보류(D19)**: doc_guard 룰 14개 중 docx 13·pdf 11 로 **엑셀 전용이 아닌데**, kb 는
 `xlsx/xlsm` 에서만 `check_excel` 을 부른다. 즉 pdf·docx 는 게이트를 통과하는 게 아니라
 거치지 않는다. pdf·docx 게이트를 켤 때 `/gate/check` 를 함께 설계한다.
