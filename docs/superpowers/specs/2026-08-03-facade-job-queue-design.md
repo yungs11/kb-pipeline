@@ -1019,11 +1019,22 @@ next(iter(client.list_objects(bucket, prefix=f"{JOB_PREFIX}/", recursive=True)),
 ## 9. Phase 2 — kb-backend 축소 (별도 착수)
 
 1. ~~선행: 제출 멱등키 구현(D1)~~ — **완료**(§4.4).
-2. kb 의 facade 클라이언트를 `/jobs/*` + 폴링으로 전환.
-3. kb 의 `batch_worker` 제거. 화면은 `GET /jobs?batch_key=` 와 `GET /jobs/workers` 로
+2. **부분 완료** — kb 의 facade 클라이언트에 `/jobs/*` 경로를 **플래그 뒤에** 추가했다
+   (`kb_pipeline_use_jobs`, 기본 `False`). 기존 동기 경로는 그대로다.
+
+   비파괴 증분으로 간 이유: kb 레포에 미커밋 31파일(특히 `pipeline.py` 422줄)이
+   진행 중이라, 전면 전환하면 문제가 생겼을 때 원인 구분이 어렵다. 건드린 파일은
+   `kb_pipeline_client.py`·`config.py`·`dependencies.py` 셋뿐이고 `pipeline.py` 는
+   미접촉이다. 롤백은 env 하나(`KB_PIPELINE_USE_JOBS=false`).
+
+   응답 본문이 레거시와 동일해서(facade 가 보장) 매핑 코드는 손대지 않았다 —
+   `_post_body()` 하나로 갈아끼웠다. 멱등키는 kb 가 직접 준다
+   (`kb-parse:{docs_id}`, `kb-insert:{ws}:{doc_id}`).
+3. 플래그를 켜서 라이브 검증. 그 뒤에 kb 의 `batch_worker` 제거.
+4. kb 의 `batch_worker` 제거. 화면은 `GET /jobs?batch_key=` 와 `GET /jobs/workers` 로
    대응(키 이름을 kb 와 맞췄으므로 프론트 매핑 변경 없음).
-4. 레거시 4경로 제거 + `/parse`·`/chunk` 인증 게이트 적용.
-5. kb 에만 있는 기능(doc_guard 게이트 결과, 문서 메타, MinIO 원본 승격)은 kb 에 남긴다.
+5. 레거시 4경로 제거 + `/parse`·`/chunk` 인증 게이트 적용.
+6. kb 에만 있는 기능(doc_guard 게이트 결과, 문서 메타, MinIO 원본 승격)은 kb 에 남긴다.
 
 ## 10. 문서 갱신 (Phase 1 산출물)
 
