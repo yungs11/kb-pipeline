@@ -27,14 +27,25 @@ if not DSN:
     pytest.skip("KBP_PG_DSN unset", allow_module_level=True)
 
 
-@pytest.fixture()
-def repo():
-    ensure_schema(DSN)
+def _truncate():
     with psycopg.connect(DSN) as conn:
         conn.execute("DELETE FROM kbp.jobs")
         conn.execute("DELETE FROM kbp.job_workers")
         conn.commit()
-    return JobRepo(DSN)
+
+
+@pytest.fixture()
+def repo():
+    """앞뒤로 비운다.
+
+    뒤도 비우는 이유: 이 DSN 은 dev 스택이 공유하는 실 DB 다. 테스트가 남긴
+    `pytest:*` worker 행과 running 잡이 그대로 남으면 `GET /jobs/workers` 가 없는
+    worker 를 online 으로 보고하고 슬롯을 점유한 것처럼 보인다(실제로 그랬다).
+    """
+    ensure_schema(DSN)
+    _truncate()
+    yield JobRepo(DSN)
+    _truncate()
 
 
 @pytest.fixture()

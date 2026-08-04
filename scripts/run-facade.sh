@@ -29,6 +29,8 @@ ENV_FILE="$ROOT/scripts/facade.env"
 if [ -f "$ENV_FILE" ]; then set -a; . "$ENV_FILE"; set +a; fi
 : "${KBP_OPENAI_API_KEY:?missing — scripts/facade.env must set KBP_OPENAI_API_KEY}"
 : "${KBP_PG_DSN:?missing — scripts/facade.env must set KBP_PG_DSN}"
+# 잡 staging 이 여기 없으면 /parse·/ingest 접수가 런타임에 전면 실패한다.
+: "${MINIO_ENDPOINT:?missing — scripts/facade.env must set MINIO_ENDPOINT (호스트 dev 는 localhost:9000)}"
 # Raised parse read-timeout (multi-table PDFs take ~400s+). Code default is 1800.
 export KBP_PARSE_SVC_TIMEOUT="${KBP_PARSE_SVC_TIMEOUT:-1800}"
 

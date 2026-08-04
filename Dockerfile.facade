@@ -12,4 +12,9 @@ RUN pip install --no-cache-dir uv && \
     (uv pip install --system --no-cache -r requirements.txt 2>/dev/null || uv pip install --system --no-cache -e .) && \
     uv pip install --system --no-cache gunicorn uvicorn
 EXPOSE 19000
-CMD ["gunicorn","-k","uvicorn.workers.UvicornWorker","-w","2","-b","0.0.0.0:19000","--timeout","1800","service.app:app"]
+# -w 4: 레거시 4경로가 잡 완료를 기다리는데 그 대기는 DB 폴링뿐이라 2 보다는 늘려야
+# 한다. 8 은 최악 상주 메모리가 폐쇄망 박스에 안 맞는다(설계 §7.5) — kb 의 배치
+# 동시성이 2 이므로 4 로 충분하다.
+# --timeout 4200: KBP_JOB_LEGACY_WAIT_SECONDS(3300) 보다 커야 마스터가 대기 중인
+# 워커를 죽이지 않는다.
+CMD ["gunicorn","-k","uvicorn.workers.UvicornWorker","-w","4","-b","0.0.0.0:19000","--timeout","4200","service.app:app"]

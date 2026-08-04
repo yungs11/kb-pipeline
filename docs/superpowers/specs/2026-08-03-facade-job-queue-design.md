@@ -1040,7 +1040,9 @@ kb 의 `IngestionBatch` 도메인 모델 이식(`batch_key` 문자열로 갈음)
 5. **완료** — 레거시 4경로를 잡 래퍼로. 테스트 재배선은 `service/tests/conftest.py`
    하나로 처리했다(인메모리 repo/blobs + 인라인 디스패처 자동 주입) — 기존 파일들의
    단언을 손대지 않고 살렸다.
-6. ⬜ compose·런처·문서.
+6. **완료** — compose(dev/airgap `facade-worker` + `x-facade-env` 앵커 + `MINIO_*`),
+   `Dockerfile.facade`(`-w 4`, `--timeout 4200`), `scripts/run-facade-worker.sh`,
+   `scripts/facade.env`(MINIO_*), `restart-kbp-stack` 스킬, `docs/facade-api.md`.
 
 **라이브 검증(2026-08-04)**: facade(:19000) + facade-worker 를 실제로 띄우고 스캔 PDF
 6건을 동시 제출 → **정확히 4건만 running, 2건 queued**가 6회 관측 내내 유지됐다. 슬롯이
