@@ -41,6 +41,18 @@ log = logging.getLogger("kb_pipeline.service.jobs.staging_gc")
 #: kb `MinioBlobStore` 가 쓰는 프리픽스. facade `/objects/*` 의 `staging` scope 와 같다.
 DEFAULT_PREFIX = "parse-staging"
 
+
+def staging_prefix() -> str:
+    """staging 프리픽스 — **쓰는 쪽(`/objects`)과 지우는 쪽(스윕)이 같은 값을 봐야 한다.**
+
+    어긋나면 격리는 안 되고 스윕만 헛돈다. 그래서 두 곳이 이 함수 하나를 부른다.
+
+    같은 MinIO 버킷을 **여러 배포가 공유**하면 배포별로 다르게 잡아야 한다(D16) —
+    스윕은 "내 DB 에 행이 없으면 고아" 로 판정하므로, 프리픽스가 같으면 남의 살아있는
+    staging 을 지운다. 예: `KBP_STAGING_PREFIX=parse-staging-prod`.
+    """
+    return (os.environ.get("KBP_STAGING_PREFIX") or DEFAULT_PREFIX).strip("/")
+
 #: 배치 업로드 갈래. 재수행이 참조하므로 TTL 을 따로 준다.
 _BATCH_SEGMENT = "batch/"
 
@@ -103,7 +115,7 @@ class StagingStore:
         return cls(
             client,
             bucket=os.environ.get("MINIO_BUCKET", "document-parser"),
-            prefix=os.environ.get("KBP_STAGING_PREFIX") or DEFAULT_PREFIX,
+            prefix=staging_prefix(),
         )
 
     def iter_objects(self) -> Iterator[tuple[str, str, dt.datetime | None]]:

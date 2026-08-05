@@ -164,6 +164,22 @@ podman-compose -f docker-compose.airgap.yml down -v     # 볼륨까지 삭제(�
 2. `.env` 의 `MINIO_ENDPOINT` 를 외부 주소(예: `minio.corp:9000`), HTTPS 면 `MINIO_SECURE=true`,
    `MINIO_ACCESS_KEY/SECRET_KEY/BUCKET` 를 외부 값으로.
 3. 외부 MinIO 에 `MINIO_BUCKET` 버킷 미리 생성.
+4. **⚠️ 이 버킷을 kbp 스택이 둘 이상 공유한다면(운영+검증 등) 프리픽스를 배포마다 다르게
+   잡는다. 안 하면 서로의 작업 파일을 지운다.**
+
+   ```
+   KBP_JOB_MINIO_PREFIX=kbp-jobs-prod        # 기본 kbp-jobs
+   KBP_STAGING_PREFIX=parse-staging-prod     # 기본 parse-staging
+   ```
+
+   **왜**: facade 의 고아 스윕은 *"객체는 있는데 내 `kbp.jobs` 에 그 행이 없다 → 고아 →
+   삭제"* 로 판정한다. 스택마다 Postgres 가 다르므로, 프리픽스가 같으면 **A 의 스윕이
+   B 가 방금 올린 살아있는 staging 을 지운다.** B 의 잡은 `staging object not found` 로
+   실패하고, 원인은 **다른 서버에** 있어 진단이 극도로 어렵다.
+
+   프리픽스를 나누면 서로를 나열조차 하지 않는다. 값은 배포 시작 시 로그에 찍힌다.
+   (`kbp-jobs` 는 잡 큐 staging, `parse-staging` 은 kb 의 미리보기·배치 원본이다 —
+   **둘 다** 나눠야 한다.)
 
 ## 부록 B. MinIO 버킷 수동 생성
 

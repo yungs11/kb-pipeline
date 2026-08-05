@@ -35,7 +35,10 @@ Scope = Literal["original", "staging", "page"]
 _LAYOUT = {
     "original": "{doc_id}/original/{name}",
     "page": "{doc_id}/{name}.jpeg",
-    "staging": "parse-staging/{name}",
+    # staging 프리픽스는 **지우는 쪽(스윕)과 같은 값**이어야 한다. 어긋나면 격리가 안 되고
+    # 스윕만 헛돈다. 그래서 여기 하드코딩하지 않고 `staging_gc.staging_prefix()` 를 부른다
+    # (같은 MinIO 를 여러 배포가 공유하면 배포별로 달라야 한다 — D16).
+    "staging": "{staging_prefix}/{name}",
 }
 
 #: staging 은 doc_id 를 키에 넣지 않는다(kb 의 BlobStore 계약이 평평한 키다).
@@ -57,6 +60,10 @@ def build_key(scope: str, doc_id: str, name: str) -> str:
     for part in parts:
         if not part or not _SAFE.match(part) or ".." in part:
             raise ObjectStoreError(f"unsafe path component: {part!r}")
+    if scope == "staging":
+        from service.jobs.staging_gc import staging_prefix
+
+        return _LAYOUT[scope].format(staging_prefix=staging_prefix(), name=name)
     if scope == "page" and "." in name:
         # 확장자는 여기서 붙인다. 소비자가 이미 붙여 보내면 `x.jpeg.jpeg` 가 되고,
         # 쓰는 키와 읽는 키가 어긋나 썸네일이 조용히 404 가 된다.

@@ -178,3 +178,43 @@ def test_defaults_are_one_hour_and_seven_days(monkeypatch):
 def test_garbage_env_falls_back_to_default(monkeypatch):
     monkeypatch.setenv("KBP_STAGING_TTL_SECONDS", "off")
     assert StagingGcConfig().preview_ttl_seconds == 3600
+
+
+# ── D16: 같은 버킷을 공유하는 배포 격리 ─────────────────────────────────────
+
+def test_write_and_sweep_prefixes_are_the_same_value(monkeypatch):
+    """쓰는 쪽(`/objects`)과 지우는 쪽(스윕)이 어긋나면 격리는 안 되고 스윕만 헛돈다."""
+    from service.jobs.staging_gc import staging_prefix
+    from service.objects import build_key
+
+    monkeypatch.setenv("KBP_STAGING_PREFIX", "parse-staging-prod")
+    assert staging_prefix() == "parse-staging-prod"
+    assert build_key("staging", "", "sess/input.bin") == "parse-staging-prod/sess/input.bin"
+
+
+def test_default_prefix_is_unchanged(monkeypatch):
+    """기존 배포의 키가 바뀌면 안 된다 — 이미 적재된 객체를 못 찾는다."""
+    from service.jobs.staging_gc import staging_prefix
+    from service.objects import build_key
+
+    monkeypatch.delenv("KBP_STAGING_PREFIX", raising=False)
+    assert staging_prefix() == "parse-staging"
+    assert build_key("staging", "", "sess/input.bin") == "parse-staging/sess/input.bin"
+
+
+def test_sweep_only_sees_its_own_prefix(monkeypatch):
+    """다른 배포의 프리픽스는 나열조차 하지 않는다."""
+    from service.jobs.staging_gc import StagingStore
+
+    class FakeMinio:
+        def __init__(self):
+            self.asked = []
+
+        def list_objects(self, bucket, prefix, recursive):
+            self.asked.append(prefix)
+            return []
+
+    monkeypatch.setenv("KBP_STAGING_PREFIX", "parse-staging-prod")
+    c = FakeMinio()
+    list(StagingStore(c, bucket="document-parser", prefix="parse-staging-prod").iter_objects())
+    assert c.asked == ["parse-staging-prod/"]

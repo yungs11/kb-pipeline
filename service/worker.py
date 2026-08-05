@@ -261,6 +261,22 @@ class Worker:
             target=self._heartbeat_loop, name="kbp-heartbeat", daemon=True)
         self._hb_thread.start()
 
+        # 같은 MinIO 를 여러 배포가 공유하면 프리픽스가 격리의 전부다(D16). 어떤 값으로
+        # 도는지 로그에 남기지 않으면, 남의 staging 을 지우고 있어도 알 방법이 없다.
+        try:
+            from service.jobs.blobs import DEFAULT_PREFIX as _job_prefix_default
+            from service.jobs.staging_gc import staging_prefix as _staging_prefix
+
+            log.info(
+                "gc prefixes: bucket=%s jobs=%s staging=%s "
+                "(같은 버킷을 쓰는 배포가 둘 이상이면 배포마다 달라야 한다)",
+                os.environ.get("MINIO_BUCKET", "document-parser"),
+                os.environ.get("KBP_JOB_MINIO_PREFIX") or _job_prefix_default,
+                _staging_prefix(),
+            )
+        except Exception:  # noqa: BLE001 - 로그 실패로 기동을 막지 않는다
+            log.debug("gc prefix 로깅 실패", exc_info=True)
+
         # GC 는 전용 스레드다 — 틱에 넣으면 claim 이 멎는다.
         self._gc_thread = threading.Thread(
             target=self._gc_loop, name="kbp-gc", daemon=True)
