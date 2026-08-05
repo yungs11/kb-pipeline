@@ -146,23 +146,34 @@ def _render_and_upload(
     pages = ``[{page_number, page_uuid, minio_object}]`` (spec §5.1.5 응답). 키 규칙(잠금):
     ``page_uuid="{docs_id}_{p}"``, ``minio_object="{docs_id}/{docs_id}_{p}.jpeg"``.
 
-    minio 가 없으면(미설정) 업로드는 건너뛰되 page 메타(키 조립)는 그대로 만든다 — 키는
-    orchestrator/UI 가 조립하는 규칙과 동일하므로 메타만 있어도 일관적. 개별 페이지 업로드
-    실패는 ``put_page_image`` 가 비치명 처리(None 반환)한다.
+    **``minio_object`` 는 실제로 올라간 객체만 가리킨다.** 업로드를 안 했거나(미설정)
+    실패했으면 ``None`` 이다. 예전에는 결과와 무관하게 키를 채웠는데, 그러면 소비자가
+    존재하지 않는 객체를 ``chunks_meta`` 에 저장하고 인용 이미지가 조용히 404 가 된다
+    (실측 2026-08-05: MinIO 없이 단독 기동 시 7페이지 전부 가짜 키를 응답에 실었다).
+    이미지가 없다는 건 ``None`` 으로 말해야 소비자가 링크를 안 만든다.
+
+    페이지 메타(``page_count``·``page_number``)는 업로드와 무관하게 항상 만든다 —
+    청크→페이지 매핑(adaptive_chunk ``pages``)과 문서 메타가 여기 의존한다.
     """
     render = render or render_pdf_pages
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     pages: list[dict] = []
+    # 업로드가 한 번 실패하면 남은 페이지는 시도하지 않는다. 접속 불가일 때 페이지마다
+    # 재시도하면 minio 라이브러리 백오프가 누적된다(실측: 7페이지에 50초 — 86페이지면 10분).
+    can_upload = minio is not None
     if ext == "pdf":
         rendered = render(file_bytes)
         page_count = len(rendered)
         for rp in rendered:
             page_uuid = f"{docs_id}_{rp.page_number}"
-            key = minio.page_image_object_key(docs_id, page_uuid) if minio else (
-                f"{docs_id}/{page_uuid}.jpeg"
-            )
-            if minio is not None:
-                minio.put_page_image(docs_id, page_uuid, rp.jpeg)
+            key = None
+            if can_upload:
+                key = minio.put_page_image(docs_id, page_uuid, rp.jpeg)
+                if key is None:
+                    log.warning(
+                        "page image upload failed for %s — 남은 페이지 업로드를 중단한다"
+                        " (minio_object=None 으로 응답)", page_uuid)
+                    can_upload = False
             pages.append({
                 "page_number": rp.page_number,
                 "page_uuid": page_uuid,
@@ -172,11 +183,7 @@ def _render_and_upload(
     # 단일 이미지 — 원본 1장을 JPEG 정규화해 page 1 로 업로드(spec §5.1.5).
     jpeg = _image_to_jpeg(file_bytes)
     page_uuid = f"{docs_id}_1"
-    key = minio.page_image_object_key(docs_id, page_uuid) if minio else (
-        f"{docs_id}/{page_uuid}.jpeg"
-    )
-    if minio is not None and jpeg:
-        minio.put_page_image(docs_id, page_uuid, jpeg)
+    key = minio.put_page_image(docs_id, page_uuid, jpeg) if (can_upload and jpeg) else None
     pages.append({"page_number": 1, "page_uuid": page_uuid, "minio_object": key})
     return 1, pages
 

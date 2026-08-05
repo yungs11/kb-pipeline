@@ -403,3 +403,63 @@ def test_default_docs_id_is_content_hash_prefix():
         render=_no_render, minio=None,
     )
     assert out["docs_id"] == expect
+
+
+# ── minio_object 는 실제로 올라간 것만 가리킨다 ────────────────────────────
+#
+# 예전에는 업로드 결과와 무관하게 키를 채워, MinIO 가 없거나 불통이면 소비자가 **존재하지
+# 않는 객체**를 chunks_meta 에 저장하고 인용 이미지가 조용히 404 가 됐다.
+
+class _FailingMinio(_FakeMinio):
+    """N번째 페이지부터 업로드가 실패한다(put_page_image 계약: 실패면 None)."""
+
+    def __init__(self, fail_from: int = 1):
+        super().__init__()
+        self.fail_from = fail_from
+        self.attempts = 0
+
+    def put_page_image(self, docs_id, page_uuid, jpeg_bytes):
+        self.attempts += 1
+        if self.attempts >= self.fail_from:
+            return None
+        return super().put_page_image(docs_id, page_uuid, jpeg_bytes)
+
+
+def _render_pages(out, minio, n=3):
+    from parse_service.app import _render_and_upload
+
+    return _render_and_upload(
+        b"%PDF-1.7", "doc.pdf", "ab12cd34ef560000",
+        minio=minio, render=lambda b: [_RP(i + 1) for i in range(n)],
+    )
+
+
+def test_failed_upload_reports_none_not_a_fabricated_key():
+    m = _FailingMinio(fail_from=1)
+    page_count, pages = _render_pages(None, m)
+    assert page_count == 3
+    assert [pg["minio_object"] for pg in pages] == [None, None, None]
+
+
+def test_upload_stops_after_the_first_failure():
+    """접속 불가일 때 페이지마다 재시도하면 백오프가 누적된다(실측 7페이지 50초)."""
+    m = _FailingMinio(fail_from=1)
+    _render_pages(None, m)
+    assert m.attempts == 1, "첫 실패 후 남은 페이지를 또 시도했다"
+
+
+def test_pages_before_the_failure_keep_their_key():
+    m = _FailingMinio(fail_from=2)
+    _, pages = _render_pages(None, m)
+    assert pages[0]["minio_object"] == "ab12cd34ef560000/ab12cd34ef560000_1.jpeg"
+    assert pages[1]["minio_object"] is None and pages[2]["minio_object"] is None
+
+
+def test_no_minio_yields_no_keys_but_keeps_page_metadata():
+    """페이지 수·번호는 청크→페이지 매핑과 문서 메타가 쓰므로 항상 만든다."""
+    page_count, pages = _render_pages(None, None)
+    assert page_count == 3
+    assert [pg["page_number"] for pg in pages] == [1, 2, 3]
+    assert [pg["page_uuid"] for pg in pages] == [
+        "ab12cd34ef560000_1", "ab12cd34ef560000_2", "ab12cd34ef560000_3"]
+    assert all(pg["minio_object"] is None for pg in pages)
