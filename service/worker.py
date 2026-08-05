@@ -119,6 +119,9 @@ class Worker:
             ``SWEEP_INTERVAL`` 마다. 부팅 지연에 SWEEP_INTERVAL(6h)을 재사용하면
             재기동이 잦은 환경에서 **한 번도 안 돈다** — 고아가 쌓이는 게 정확히 그
             환경이다.
+          * staging 스윕 — kb 의 ``parse-staging/`` 을 나이로만 수거한다(D20). 위 둘과
+            **프리픽스도 판정도 다르다** — 참조가 kb DB 에 있어 facade 는 "누가 아직
+            쓰는가" 를 알 수 없으므로 순수 TTL 이다. 고아 스윕과 같은 주기를 쓴다.
         """
         gc_interval = _env_int("KBP_JOB_GC_INTERVAL_SECONDS", 3600)
         sweep_interval = _env_int("KBP_JOB_ORPHAN_SWEEP_INTERVAL_SECONDS", 21600)
@@ -135,6 +138,7 @@ class Worker:
                     next_gc = time.monotonic() + gc_interval
                 if now >= next_sweep:
                     gc_mod.run_orphan_sweep(self.repo, self.blobs)
+                    self._sweep_staging()
                     # lock 을 못 잡아 건너뛴 경우에도 타이머는 리셋한다
                     # (매 사이클 try-lock 을 두드리지 않게).
                     next_sweep = time.monotonic() + sweep_interval
@@ -143,6 +147,19 @@ class Worker:
                 next_gc = time.monotonic() + gc_interval
                 next_sweep = time.monotonic() + sweep_interval
             self._shutdown.wait(tick)
+
+    def _sweep_staging(self) -> None:
+        """kb 의 ``parse-staging/`` TTL 스윕. 실패해도 잡 큐 GC 를 막지 않는다.
+
+        MinIO 자격증명이 없거나(개발 기동) 프리픽스가 비어 있으면 조용히 넘어간다 —
+        이건 부가 청소지 큐 동작의 전제가 아니다.
+        """
+        from service.jobs.staging_gc import StagingStore, run_staging_sweep
+
+        try:
+            run_staging_sweep(StagingStore.from_env())
+        except Exception:  # noqa: BLE001 - staging 청소 실패가 GC 스레드를 죽이면 안 된다
+            log.exception("staging sweep failed; continuing")
 
     # ── 틱 ─────────────────────────────────────────────────────────────────
 

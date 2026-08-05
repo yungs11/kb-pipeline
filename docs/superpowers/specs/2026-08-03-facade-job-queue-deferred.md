@@ -336,7 +336,30 @@ docx 13 · pdf 11 · xlsx 10 이고, 3.1 띄어쓰기 · 3.2 특수문자 · 3.4
 계산한 `gate_summary` 로 판정하는데 pdf·docx 는 doc_guard 가 원본을 직접 파싱하므로
 파싱이 두 번 일어난다.
 
-### D20. `parse-staging/` 누적 — 미리보기 이탈분 + 배치 차단분
+### D20. `parse-staging/` 누적 — 미리보기 이탈분 + 배치 차단분 — ✅ **구현 완료 (2026-08-05)**
+
+> **kb 가 지우고, facade 가 남은 걸 나이로 쓸어낸다.**
+>
+> kb — 적재 시 네 종류를 모두 지운다(`routers/kb.py`). 예전엔 `original`·`sidecar` 만
+> 지워 `chunk_preview`·`preview_latest` 가 남았다. `chunk_preview` 는 **preview_session_id**
+> 로 키가 잡히므로 `preview_latest` 포인터를 읽어 실제 키를 찾는다. 배치는
+> `status == "succeeded"` 면 지운다(`and canonical_path` 조건 제거 — 승격이 실패한
+> 성공 항목의 원본이 남던 구멍).
+>
+> **배치 실패분은 일부러 남긴다.** 재수행(`POST /batches/{id}/items/{id}/retry`)이 이
+> 객체를 그대로 다시 쓰고 없으면 409 로 거절한다(`routers/batches.py:333`). 처음엔
+> "terminal 이면 성패 무관 삭제" 로 고쳤다가 재수행이 통째로 죽는 걸 발견하고 되돌렸다.
+>
+> facade — `service/jobs/staging_gc.py` 신규. 잡 큐 GC 와 **프리픽스도 판정도 다르다**:
+> 참조가 kb DB 에 있어 "행이 없으면 고아" 를 쓸 수 없고 **나이로만** 지운다. 두 갈래에
+> 다른 TTL 을 준다 — preview `KBP_STAGING_TTL_SECONDS`(1h), batch
+> `KBP_STAGING_BATCH_TTL_SECONDS`(7d, 재수행 창). 모르는 키 형식은 건드리지 않는다.
+> worker 의 GC 스레드가 고아 스윕과 같은 주기로 호출한다.
+>
+> 실행 결과(2026-08-05): 323건 → 3건, **320건 회수**. 남은 3건은 재수행 창 안의 배치 원본.
+>
+> 아래 원래 분석은 기록으로 남긴다.
+
 
 실측(2026-08-05, `document-parser` 버킷): `parse-staging/` 아래 **323건 214.7MB**,
 2026-07-07 ~ 08-04 에 걸쳐 쌓였다. 원인이 둘이다.

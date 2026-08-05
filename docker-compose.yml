@@ -17,6 +17,12 @@ x-facade-env: &facade_env
   # facade 가 호스트 포트로 노출되므로 반드시 채운다. kb 스택의 KBP_FACADE_KEY 와
   # 같은 값이어야 적재·검색이 통과한다. 배포 전 검증은 verify-bundle.sh 가 막는다.
   KBP_FACADE_KEY: ${KBP_FACADE_KEY:-}
+  # kb 가 남긴 `parse-staging/` 임시본 수거(D20). 잡 큐 GC 와 프리픽스도 판정도 다르다 —
+  # 참조가 kb DB 에 있어 facade 는 나이로만 지운다. 0 이면 그 갈래 정지.
+  #   preview  : 파싱 미리보기 세션(적재 누르기 전). 짧게.
+  #   batch    : 배치 원본. 실패 항목 **재수행**이 이 객체를 다시 쓰므로 길게.
+  KBP_STAGING_TTL_SECONDS: ${KBP_STAGING_TTL_SECONDS:-3600}
+  KBP_STAGING_BATCH_TTL_SECONDS: ${KBP_STAGING_BATCH_TTL_SECONDS:-604800}
   KBP_PG_DSN: postgres://edgequake:${POSTGRES_PASSWORD:-edgequake_secret}@postgres:5432/edgequake
   KBP_OPENAI_API_KEY: ${KBP_OPENAI_API_KEY}
   KBP_OPENAI_BASE_URL: ${KBP_OPENAI_BASE_URL}
