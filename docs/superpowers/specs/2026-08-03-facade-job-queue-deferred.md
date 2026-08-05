@@ -514,3 +514,41 @@ facade GC 는 이걸 못 치운다 — 고아 스윕이 `kbp-jobs/` 프리픽스
    짧으면 살아있는 세션을 깬다.
 
 먼저 (1)이 맞고, (2)는 이미 쌓인 214MB 를 한 번 걷어내는 용도로 유용하다.
+
+### D21. `community` 버킷 상한 1 은 **전역**이다 — 다중 KB 지연
+
+`BUCKETS_FOR_KIND["community"] = ("community",)` 는 버킷 이름에 workspace 를 섞지 않는다
+(`admission.py:31`). 상한이 1(`KBP_JOB_LIMIT_COMMUNITY`)이므로 **한 KB 의 커뮤니티 빌드가
+도는 동안 다른 모든 KB 의 빌드가 `queued` 로 대기**한다. `max_runtime` 이 7200s 라 최악의
+지연 상한이 KB 수에 비례한다.
+
+D10 의 claim-clear 설계(트리거마다 새 잡 + 상한 1 직렬화)와 겹치면 더 눈에 띈다 — 직렬화가
+"나중 문서를 커버" 하는 수단이면서 동시에 다중 KB 지연의 원인이다.
+
+**왜 범위 밖**: D10 은 "커뮤니티 빌드를 유량제어 안으로" 가 목표다. 지금 동작(BackgroundTask,
+상한 없음)보다 나빠지지 않는다. 버킷을 workspace 별로 쪼개면 `expand_running_buckets` 의
+카운팅 축이 바뀌어 기존 잡의 상한 계산까지 영향을 받는다.
+
+**할 일**: KB 가 여럿인 운영에서 커뮤니티 빌드 지연이 관측되면 버킷을
+`community:{workspace}` 로 쪼개고 상한을 per-workspace 로 재정의한다. 그때
+`KBP_JOB_LIMIT_COMMUNITY` 의 의미가 "전역"에서 "workspace 당" 으로 바뀌는 것을 문서에 명시.
+
+### D22. 커뮤니티 빌드의 **두 번째 진입점** — 검색의 build-if-missing
+
+`kb_pipeline/search.py:169-176` 이 global 검색에서 커뮤니티 리포트가 없으면
+`build_workspace_communities` 를 **직접** 호출한다(`build_if_missing` 기본값 `True`).
+이 경로는 잡 큐를 거치지 않고 **facade 웹 프로세스에서** 돈다.
+
+그래서 D10 의 효과가 절반이다:
+- 유량제어 밖 — 큐의 `community` 잡과 검색 트리거 빌드가 **동시에** 돌 수 있어, D10 이
+  기대는 "버킷 상한 1 직렬화" 가 깨진다
+- 웹 프로세스 점유 — D10 이 `/communities/build` 에서 없앤 문제가 이 경로엔 남는다
+
+**왜 범위 밖**: D10 은 `/communities/build` 엔드포인트를 큐로 옮기는 것이다. 검색 경로는
+동기 응답 안에서 "없으면 지금 만든다" 는 다른 계약이고(잡으로 바꾸면 검색이 빌드 완료까지
+대기해야 한다), 끊으면 첫 검색이 빈 결과를 준다.
+
+**할 일**: 셋 중 하나. (a) `build_if_missing` 기본값을 `False` 로 두고 적재 후 트리거에만
+의존, (b) 검색이 큐에 잡을 넣고 그 회차는 커뮤니티 없이 답한다, (c) 현행 유지하고 D10 의
+직렬화 보장을 "엔드포인트 경유분에 한한다" 로 축소 서술. 검색 품질 결정이 섞여 있어
+사용자 판단이 필요하다.
