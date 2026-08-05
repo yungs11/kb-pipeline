@@ -71,14 +71,21 @@ def test_put_page_image_uploads_with_exact_call_and_returns_key():
     assert fake.made_buckets == []
 
 
-def test_put_page_image_creates_bucket_when_missing():
+def test_put_page_image_never_creates_the_bucket():
+    """버킷은 **인프라가 미리 만든다** — 파서가 만들지 않는다.
+
+    예전엔 없으면 만들었는데, `bucket_exists`/`make_bucket` 은 버킷-관리 권한을 요구해
+    업로드 전용 자격증명에서 AccessDenied 로 죽는다(`minio_client.py:99-103`). 그래서
+    존재 확인 없이 곧장 `put_object` 한다 — 버킷이 없으면 그 실패는 비치명으로 처리된다.
+    kb 쪽 `clients/minio_client.py` 와 같은 정책이다.
+    """
     fake = FakePutObjectClient(bucket_exists=False)
     store = MinioStore(fake, bucket="document-parser")
 
     key = store.put_page_image("doc99", "doc99_2", b"img")
 
     assert key == "doc99/doc99_2.jpeg"
-    assert fake.made_buckets == ["document-parser"]
+    assert fake.made_buckets == []          # 권한 없는 호출을 시도조차 하지 않는다
     assert len(fake.put_calls) == 1
 
 
