@@ -3,6 +3,46 @@
 
 # 적재 잡 취소 (D6) + 잡 경로 기본화
 
+## ✅ 구현 진행 (2026-08-06)
+
+**1/3 완료 — 백엔드 핵심** (kb `4bd434e`)
+- `schemas/ingestion.py` — `IngestResult.status` 에 `canceled`
+- `models/ingestion_job.py` + `migrations/a3b5d7f9c1e2` — `cancel_requested`
+  (upgrade/downgrade 실기동 확인)
+- `repositories.py` — `is_cancel_requested`, `request_cancel_in_kb`(단일 원자 UPDATE)
+- `core/pipeline.py` — `should_cancel` 운반(ingest_document → tail → 헬퍼),
+  헬퍼 7튜플 계약, 체크포인트 3곳, `_canceled`(delete_doc 미호출)
+- `workers/tasks.py` — 진입 가드, `_should_cancel` 클로저(새 세션·fail-open·`own` 가드),
+  `canceled` 분기
+- 회귀 0건(19건 그대로)
+
+> 구현 중 발견: `_should_cancel` 을 `if _staged:` 안에 정의하면 dify 경로에서
+> `UnboundLocalError` 다(호출은 분기 밖). 분기 **앞**에 정의해야 한다.
+
+**2/3 남음 — API·배치**
+- `routers/jobs.py` — `POST /kb/{kb_id}/jobs/{job_id}/cancel`. §2.5 동작 순서대로:
+  provider 409 → `request_cancel_in_kb` → `canceled` 면 문서·배치아이템 전이 →
+  0행이면 `session.expire(job)` 후 재조회해 `stage=='insert'`/terminal 구분 → 409
+  (`SqlDocumentRepo` import 필요)
+- `schemas/jobs.py` — `JobStatus.provider` + `_to_status(job, doc, kb)` 시그니처
+- `batch_repository.py` — `TERMINAL_STATUSES` 에 `canceled`,
+  `retry_failed_item` 이 `cancel_requested` 비움, `find_item_by_job_id` 신설
+- `batch_worker.py` — `canceled` 분기(+ `error` 는 비운다)
+- `models/batch_ingestion.py:108` 주석
+- `config.py:163` `use_jobs=True` + `.env.example`·`.env.airgap.example`
+
+**3/3 남음 — 프론트** (§2.7 8+3곳, §2.8 버튼)
+- `lib/types.ts` — `JobStatusValue`·`BatchItemStatus.status`·`JobStatus.provider`
+- `JobList.tsx` — `known`·`label`·`TERMINAL`·버튼·:29 주석
+- `JobProgressInline.tsx:14` `TERMINAL`
+- `BatchStatusPanel.tsx` `statusLabel`
+- `DocumentList.tsx` — 배지 + **`HIDDEN` 필터에 `canceled`**
+- `DocumentDetailModal.tsx`, `app/kb/[kbId]/documents/[docId]/page.tsx`
+- `app/globals.css` `.badge.canceled`
+- `api.ts` `cancelKbJob`
+
+**테스트·문서** — §6 전부 + `_workspace/` 반영 + alembic 스모크
+
 > 선행 plan `2026-08-05-idempotency-key-lifetime-plan.md` §6 이 이관한 미해결 배선 7건을
 > 여기서 푼다. 그 plan 은 v7 READY 로 구현·커밋 완료(kb `222a477`, kbp `5981769`).
 >
