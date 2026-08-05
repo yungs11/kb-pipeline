@@ -624,3 +624,88 @@ def test_refs_in_use_matches_any_ref_column(repo):
     repo.submit(kind="chunk", payload_ref="c")
     used = repo.refs_in_use(["a", "b", "c", "zzz"])
     assert used == {"a", "b", "c"}
+
+
+# ── D5: 재시도 경로도 중복 적재를 막는다 ────────────────────────────────────
+#
+# `_recover`(회수 경로)는 `stage='inserting'` 을 최우선 분기로 막고 있었는데, `requeue`
+# (runner 예외 경로)는 stage 를 무조건 지우고 queued 로 되돌렸다. edgequake 제출 후
+# 폴링 중 5xx·타임아웃이면 `classify` 가 재시도 가능으로 분류하므로, ingest(max 3)가
+# parse 부터 다시 돌며 **같은 문서를 또 제출**했다.
+
+def _claim_and_insert_stage(repo, worker, kind):
+    repo.submit(kind=kind, workspace_key="ws-dup")
+    claimed = repo.claim(worker_id=worker, local_free=1)[0]
+    repo.set_stage(claimed.id, worker_id=worker, attempt=claimed.attempt,
+                   stage="inserting")
+    return claimed
+
+
+def test_requeue_after_insert_stage_fails_instead_of_retrying(repo, worker):
+    """제출까지 갔으면 되돌리지 않는다 — 되돌리면 중복 적재다."""
+    claimed = _claim_and_insert_stage(repo, worker, "ingest")
+    repo.requeue(claimed.id, worker_id=worker, attempt=claimed.attempt,
+                 error="downstream 503")
+    row = repo.get(claimed.id)
+    assert row["status"] == "failed"
+    assert "not retried" in (row["error"] or "")
+    assert row["completed_at"] is not None
+
+
+def test_requeued_insert_stage_job_is_never_claimed_again(repo, worker):
+    """terminal 이므로 다른 워커가 집어갈 수 없다."""
+    claimed = _claim_and_insert_stage(repo, worker, "ingest")
+    repo.requeue(claimed.id, worker_id=worker, attempt=claimed.attempt, error="boom")
+    assert repo.claim(worker_id=worker, local_free=10) == []
+
+
+def test_requeue_before_insert_stage_still_retries(repo, worker):
+    """parse·chunk 단계의 일시 실패는 여전히 재시도돼야 한다(회귀 방지)."""
+    repo.submit(kind="ingest", workspace_key="ws-dup2")
+    claimed = repo.claim(worker_id=worker, local_free=1)[0]
+    repo.set_stage(claimed.id, worker_id=worker, attempt=claimed.attempt,
+                   stage="parsing")
+    repo.requeue(claimed.id, worker_id=worker, attempt=claimed.attempt, error="503")
+    row = repo.get(claimed.id)
+    assert row["status"] == "queued"
+    assert row["error"] == "503"          # 원래 사유가 보존된다
+    assert row["stage"] is None
+    assert repo.claim(worker_id=worker, local_free=10) != []
+
+
+def test_insert_stage_requeue_clears_the_idem_key(repo, worker):
+    """실패로 끝나면 멱등키를 비운다 — 안 비우면 같은 문서 재제출이 영구히 막힌다."""
+    repo.submit(kind="ingest", workspace_key="ws-dup3", idem_key="dup-key-1")
+    claimed = repo.claim(worker_id=worker, local_free=1)[0]
+    repo.set_stage(claimed.id, worker_id=worker, attempt=claimed.attempt,
+                   stage="inserting")
+    repo.requeue(claimed.id, worker_id=worker, attempt=claimed.attempt, error="503")
+    assert repo.get(claimed.id)["idem_key"] is None
+    # 같은 키로 다시 제출하면 새 잡이 만들어진다(옛 failed id 가 반환되지 않는다).
+    new_id = repo.submit(kind="ingest", workspace_key="ws-dup3", idem_key="dup-key-1")
+    assert new_id != claimed.id
+
+
+def test_insert_stage_guard_holds_on_both_paths(repo, worker):
+    """회수(_recover)와 재시도(requeue) 둘 다 같은 판정이어야 한다.
+
+    한쪽만 막으면 나머지 경로로 중복 적재가 샌다 — 이 테스트가 두 경로의 대칭을 고정한다.
+    """
+    outcomes = {}
+    for path in ("recover", "requeue"):
+        repo.submit(kind="ingest", workspace_key=f"ws-sym-{path}")
+        c = repo.claim(worker_id=worker, local_free=1)[0]
+        repo.set_stage(c.id, worker_id=worker, attempt=c.attempt, stage="inserting")
+        if path == "requeue":
+            repo.requeue(c.id, worker_id=worker, attempt=c.attempt, error="503")
+        else:
+            # lease 를 만료시켜 회수 경로를 태운다.
+            with psycopg.connect(DSN) as conn:
+                conn.execute(
+                    "UPDATE kbp.jobs SET heartbeat_at = now() - interval '1 day'"
+                    " WHERE id = %s", (c.id,))
+                conn.commit()
+            repo.claim(worker_id=worker, local_free=1)   # 유지보수 (1) 이 돈다
+        row = repo.get(c.id)
+        outcomes[path] = (row["status"], "not retried" in (row["error"] or ""))
+    assert outcomes["recover"] == outcomes["requeue"] == ("failed", True), outcomes

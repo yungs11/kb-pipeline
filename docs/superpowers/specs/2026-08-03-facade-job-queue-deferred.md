@@ -109,7 +109,27 @@ claim 마다 단조 증가하고, 회수 없이 세대만 바뀌는 경로가 �
 **언제 필요해지나**: 재시도가 아닌 이유로 lease 만 교체해야 할 때(예: 잡을 중단 없이
 다른 worker 로 이관). 그때는 `attempt_count` 가 세대와 시도 횟수 두 의미를 겸할 수 없다.
 
-## D5. insert 재시도 멱등 처리
+## D5. insert 재시도 멱등 처리 — ✅ **구멍 봉합 (2026-08-05)** / 전체 멱등화는 보류
+
+> Phase 1 의 전제("insert 는 재시도하지 않으니 중복 적재가 없다")에 **구멍이 있었다.**
+>
+> - `insert` kind 는 `max_attempts=1` 이 맞다. 그런데 **`ingest` kind 는 3** 이고
+>   내부에서 `insert_chunks` 를 부른다.
+> - `_recover`(회수 경로)는 `stage='inserting'` 을 최우선 분기로 막고 있었지만,
+>   `requeue`(runner 예외 경로)는 **stage 를 무조건 지우고 `queued` 로 되돌렸다.**
+> - `insert_chunks` 는 제출 후 완료를 폴링한다. 제출은 됐는데 폴링에서 5xx·타임아웃이
+>   나면 `classify` 가 **재시도 가능**으로 분류한다(§5.1). 그래서 ingest 가 parse 부터
+>   다시 돌며 같은 문서를 또 제출했다. `insert` kind 는 중복 대신 아무도 안 집는
+>   `queued` 좀비가 됐다(D13 의 한 갈래).
+>
+> **고친 것**: `requeue` 가 `_recover` 와 같은 규칙을 쓴다 — `stage='inserting'` 이면
+> `failed`(+`completed_at`, `idem_key` 비움), 아니면 종전대로 `queued`. 두 경로의 대칭을
+> 테스트로 고정했다(`test_insert_stage_guard_holds_on_both_paths`).
+>
+> **여전히 보류**: 아래 원안(submit/poll 분해 + `resume_document_id`·`should_cancel`·
+> `on_submitted` seam)은 그대로 범위 밖이다. 지금은 "중복 적재 대신 실패" 이지
+> "재시도해도 안전" 이 아니다. insert 자동 재시도를 원하게 될 때 seam 3종을 함께 넣는다.
+
 
 **지적**: `EdgequakeClient.insert_chunks()` 는 호출마다 새 문서를 제출한다
 (`service/edgequake.py:379`). 멱등키가 없어 재시도가 중복 적재다. 제대로 하려면

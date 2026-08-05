@@ -553,11 +553,32 @@ class JobRepo:
     def requeue(
         self, job_id: uuid.UUID, *, worker_id: str, attempt: int, error: str
     ) -> None:
-        """재시도 가능한 실패 — ``queued`` 로 되돌린다(``attempt_count`` 는 유지)."""
+        """재시도 가능한 실패 — ``queued`` 로 되돌린다(``attempt_count`` 는 유지).
+
+        **``stage='inserting'`` 이면 되돌리지 않고 ``failed`` 로 끝낸다.** ``_recover``
+        (회수 경로)와 같은 규칙이다 — 한쪽만 막으면 다른 쪽으로 중복 적재가 샌다.
+
+        구체적으로: ``insert_chunks`` 는 edgequake 에 문서를 제출한 뒤 완료를 폴링한다.
+        제출은 성공했는데 폴링 중 5xx·타임아웃이 나면 ``classify`` 가 이를 **재시도 가능**
+        으로 분류한다(§5.1). 예전에는 여기서 ``stage`` 를 무조건 NULL 로 지우고 ``queued``
+        로 되돌려, ``ingest``(``max_attempts=3``)가 parse 부터 다시 돌며 **같은 문서를 또
+        제출**했다. ``insert`` kind 는 ``max_attempts=1`` 이라 중복 대신 아무도 안 집는
+        ``queued`` 좀비가 됐다(D13). 둘 다 여기서 끊는다.
+
+        Postgres 는 ``SET`` 의 모든 식을 **갱신 전 행**으로 평가하므로, 같은 문장에서
+        ``stage = NULL`` 을 함께 써도 위 ``CASE`` 는 옛 값을 본다.
+        """
         self._fenced(
             """
             UPDATE kbp.jobs
-               SET status = 'queued', error = %s,
+               SET status = CASE WHEN stage = 'inserting' THEN 'failed'
+                                 ELSE 'queued' END,
+                   error = CASE WHEN stage = 'inserting'
+                                THEN 'insert already submitted to edgequake; not retried'
+                                ELSE %s END,
+                   completed_at = CASE WHEN stage = 'inserting' THEN now() END,
+                   idem_key = CASE WHEN stage = 'inserting' THEN NULL
+                                   ELSE idem_key END,
                    claimed_by = NULL, claimed_at = NULL, heartbeat_at = NULL, stage = NULL
              WHERE id = %s AND claimed_by = %s AND attempt_count = %s
                AND status = 'running'
