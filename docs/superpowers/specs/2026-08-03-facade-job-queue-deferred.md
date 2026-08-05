@@ -267,7 +267,16 @@ Postgres 에 넣고 있어(kb `documents`/`chunks_meta`) 이미 같은 제약 �
 **언제 필요해지나**: `22P05` 가 실제로 관측될 때. 그때 `blobs.py` 직렬화 진입점 한 곳에
 정제를 넣는다.
 
-## D10. `/communities/build` 를 큐로 편입
+## D10. `/communities/build` 를 큐로 편입 — ✅ **구현 완료 (2026-08-06)**
+
+> `community` kind 신설. 자기 버킷(상한 1), `max_runtime` 7200s, 재시도 허용(멱등).
+> 멱등키는 **claim 시점**에 비운다 — 성공까지 들고 있으면 running 빌드가 후속 트리거를
+> 흡수해 배치 뒤쪽 문서가 커버 안 되는 회귀가 된다. 전이 지점 두 곳(`JobRepo._admit`,
+> `InMemoryJobRepo.start`)을 모두 고쳤다.
+>
+> 남은 것은 D21(전역 상한의 다중 KB 지연)·D22(검색 `build_if_missing` 이 큐를 우회).
+> plan: `2026-08-05-idempotency-key-lifetime-plan.md` (v7, ultracode READY 7라운드).
+
 
 **지적**: 설계 §1 의 "API 프로세스는 다운스트림을 호출하지 않는다" 가 첫날부터 예외를
 갖는다 — `/communities/build` 는 `BackgroundTasks` 안에서 edgequake·LLM 호출 + DB 직결
