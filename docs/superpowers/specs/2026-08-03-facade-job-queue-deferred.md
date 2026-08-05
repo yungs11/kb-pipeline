@@ -333,7 +333,27 @@ GC 가 조용히 안 도는 상태를 감지할 수단이 없다. 로그로 시�
 TTL GC 가 이미 없는 키를 다시 지우며 WARN 오탐이 상시 발생한다. 기능적으로는 무해(멱등).
 "존재하지 않는 객체 삭제는 WARN 을 남기지 않는다" 정도로 구현 시 처리한다.
 
-### D19. facade `/gate/check` — pdf·docx 게이트 (전 포맷 multipart)
+### D19. facade `/gate/check` — pdf·docx 게이트 (전 포맷 multipart) — ❌ **안 함 (2026-08-05 결정)**
+
+> 사용자 결정: **적용할 룰이 아직 정해지지 않았다. 지금은 비활성이 맞다.**
+> pdf·docx 게이트를 켜지 않는다. 아래 분석은 룰이 확정될 때 다시 볼 근거로 남긴다.
+>
+> **함께 확인한 사실 — 룰 체계가 둘이다.**
+>
+> | | 룰 id | 상태 |
+> |---|---|---|
+> | 엑셀 게이트(현행) | `conflicting_code_mapping`·`empty_header`·`header_leak`·`ref_error`·`unclear_header`·`unmerged_table_banners` | ✅ 돈다. parse-svc `gate_summary` → doc_guard `/v1/check-excel` |
+> | multipart `/v1/check` | `3.1`~`6.3b` 14종 | ❌ 호출부 0건 |
+>
+> 그래서 kb 의 `excel_gate_default_disabled_rules = ["3.1","3.2","3.3","6.1"]` 은
+> **죽은 카탈로그의 id** 였다. `ExcelCheckRequest` 는 `{filename, gate_summary}` 뿐이라
+> `disabled_rules` 를 받지도 않는다 — 배선했어도 판정이 안 바뀐다. "셀병합·취소선을 껐다"
+> 고 읽히지만 실제로는 그 룰들이 그대로 도는 상태였다. 제거했다(kb `75e8c74`).
+>
+> 프론트 룰 선택 패널도 이미 없다(`disabledRules={[]}` 고정). 즉 UI→백엔드→doc_guard 가
+> 전 구간 죽어 있었다. 운반 경로(폼 → 잡 payload → `GateOptions`)만 남겼다 — 룰이 정해지면
+> 그 자리에 붙인다.
+
 
 doc_guard 는 엑셀 전용이 아니다. 실측(2026-08-04, `:8001/v1/rules`) 14개 룰 중
 docx 13 · pdf 11 · xlsx 10 이고, 3.1 띄어쓰기 · 3.2 특수문자 · 3.4 생략표현 ·
