@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import uuid
 from typing import Any, Callable
@@ -79,6 +80,7 @@ class JobRunner:
         parse_factory: Callable[[], Any] | None = None,
         chunk_factory: Callable[[], Any] | None = None,
         eq_factory: Callable[[], Any] | None = None,
+        community_builder: Callable[..., Any] | None = None,
     ) -> None:
         self.repo = repo
         self.blobs = blobs
@@ -88,6 +90,8 @@ class JobRunner:
         self._parse_factory = parse_factory
         self._chunk_factory = chunk_factory
         self._eq_factory = eq_factory
+        # 커뮤니티 빌더는 주입 가능해야 테스트가 LLM·DB 없이 돈다.
+        self._community_builder = community_builder
 
     # ── 클라이언트 (지연 조립) ─────────────────────────────────────────────
 
@@ -131,6 +135,8 @@ class JobRunner:
                 return self._run_insert(ctx)
             if kind == "ingest":
                 return self._run_ingest(ctx)
+            if kind == "community":
+                return self._run_community(ctx)
         except (JobFailed, JobRetryable, JobAborted):
             raise
         except Exception as exc:  # noqa: BLE001 - 다운스트림 예외 정규화
@@ -237,6 +243,39 @@ class JobRunner:
             "chunking_selection": selection,
             "edgequake_workspace_id": eq_ws,
         }
+
+    def _run_community(self, ctx: "_Ctx") -> dict[str, Any]:
+        """커뮤니티 재빌드(Louvain + 커뮤니티당 LLM 요약).
+
+        예전에는 `/communities/build` 가 FastAPI ``BackgroundTask`` 로 돌았다. 세 가지가
+        문제였다(D10):
+
+        * **유량제어 밖** — 잡 큐의 버킷 상한 계산에 안 들어가, 무거운 적재 4건이 도는
+          중에 겹쳐도 아무도 안 막았다. "facade 가 동시처리량을 소유한다" 는 전제의 구멍.
+        * **facade 웹 프로세스 점유** — BackgroundTask 는 응답 후 **같은 워커**에서 돈다.
+          LLM 이 섞인 장시간 작업이라 gunicorn 워커 하나가 그동안 요청을 못 받는다.
+        * **흔적 없음** — 잡 행이 없으니 상태 조회·재시도·취소가 없고, 죽으면 로그뿐이다.
+
+        멱등하다 — 같은 workspace 를 다시 빌드하면 결과가 같으므로 재시도가 안전하다
+        (`insert` 와 다른 점이고, 그래서 `max_attempts` 가 기본값이다).
+        """
+        workspace_id = ctx.payload.get("workspace_id")
+        if not workspace_id:
+            raise JobFailed("community job has no workspace_id")
+
+        # edgequake workspace UUID 로 해석한다 — 커뮤니티 행이 그 UUID 로 스코프된다.
+        eq_ws = self.eq_client.ensure_workspace(workspace_id, name=workspace_id)
+
+        self._stage(ctx, "building")
+        builder = self._community_builder
+        if builder is None:
+            from kb_pipeline.community import build_workspace_communities as builder
+
+        from service.llm import get_text_llm
+
+        result = builder(eq_ws, llm=get_text_llm(), dsn=os.environ["KBP_PG_DSN"])
+        return {"workspace_id": eq_ws,
+                "result": result if isinstance(result, (dict, list, str, int)) else None}
 
     # ── 보조 ───────────────────────────────────────────────────────────────
 

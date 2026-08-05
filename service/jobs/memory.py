@@ -72,11 +72,17 @@ class InMemoryJobRepo:
     # ── 인라인 실행이 쓰는 lease 전이 ──────────────────────────────────────
 
     def start(self, job_id, *, worker_id: str) -> int:
-        """인라인 디스패처용 claim 상당. 승인 판정 없이 바로 running 으로 만든다."""
+        """인라인 디스패처용 claim 상당. 승인 판정 없이 바로 running 으로 만든다.
+
+        `JobRepo._admit` 과 **같은 계약**이어야 한다 — community 는 claim 시점에 멱등키를
+        비운다(D10). 한쪽만 고치면 프로덕션과 인라인 경로의 키 수명이 갈린다.
+        """
         row = self.rows[_as_uuid(job_id)]
         row["attempt_count"] += 1
         row["status"] = "running"
         row["claimed_by"] = worker_id
+        if row.get("kind") == "community":
+            row["idem_key"] = None
         return row["attempt_count"]
 
     def set_stage(self, job_id, *, worker_id, attempt, stage) -> None:

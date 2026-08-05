@@ -335,3 +335,48 @@ def test_unknown_kind_fails():
     r = _runner()
     with pytest.raises(JobFailed):
         r.run(_job("bogus"), worker_id="w1", attempt=1)
+
+
+# ── community kind (D10) ───────────────────────────────────────────────────
+#
+# 예전에는 `/communities/build` 가 FastAPI BackgroundTask 로 돌아 유량제어 밖이었고,
+# facade 웹 프로세스를 오래 점유했으며, 실패해도 흔적이 없었다.
+
+def test_community_resolves_the_workspace_and_calls_the_builder(monkeypatch):
+    monkeypatch.setenv("KBP_PG_DSN", "postgres://x/y")
+    monkeypatch.setattr("service.llm.get_text_llm", lambda: (lambda p, pl: "요약"))
+    seen = {}
+
+    def builder(workspace_id, *, llm, dsn):
+        seen.update(workspace_id=workspace_id, dsn=dsn)
+        return {"reports_written": 3}
+
+    eq = SpyEq()
+    r = _runner(eq_client=eq, community_builder=builder)
+    out = r.run(_job("community", payload={"workspace_id": "kb-1"}),
+                worker_id="w", attempt=1)
+
+    # kb id → edgequake workspace uuid 해석. 커뮤니티 행이 그 uuid 로 스코프된다.
+    assert seen["workspace_id"] == eq.ensure_workspace("kb-1")
+    assert seen["dsn"] == "postgres://x/y"
+    assert out["workspace_id"] == seen["workspace_id"]
+    assert out["result"] == {"reports_written": 3}
+
+
+def test_community_commits_the_stage_before_building(monkeypatch):
+    """lease 를 잃었으면 **빌드를 시작하지 않는다** — 다른 세대가 이미 돌고 있다."""
+    monkeypatch.setenv("KBP_PG_DSN", "postgres://x/y")
+    called = []
+    r = _runner(repo=FakeRepo(lose_lease_at="building"), eq_client=SpyEq(),
+                community_builder=lambda ws, **k: called.append(ws))
+    with pytest.raises(JobAborted):
+        r.run(_job("community", payload={"workspace_id": "kb-1"}),
+              worker_id="w", attempt=1)
+    assert called == []
+
+
+def test_community_without_workspace_fails_fast():
+    """재시도해도 없는 값은 안 생긴다 — JobFailed(재시도 대상 아님)."""
+    r = _runner(eq_client=SpyEq(), community_builder=lambda ws, **k: None)
+    with pytest.raises(JobFailed):
+        r.run(_job("community", payload={}), worker_id="w", attempt=1)

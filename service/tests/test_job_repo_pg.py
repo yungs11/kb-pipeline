@@ -827,3 +827,46 @@ def test_cancel_on_terminal_job_returns_none(repo, worker):
 
 def test_cancel_on_missing_job_returns_none(repo, worker):
     assert repo.cancel(uuid.uuid4()) is None
+
+
+# ── D10: community 는 claim 시점에 멱등키를 비운다 ──────────────────────────
+#
+# 이 두 테스트는 `_admit` SQL 동작이라 **실 Postgres 에서만** 관측된다. 인메모리 더블은
+# _admit 을 아예 안 탄다(같은 계약을 memory.start 로 따로 검증한다).
+
+def test_community_idem_key_is_cleared_on_claim(repo, worker):
+    """빌드가 시작된 뒤 들어온 트리거는 **새 잡**이어야 한다.
+
+    성공까지 키를 들고 있으면 running 잡이 후속 트리거를 흡수하는데, 그 잡은 시작 시점의
+    그래프만 본다 → 배치 뒤쪽 문서의 엔티티가 커뮤니티에 영영 안 들어간다.
+    """
+    key = "community:ws-claimclear"
+    first = repo.submit(kind="community", workspace_key="ws-cc", idem_key=key)
+    c = [x for x in repo.claim(worker_id=worker, local_free=5) if x.id == first][0]
+    assert repo.get(c.id)["idem_key"] is None          # claim 이 비웠다
+
+    second = repo.submit(kind="community", workspace_key="ws-cc", idem_key=key)
+    assert second != first                              # 새 잡이 만들어진다
+
+
+def test_community_bursts_still_merge_while_queued(repo, worker):
+    """claim 전(queued)에 들어온 트리거는 여전히 합쳐진다(실측 한 배치 3회)."""
+    key = "community:ws-burst"
+    ids = {repo.submit(kind="community", workspace_key="ws-b", idem_key=key)
+           for _ in range(3)}
+    assert len(ids) == 1
+
+
+def test_insert_idem_key_survives_claim(repo, worker):
+    """kind 분기 회귀 — insert 키를 claim 에서 비우면 재실행 중복 적재가 되살아난다.
+
+    kb 의 재실행(arq max_tries·recover_stale·retry_failed_item)이 옛 잡을 맞아야 edgequake
+    에 문서가 두 번 들어가지 않는다.
+    """
+    key = "kb-insert:9f1c2d3e-4a5b-6c7d-8e9f-0a1b2c3d4e5f"
+    jid = repo.submit(kind="insert", workspace_key="ws-keep", idem_key=key)
+    c = [x for x in repo.claim(worker_id=worker, local_free=5) if x.id == jid][0]
+    assert repo.get(c.id)["idem_key"] == key            # 그대로 남아 있다
+
+    again = repo.submit(kind="insert", workspace_key="ws-keep", idem_key=key)
+    assert again == jid                                 # 재실행이 같은 잡을 맞는다

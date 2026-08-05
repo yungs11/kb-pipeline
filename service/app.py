@@ -19,7 +19,7 @@ import re
 
 from contextlib import asynccontextmanager
 
-from fastapi import (FastAPI, UploadFile, File, Form, Depends, BackgroundTasks,
+from fastapi import (FastAPI, UploadFile, File, Form, Depends,
                      Body, Header, HTTPException, Query, Response)
 
 from service.jobs.api import get_job_blobs as _job_blobs
@@ -29,7 +29,6 @@ from service.edgequake import EdgequakeClient
 from service.adaptive_chunk import AdaptiveChunkClient, MODAL_ATOMIC_MARKERS
 from service.parse_client import ParseSvcClient
 from service.llm import get_text_llm
-from kb_pipeline.community import build_workspace_communities
 
 logger = logging.getLogger("kb_pipeline.service")
 
@@ -182,7 +181,10 @@ def _job_runner(repo=Depends(_job_repo), blobs=Depends(_job_blobs)):
     return JobRunner(repo=repo, blobs=blobs,
                      parse_factory=lambda: _resolve(get_parse_client),
                      chunk_factory=lambda: _resolve(get_adaptive_chunk),
-                     eq_factory=lambda: _resolve(get_edgequake))
+                     eq_factory=lambda: _resolve(get_edgequake),
+                     # 커뮤니티 빌더는 LLM·DB 를 직접 잡으므로 테스트가 갈아끼울 수
+                     # 있어야 한다. 프로덕션에서는 None → runner 가 실물을 import 한다.
+                     community_builder=getattr(app.state, "job_community_builder", None))
 
 
 def _legacy_job(repo, blobs, runner, *, kind, payload, file_bytes=None,
@@ -501,22 +503,30 @@ def object_delete(key: str | None = None, prefix: str | None = None,
         raise _object_error(exc) from exc
 
 
-def _build_communities_job(workspace_id: str) -> None:
-    # W3 community build runs as a background task; never raise to the caller.
-    try:
-        build_workspace_communities(
-            workspace_id, llm=get_text_llm(), dsn=os.environ["KBP_PG_DSN"]
-        )
-    except Exception:  # noqa: BLE001
-        logger.exception("community build failed for workspace_id=%s", workspace_id)
-
-
 @app.post("/communities/build", status_code=202,
           dependencies=[Depends(require_facade_key)])
-def communities_build(workspace_id: str, background_tasks: BackgroundTasks,
+def communities_build(workspace_id: str,
+                      repo=Depends(_job_repo), blobs=Depends(_job_blobs),
                       eq=Depends(get_edgequake)):
-    # Community graph rows are scoped by the edgequake workspace UUID (stored in node
-    # properties), so resolve the kb id to that uuid for the DSN/workspace scope.
+    """커뮤니티 재빌드를 **잡 큐에 넣는다**(D10). 202 + `job_id`.
+
+    예전에는 FastAPI ``BackgroundTask`` 로 돌려 세 가지가 샜다 — 유량제어 밖(버킷 상한
+    계산에 안 들어감), facade 웹 프로세스 점유(응답 뒤 같은 워커에서 LLM 장시간 작업),
+    흔적 없음(상태·재시도·취소 불가). 이제 `community` kind 로 큐를 탄다.
+
+    **응답 계약 유지**: 기존 소비자가 읽는 `status`·`workspace_id` 를 그대로 둔다.
+    `job_id` 는 더한 것이라 옛 소비자를 깨지 않는다.
+
+    멱등키를 workspace 로 잡는다 — 적재마다 디바운스 없이 들어와도(실측 2026-08-05:
+    한 배치에 같은 workspace 로 3회) 살아있는 빌드가 있으면 그 잡 id 를 돌려준다.
+    """
+    from service.jobs import api as jobs_api
+
     eq_ws = eq.ensure_workspace(workspace_id, name=workspace_id)
-    background_tasks.add_task(_build_communities_job, eq_ws)
-    return {"status": "started", "workspace_id": eq_ws}
+    job_id = jobs_api.submit_job(
+        repo, blobs, kind="community",
+        payload={"workspace_id": workspace_id},
+        workspace_key=eq_ws,
+        idem_key=f"community:{eq_ws}",
+    )
+    return {"status": "started", "workspace_id": eq_ws, "job_id": str(job_id)}

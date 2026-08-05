@@ -51,7 +51,7 @@ log = logging.getLogger("kb_pipeline.service.jobs.repo")
 #: 2-인자 형식을 쓰는 이유는 schema.py 주석 참조 — edgequake 와 같은 DB 라 1-인자
 #: bigint 공간을 피한다.
 
-KINDS: tuple[str, ...] = ("parse", "chunk", "insert", "ingest")
+KINDS: tuple[str, ...] = ("parse", "chunk", "insert", "ingest", "community")
 
 TERMINAL = frozenset({"succeeded", "failed", "canceled"})
 
@@ -76,6 +76,9 @@ def max_attempts_by_kind() -> dict[str, int]:
         "chunk": default,
         "insert": _env_int("KBP_JOB_MAX_ATTEMPTS_INSERT", 1),
         "ingest": default,
+        # 커뮤니티 빌드는 멱등이다(같은 workspace 를 다시 빌드하면 결과가 같다) —
+        # insert 와 달리 재시도가 중복을 만들지 않는다.
+        "community": default,
     }
 
 
@@ -95,6 +98,8 @@ def max_runtime_by_kind() -> dict[str, int]:
         "chunk": _env_int("KBP_JOB_MAX_RUNTIME_CHUNK", 5400),
         "insert": _env_int("KBP_JOB_MAX_RUNTIME_INSERT", 6600),
         "ingest": _env_int("KBP_JOB_MAX_RUNTIME_INGEST", 14400),
+        # Louvain + 커뮤니티당 LLM 요약. 그래프가 커질수록 선형으로 늘어난다.
+        "community": _env_int("KBP_JOB_MAX_RUNTIME_COMMUNITY", 7200),
     }
 
 
@@ -467,7 +472,23 @@ class JobRepo:
             UPDATE kbp.jobs j
                SET status='running', claimed_by=%s, claimed_at=now(), heartbeat_at=now(),
                    attempt_count = j.attempt_count + 1,
-                   started_at=now(), error=NULL, stage=NULL
+                   started_at=now(), error=NULL, stage=NULL,
+                   -- community 는 **claim 시점에** 멱등키를 비운다(D10).
+                   --
+                   -- 커뮤니티 빌드는 시작 시점의 그래프만 본다. 키를 성공까지 들고 있으면
+                   -- 빌드가 도는 동안(최대 7200s) 들어온 트리거가 전부 그 running 잡으로
+                   -- 흡수돼, 10건 배치에서 1번 문서가 빌드를 시작하면 2~10번 엔티티는
+                   -- 다음 업로드까지 커뮤니티가 없다. 기존 BackgroundTask 는 트리거마다
+                   -- 독립 빌드라 마지막 빌드가 전량 커버했으므로 그게 회귀다.
+                   --
+                   -- 비우면: queued 동안의 버스트는 여전히 합쳐지고(실측 한 배치 3회),
+                   -- 시작 후 트리거는 새 잡이 되어 버킷 상한 1 이 **직렬화**한다 →
+                   -- 앞 빌드가 끝나면 뒤 빌드가 돌아 나중 문서까지 커버한다.
+                   --
+                   -- 다른 kind 는 절대 비우지 않는다 — 재실행(arq max_tries·recover_stale·
+                   -- retry_failed_item)이 옛 succeeded insert 잡을 맞아야 edgequake
+                   -- 중복 적재가 막힌다.
+                   idem_key = CASE WHEN j.kind = 'community' THEN NULL ELSE j.idem_key END
               FROM unnest(%s::text[], %s::int[]) AS lim(kind, max_attempts)
              WHERE j.kind = lim.kind
                AND j.id = ANY(%s)

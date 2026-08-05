@@ -26,6 +26,9 @@ BUCKETS_FOR_KIND: dict[str, tuple[str, ...]] = {
     "chunk": ("chunk",),
     "insert": ("insert",),
     "ingest": ("parse", "chunk", "insert"),
+    # 커뮤니티 재빌드(Louvain + LLM 요약). 자기 버킷을 쓴다 — 적재 버킷을 나눠 쓰면
+    # 무거운 빌드 하나가 parse 슬롯을 먹어 업로드가 밀린다.
+    "community": ("community",),
 }
 
 #: workspace 상한을 적용하지 않는 키(설계 §3.4). 현행 /parse·/chunk 에는 workspace
@@ -137,6 +140,9 @@ def bucket_limits_from_env() -> dict[str, int]:
         "parse": _env_int("KBP_JOB_LIMIT_PARSE", 4),
         "chunk": _env_int("KBP_JOB_LIMIT_CHUNK", 2),
         "insert": _env_int("KBP_JOB_LIMIT_INSERT", 2),
+        # 전역 단일 그래프라 동시에 여러 개를 돌릴 이유가 없다. 같은 workspace 를 두 번
+        # 빌드하면 뒤엣것이 앞엣것의 결과를 덮을 뿐이다.
+        "community": _env_int("KBP_JOB_LIMIT_COMMUNITY", 1),
     }
 
 

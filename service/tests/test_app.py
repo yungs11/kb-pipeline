@@ -1,3 +1,5 @@
+import uuid
+
 from fastapi.testclient import TestClient
 from service.app import app, get_edgequake, get_parse_client, get_adaptive_chunk
 
@@ -80,28 +82,32 @@ def test_ingest_and_chunks(monkeypatch):
     app.dependency_overrides.clear()
 
 
-def test_communities_build_returns_202_and_schedules_job(monkeypatch):
-    import threading
-    called = threading.Event()
-    seen = {}
+def test_communities_build_enqueues_a_community_job(job_queue_inline):
+    """D10 — BackgroundTask 가 아니라 **잡 큐**를 탄다.
 
-    def recorder(workspace_id, *, llm, dsn, **k):
-        seen["workspace_id"] = workspace_id
-        seen["dsn"] = dsn
-        called.set()
-        return {"reports_written": 0}
+    예전에는 응답 뒤 같은 gunicorn 워커에서 LLM 장시간 작업이 돌아, 유량제어 밖이면서
+    그 워커가 요청을 못 받았다. 지금은 `community` kind 로 큐에 들어간다.
+    """
+    app.dependency_overrides[get_edgequake] = lambda: FakeEq()
+    r = TestClient(app).post("/communities/build", params={"workspace_id": "ws1"})
+    assert r.status_code == 202
+    body = r.json()
+    # 응답 계약 유지 — 기존 소비자가 읽는 두 키는 그대로다. job_id 는 더한 것.
+    assert body["status"] == "started" and body["workspace_id"] == EQ_WS
+    assert body["job_id"]
 
-    monkeypatch.setenv("KBP_PG_DSN", "postgres://edgequake:edgequake_secret@localhost:5433/edgequake")
-    monkeypatch.setattr("service.app.build_workspace_communities", recorder)
-    monkeypatch.setattr("service.app.get_text_llm", lambda: (lambda p, payload: "요약"))
+    row = job_queue_inline["repo"].get(uuid.UUID(body["job_id"]))
+    assert row["kind"] == "community"
+    assert row["status"] == "queued"                 # 웹 프로세스에서 안 돈다
+    assert row["workspace_key"] == EQ_WS             # 버킷·workspace 상한에 잡힌다
+
+
+def test_communities_build_is_idempotent_per_workspace(job_queue_inline):
+    """적재마다 디바운스 없이 들어와도(실측: 한 배치에 3회) 잡은 하나여야 한다."""
     app.dependency_overrides[get_edgequake] = lambda: FakeEq()
     c = TestClient(app)
-    r = c.post("/communities/build", params={"workspace_id": "ws1"})
-    assert r.status_code == 202
-    # the kb id "ws1" is resolved to the edgequake workspace uuid for the build job.
-    assert r.json() == {"status": "started", "workspace_id": EQ_WS}
-    # TestClient runs BackgroundTasks synchronously after the response is sent.
-    assert called.is_set()
-    assert seen["workspace_id"] == EQ_WS
+    ids = {c.post("/communities/build", params={"workspace_id": "ws1"}).json()["job_id"]
+           for _ in range(3)}
+    assert len(ids) == 1
     app.dependency_overrides.clear()
 
