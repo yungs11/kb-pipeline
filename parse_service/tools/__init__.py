@@ -10,13 +10,20 @@ def safe_basename(name: str) -> str:
 
     (구 parse_service/parsing.py:_safe_basename — Phase 2d 에서 parsing.py 삭제와 함께 이동.)
     POSIX/Windows 구분자 모두에서 마지막 컴포넌트만 취하고, 널 문자를 제거하며,
-    ``[A-Za-z0-9._-]`` 밖의 문자는 ``_`` 로 치환한다.
+    제어문자만 ``_`` 로 치환한다. 한글·공백·괄호 등 정상 유니코드 파일명은 문서
+    제목/메타데이터로 보존해야 하므로 제거하지 않는다. 실제 외부 도구용 임시 경로는
+    각 tool adapter가 별도로 더 엄격하게 정규화한다.
     """
     import os
-    import re
+    import unicodedata
 
     base = os.path.basename((name or "").replace("\\", "/")).replace("\x00", "")
-    base = re.sub(r"[^A-Za-z0-9._-]", "_", base) or "upload"
+    base = "".join(
+        "_" if unicodedata.category(char).startswith("C") else char
+        for char in base
+    ) or "upload"
+    if base in {".", ".."}:
+        base = "upload"
     if base.startswith("."):
         base = "_" + base
     return base

@@ -53,8 +53,17 @@ def _fetch_rag_chunks(file_bytes: bytes, filename: str, excel_url: str | None = 
     from parse_service.parsers.excel.excel_parser_rag.config import ParserConfig
     from parse_service.parsers.excel.excel_parser_rag.gate import compute_gate_summary
 
-    suffix = Path(filename).suffix.lower() or ".xlsx"
-    cfg_kwargs: dict = {"backend": os.environ.get("EXCEL_PARSER_BACKEND", "auto")}
+    # 업로드 바이트는 안전한 임시 파일명으로 저장하지만, 파서가 그 임시 stem
+    # (`excel_parser_…`)을 문서 제목으로 채택하면 청크 본문/검색어에 런타임 잡음이
+    # 누출된다. :8600 excel-parser service 와 동일하게 원본 basename의 stem을
+    # document_title로 명시한다. basename 정규화는 내부 직접 호출에도 경로 문자열이
+    # 제목으로 섞이지 않게 하는 방어선이다.
+    safe_filename = Path((filename or "upload.xlsx").replace("\x00", "")).name or "upload.xlsx"
+    suffix = Path(safe_filename).suffix.lower() or ".xlsx"
+    cfg_kwargs: dict = {
+        "backend": os.environ.get("EXCEL_PARSER_BACKEND", "auto"),
+        "document_title": Path(safe_filename).stem,
+    }
     if os.environ.get("KORDOC_BIN"):
         cfg_kwargs["kordoc_bin"] = os.environ["KORDOC_BIN"]
     if os.environ.get("KORDOC_MD_OUT"):
