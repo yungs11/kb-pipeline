@@ -297,6 +297,7 @@ class JobRepo:
 
                     self._recover(cur, kinds, attempts, runtimes, stale)
                     self._finish_cancelled_queued(cur)
+                    self._finish_exhausted_queued(cur, kinds, attempts)
                     cur.execute(
                         "DELETE FROM kbp.job_workers "
                         " WHERE heartbeat_at < now() - make_interval(secs => %s)",
@@ -375,6 +376,33 @@ class JobRepo:
         cur.execute(
             "UPDATE kbp.jobs SET status='canceled', completed_at=now() "
             " WHERE status='queued' AND cancel_requested"
+        )
+
+    @staticmethod
+    def _finish_exhausted_queued(cur, kinds, attempts) -> None:
+        """(1d) 시도를 다 쓴 ``queued`` 행을 종결한다 (D13).
+
+        ``_candidates`` 가 ``attempt_count < max_attempts`` 로 이 행을 **영구 배제**하므로,
+        종결하지 않으면 terminal 도 아니고 GC 대상도 아닌 채 큐에 남는다. 자식이면 부모의
+        TTL 삭제까지 영구 차단한다(부모는 자식이 참조하는 한 안 지워진다).
+
+        ``requeue`` 가 이미 소진을 판정하므로 새로 생기지는 않는다. 이건 **이미 갇힌 행**
+        을 걷어내는 안전망이고, 상한을 낮춰서(``KBP_JOB_MAX_ATTEMPTS`` 하향) 기존 행이
+        소급 소진되는 경우도 여기서 잡힌다.
+        """
+        cur.execute(
+            """
+            UPDATE kbp.jobs j
+               SET status = 'failed', completed_at = now(), idem_key = NULL,
+                   error = coalesce(j.error, '') ||
+                           CASE WHEN j.error IS NULL THEN '' ELSE ' | ' END ||
+                           'attempts exhausted while queued'
+              FROM unnest(%s::text[], %s::int[]) AS lim(kind, max_attempts)
+             WHERE j.kind = lim.kind
+               AND j.status = 'queued'
+               AND j.attempt_count >= lim.max_attempts
+            """,
+            (kinds, [attempts[k] for k in kinds]),
         )
 
     @staticmethod
@@ -565,25 +593,46 @@ class JobRepo:
         제출**했다. ``insert`` kind 는 ``max_attempts=1`` 이라 중복 대신 아무도 안 집는
         ``queued`` 좀비가 됐다(D13). 둘 다 여기서 끊는다.
 
+        **시도를 다 썼으면(``attempt_count >= max_attempts``) 되돌리지 않고 ``failed`` 로
+        끝낸다** (D13). 되돌리면 ``_candidates`` 가 ``attempt_count < max_attempts`` 로 그
+        행을 영구 배제해, terminal 도 아니고 GC 대상도 아닌 채 큐에 남는 좀비가 된다.
+        자식이면 부모의 TTL 삭제까지 영구 차단한다(부모는 자식이 참조하는 한 안 지워진다).
+        이미 갇힌 행은 claim 유지보수 ``_finish_exhausted_queued``(1d)가 걷어낸다.
+
         Postgres 는 ``SET`` 의 모든 식을 **갱신 전 행**으로 평가하므로, 같은 문장에서
         ``stage = NULL`` 을 함께 써도 위 ``CASE`` 는 옛 값을 본다.
         """
+        # kind 별 상한이 인자로 안 들어오므로 `_recover` 와 같은 방식으로 조인한다.
+        attempts = max_attempts_by_kind()
+        kinds = list(KINDS)
         self._fenced(
             """
-            UPDATE kbp.jobs
-               SET status = CASE WHEN stage = 'inserting' THEN 'failed'
-                                 ELSE 'queued' END,
-                   error = CASE WHEN stage = 'inserting'
-                                THEN 'insert already submitted to edgequake; not retried'
-                                ELSE %s END,
-                   completed_at = CASE WHEN stage = 'inserting' THEN now() END,
-                   idem_key = CASE WHEN stage = 'inserting' THEN NULL
-                                   ELSE idem_key END,
+            UPDATE kbp.jobs j
+               SET status = CASE
+                     WHEN j.stage = 'inserting'               THEN 'failed'
+                     WHEN j.attempt_count >= lim.max_attempts THEN 'failed'
+                     ELSE 'queued' END,
+                   error = CASE
+                     WHEN j.stage = 'inserting'
+                       THEN 'insert already submitted to edgequake; not retried'
+                     WHEN j.attempt_count >= lim.max_attempts
+                       THEN %s || ' | attempts exhausted'
+                     ELSE %s END,
+                   completed_at = CASE
+                     WHEN j.stage = 'inserting'
+                       OR j.attempt_count >= lim.max_attempts THEN now() END,
+                   idem_key = CASE
+                     WHEN j.stage = 'inserting'
+                       OR j.attempt_count >= lim.max_attempts THEN NULL
+                     ELSE j.idem_key END,
                    claimed_by = NULL, claimed_at = NULL, heartbeat_at = NULL, stage = NULL
-             WHERE id = %s AND claimed_by = %s AND attempt_count = %s
-               AND status = 'running'
+              FROM unnest(%s::text[], %s::int[]) AS lim(kind, max_attempts)
+             WHERE j.id = %s AND j.kind = lim.kind
+               AND j.claimed_by = %s AND j.attempt_count = %s
+               AND j.status = 'running'
             """,
-            (error, job_id, worker_id, attempt),
+            (error, error, kinds, [attempts[k] for k in kinds],
+             job_id, worker_id, attempt),
         )
 
     def _fenced(self, sql: str, args: tuple) -> None:

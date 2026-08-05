@@ -278,7 +278,19 @@ healthcheck 가 unhealthy 로 넘어간다.
 [`2026-08-04-job-queue-gc-design.md`](2026-08-04-job-queue-gc-design.md) v1 검증에서
 타당하지만 GC 범위를 넘는다고 판정된 것들. GC plan §7 에도 요약돼 있고 여기 상세를 남긴다.
 
-### D13. 소진 후 `queued` 로 정체하는 좀비 행
+### D13. 소진 후 `queued` 로 정체하는 좀비 행 — ✅ **구현 완료 (2026-08-05)**
+
+> 두 군데를 고쳤다 — 새로 생기는 것과 이미 갇힌 것.
+>
+> - `requeue` 가 `attempt_count >= max_attempts` 를 판정한다. 소진이면 되돌리지 않고
+>   `failed`(+`completed_at`, `idem_key` 비움, 원래 사유 뒤에 `| attempts exhausted`).
+>   kind 별 상한이 인자로 안 들어와서 `_recover` 와 같은 방식으로 `unnest` 조인한다.
+> - claim 유지보수에 `(1d) _finish_exhausted_queued` 신설 — **이미 갇힌 행**을 걷어낸다.
+>   `KBP_JOB_MAX_ATTEMPTS` 를 낮춰 기존 행이 소급 소진되는 경우도 여기서 잡힌다.
+>
+> 좀비의 실제 해악은 큐 정체가 아니라 **부모 TTL 삭제 영구 차단**이다(부모는 자식이
+> 참조하는 한 안 지워진다). 테스트가 그 시나리오를 직접 고정한다.
+
 
 **지적**: `worker._execute` 는 `JobRetryable` 이면 `attempt_count` 를 유지한 채 `requeue`
 하는데, `attempt_count >= max` 인지 보지 않는다. 그러면 `_candidates` 가

@@ -196,13 +196,17 @@ def test_exhausted_attempts_are_not_reclaimed(repo, worker):
     """insert 는 max_attempts=1 — 한 번 requeue 되면 다시 집히지 않는다.
 
     가드가 없으면 재적재 루프가 된다(edgequake 에 멱등키가 없으므로).
+
+    D13 이후로는 ``queued`` 로 남지도 않는다. 되돌리면 후보 조회가 그 행을 영구 배제해
+    좀비가 되므로 requeue 가 곧장 ``failed`` 로 끝낸다 — "다시 안 집힌다" 는 원래 의도는
+    더 강하게 지켜진다.
     """
     repo.submit(kind="insert", workspace_key="ws-a")
     claimed = repo.claim(worker_id=worker, local_free=1)
     assert repo.get(claimed[0].id)["attempt_count"] == 1
     repo.requeue(claimed[0].id, worker_id=worker, attempt=claimed[0].attempt,
                  error="boom")
-    assert repo.get(claimed[0].id)["status"] == "queued"
+    assert repo.get(claimed[0].id)["status"] == "failed"
     assert repo.claim(worker_id=worker, local_free=10) == []
 
 
@@ -709,3 +713,72 @@ def test_insert_stage_guard_holds_on_both_paths(repo, worker):
         row = repo.get(c.id)
         outcomes[path] = (row["status"], "not retried" in (row["error"] or ""))
     assert outcomes["recover"] == outcomes["requeue"] == ("failed", True), outcomes
+
+
+# ── D13: 소진된 queued 좀비 ─────────────────────────────────────────────────
+#
+# requeue 가 attempt_count >= max 를 안 보면 queued 로 되돌아가는데, _candidates 는
+# attempt_count < max 로 그 행을 영구 배제한다. terminal 도 아니고 GC 대상도 아닌 채
+# 큐에 남고, 자식이면 부모의 TTL 삭제까지 영구 차단한다.
+
+def test_requeue_on_last_attempt_finishes_instead_of_stranding(repo, worker):
+    """insert 는 max_attempts=1 — 첫 시도의 requeue 가 곧 소진이다."""
+    repo.submit(kind="insert", workspace_key="ws-z1")
+    c = repo.claim(worker_id=worker, local_free=1)[0]
+    assert repo.get(c.id)["attempt_count"] == 1
+    repo.requeue(c.id, worker_id=worker, attempt=c.attempt, error="boom")
+    row = repo.get(c.id)
+    assert row["status"] == "failed"
+    assert "attempts exhausted" in (row["error"] or "")
+    assert "boom" in (row["error"] or "")        # 원래 사유도 남는다
+    assert row["completed_at"] is not None
+    assert row["idem_key"] is None
+
+
+def test_requeue_with_attempts_left_still_returns_to_queue(repo, worker):
+    """parse 는 max 3 — 1회차 실패는 여전히 재시도돼야 한다(회귀 방지)."""
+    repo.submit(kind="parse")
+    c = repo.claim(worker_id=worker, local_free=1)[0]
+    repo.requeue(c.id, worker_id=worker, attempt=c.attempt, error="503")
+    row = repo.get(c.id)
+    assert row["status"] == "queued" and row["error"] == "503"
+    assert repo.claim(worker_id=worker, local_free=10) != []
+
+
+def test_maintenance_finishes_already_stranded_rows(repo, worker):
+    """이 수정 **전에** 갇힌 행(또는 상한을 낮춰 소급 소진된 행)을 걷어낸다."""
+    repo.submit(kind="insert", workspace_key="ws-z2")
+    c = repo.claim(worker_id=worker, local_free=1)[0]
+    # 옛 동작을 손으로 재현 — 소진인데 queued 로 되돌린 상태.
+    with psycopg.connect(DSN) as conn:
+        conn.execute(
+            "UPDATE kbp.jobs SET status='queued', claimed_by=NULL, claimed_at=NULL,"
+            " heartbeat_at=NULL, stage=NULL WHERE id=%s", (c.id,))
+        conn.commit()
+    assert repo.get(c.id)["status"] == "queued"
+
+    repo.claim(worker_id=worker, local_free=10)          # 유지보수 (1d) 가 돈다
+    row = repo.get(c.id)
+    assert row["status"] == "failed"
+    assert "attempts exhausted while queued" in (row["error"] or "")
+    assert row["completed_at"] is not None
+
+
+def test_maintenance_leaves_retryable_queued_rows_alone(repo, worker):
+    """아직 시도가 남은 queued 행을 죽이면 큐가 통째로 멎는다."""
+    job_id = repo.submit(kind="parse")
+    assert repo.get(job_id)["status"] == "queued"
+    repo.claim(worker_id=worker, local_free=0)           # 유지보수만 돈다
+    assert repo.get(job_id)["status"] == "queued"
+
+
+def test_stranded_child_no_longer_blocks_parent_ttl_gc(repo, worker):
+    """좀비 자식이 살아있으면 부모가 TTL 로도 안 지워진다 — 종결돼야 풀린다."""
+    parent = repo.submit(kind="chunk")
+    pc = repo.claim(worker_id=worker, local_free=1)[0]
+    repo.complete(pc.id, worker_id=worker, attempt=pc.attempt,
+                  status="succeeded", result={})
+    child = repo.submit(kind="insert", workspace_key="ws-z3", parent_job_id=parent)
+    cc = [c for c in repo.claim(worker_id=worker, local_free=5) if c.id == child][0]
+    repo.requeue(cc.id, worker_id=worker, attempt=cc.attempt, error="boom")
+    assert repo.get(child)["status"] == "failed"         # 좀비가 아니라 terminal
