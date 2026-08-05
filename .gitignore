@@ -35,3 +35,6 @@ docker-compose.override.yml
 scripts/*.env.bak-*
 *.env.bak-*
 .env.bak-*
+
+# 폐쇄망 번들 산출물 — 7GB+ 이미지 tar 와 분할 파트. 재생성 가능(scripts/airgap/build-bundle.sh).
+dist/
