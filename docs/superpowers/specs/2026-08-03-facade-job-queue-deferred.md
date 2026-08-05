@@ -178,7 +178,35 @@ one-shot 소비자용이라 혼재가 드물다.
 **설계 메모**: 최장 대기 후보가 ingest 면 그 잡이 필요한 버킷에 대해 뒤 후보의 신규
 승인을 보류(reserve)하고, 대기 임계를 넘으면 우선 승인한다.
 
-## D8. airgap 배포 검증 스크립트 수정
+## D8. airgap 배포 검증 스크립트 수정 — ✅ **구현 완료 (2026-08-05)**
+
+> `load-and-up.sh` 의 health 단계가 **사실상 전부 오탐**이었다. 호스트 포트로 폴링하는데
+> 그 값이 compose 매핑과 전부 어긋나 있었다(실측: edgequake 8081→3001, parse-svc
+> 19001→18081, facade 19000→3000, webui 13000→3002, minio S3 9000 은 미발행,
+> doc_guard 는 D12 이후 노출 없음).
+>
+> **고친 방식** — 스크립트가 URL 을 들고 있지 않게 했다. `podman inspect` 로 **compose 가
+> 이미 정의한 healthcheck 결과**를 읽는다. 두 곳이 어긋날 여지가 사라지고, 호스트 매핑을
+> 바꿔도 안 깨진다. (컨테이너 안에서 curl 을 쏘는 안도 기각 — webui 이미지에는 curl 이
+> 없고 자체 healthcheck 는 wget 을 쓴다. 이미지마다 어떤 도구가 있는지를 스크립트가 알
+> 필요가 없다.)
+>
+> **facade-worker 등록 확인(4b) 신설** — worker 는 HTTP 를 안 열어 health 폴링으로 못 본다.
+> 그런데 worker 가 없으면 `/parse`·`/ingest` 접수가 503 이라, 이걸 안 보면 "전부 healthy"
+> 인데 적재가 통째로 안 되는 상태로 배포가 끝난다. facade 컨테이너 안에서
+> `/jobs/workers` 를 읽어 `online:true` 를 확인한다(내부 포트라 호스트 매핑과 무관).
+>
+> **함께 고친 것 두 가지 — 둘 다 남의 것을 건드리는 버그다.**
+> - 컨테이너 탐색을 이름 정규식 → **compose 라벨** 로 바꿨다. 같은 호스트에 다른 스택이
+>   있으면 `postgres` 가 kb 스택의 `kb-postgres` 를, `minio` 가 `dify-1-7-minio-1` 을
+>   집었다(실측). MinIO **버킷 생성** 단계도 `grep -i minio` 라 남의 버킷에 만들 뻔했다.
+>   podman 이 컨테이너를 재생성하면 `63c336ffd796_kbp-parse-svc-1` 처럼 접두사도 붙는다.
+> - `${FKEY:+-H "X-Facade-Key: $FKEY"}` 는 단어 분리로 `-H` 와 헤더가 한 인자로 붙는다.
+>   키가 설정된 배포에서 worker 검사가 **항상 실패**했을 것이다. 배열로 넘긴다.
+>
+> 요약 출력의 안내 주소(19000/13000)도 실제 발행 포트로 정정했다 — 배포자가 접속 못 하는
+> 주소를 받고 있었다. `docs/airgap-deploy.md` 의 서비스 표·스모크 명령도 같이 맞췄다.
+
 
 **지적**: `scripts/airgap/load-and-up.sh` 의 `CHECKS` 배열은 헤더 주입도 본문 조건도
 표현할 수 없어 `/jobs/workers` 의 `online:true` 를 검증할 수 없다. 게다가 현행 배열의

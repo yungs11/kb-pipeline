@@ -14,14 +14,18 @@
 | 티어 | 서비스 | 이미지 태그 | 호스트 포트 | 출처 |
 |------|--------|-------------|-------------|------|
 | 인프라 | postgres | ghcr.io/raphaelmansuy/edgequake-postgres:latest | 5433 | pull |
-| 인프라 | minio | minio/minio | 9000/9001 | pull |
+| 인프라 | minio | minio/minio | 3003(콘솔) | pull |
 | 인프라 | gotenberg | gotenberg/gotenberg:8 | (내부) | pull |
-| 엔진 | edgequake | kbp-edgequake:airgap | 8081 | 빌드 |
+| 엔진 | edgequake | kbp-edgequake:airgap | 3001 | 빌드 |
 | 문서 | doc_guard | kbp-doc_guard:airgap | (내부) | 빌드 |
 | 문서 | adaptive_chunk | kbp-adaptive_chunk:airgap | 18060 | 빌드 |
-| 앱 | parse-svc | kbp-parse-svc:airgap | 19001 | 빌드 |
-| 앱 | facade | kbp-facade:airgap | **19000** | 빌드 |
-| 확인용 | edgequake_webui | kbp-edgequake_webui:airgap | **13000** | 빌드 |
+| 앱 | parse-svc | kbp-parse-svc:airgap | 18081 | 빌드 |
+| 앱 | facade | kbp-facade:airgap | **3000** | 빌드 |
+| 앱 | facade-worker | kbp-facade:airgap (명령만 다름) | (내부) | 재사용 |
+| 확인용 | edgequake_webui | kbp-edgequake_webui:airgap | **3002** | 빌드 |
+
+> 포트는 **호스트 발행 포트**다(컨테이너 내부 포트가 아니다). 권위 출처는
+> `docker-compose.airgap.yml` 이고, `docs/architecture-ports.md` 에 전체 표가 있다.
 
 기동 순서(의존성): postgres → edgequake / (gotenberg·minio) / doc_guard / adaptive_chunk
 → parse-svc → facade / edgequake_webui.
@@ -108,13 +112,21 @@ podman-compose -f docker-compose.airgap.yml --env-file .env up -d
 podman-compose -f docker-compose.airgap.yml ps
 ```
 
-스모크:
+스모크(호스트 발행 포트 기준):
 ```bash
-curl -fsS http://localhost:19000/healthz     # facade
-curl -fsS http://localhost:8081/health       # edgequake
-curl -fsS http://localhost:19001/healthz     # parse-svc
-# 그래프 확인 UI: 브라우저로 http://<서버IP>:13000  (EDGEQUAKE_WEBUI_API_URL 을 서버 IP:8081 로)
+curl -fsS http://localhost:3000/healthz      # facade
+curl -fsS http://localhost:3001/health       # edgequake
+curl -fsS http://localhost:18081/healthz     # parse-svc
+
+# ★ facade-worker 등록 확인 — 이게 0 이면 healthz 는 다 통과해도
+#   /parse·/ingest 접수가 503("no live facade-worker") 이라 적재가 통째로 안 된다.
+curl -fsS -H "X-Facade-Key: $KBP_FACADE_KEY" http://localhost:3000/jobs/workers
+#   → {"online":true, "capacity":N, ...}
+
+# 그래프 확인 UI: 브라우저로 http://<서버IP>:3002  (EDGEQUAKE_WEBUI_API_URL 을 서버 IP:3001 로)
 ```
+
+`load-and-up.sh` 를 쓰면 위 검사를 자동으로 수행한다(healthcheck 상태 + worker 등록).
 
 ---
 
