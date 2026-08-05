@@ -94,3 +94,49 @@ def test_import_does_not_touch_db_or_minio():
     proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
     assert "ok" in proc.stdout
+
+
+# ── D12: 폐쇄망 배포에서 게이트가 조용히 꺼지지 않게 ────────────────────────
+
+def test_empty_key_disables_the_gate_like_unset(monkeypatch):
+    """compose 가 `${KBP_FACADE_KEY:-}` 로 빈 값을 주입해도 401 폭탄이 되면 안 된다.
+
+    반대로 `${KBP_FACADE_KEY:?}` 로 쓰면 스택이 기동조차 못 한다. 그래서 코드는 빈 값을
+    미설정과 동일 취급하고, **배포 전 차단은 verify-bundle.sh 가** 한다(REQUIRED_ENV).
+    """
+    from service.app import require_facade_key
+
+    monkeypatch.setenv("KBP_FACADE_KEY", "")
+    require_facade_key(x_facade_key=None)      # 통과해야 한다(예외 없음)
+
+    monkeypatch.setenv("KBP_FACADE_KEY", "   ")
+    require_facade_key(x_facade_key=None)      # 공백만 있는 값도 미설정 취급
+
+
+def test_verify_bundle_requires_the_facade_key():
+    """빈 채로 배포되면 무인증 적재·삭제가 호스트 포트로 열린다 — 배포 게이트가 막아야 한다."""
+    import pathlib
+    import re
+
+    src = pathlib.Path(__file__).resolve().parents[2] / "scripts/airgap/verify-bundle.sh"
+    block = re.search(r"REQUIRED_ENV=\((.*?)\)", src.read_text(), re.S)
+    assert block, "REQUIRED_ENV 블록을 찾지 못했다"
+    assert "KBP_FACADE_KEY" in block.group(1)
+
+
+def test_airgap_env_template_lists_the_facade_key():
+    """템플릿에 없으면 배포자가 채워야 한다는 사실 자체를 모른다."""
+    import pathlib
+
+    tpl = (pathlib.Path(__file__).resolve().parents[2] / ".env.airgap.example").read_text()
+    assert "\nKBP_FACADE_KEY=" in tpl
+
+
+def test_airgap_compose_passes_the_key_to_facade_and_worker():
+    """worker 도 facade 호출을 하므로 같은 키가 필요하다(x-facade-env 공유)."""
+    import pathlib
+
+    y = (pathlib.Path(__file__).resolve().parents[2] / "docker-compose.airgap.yml").read_text()
+    assert "KBP_FACADE_KEY: ${KBP_FACADE_KEY:-}" in y
+    # 두 서비스가 같은 앵커를 쓴다 — 한쪽만 키를 받으면 worker 호출이 401 이 된다.
+    assert y.count("environment: *facade_env") >= 2

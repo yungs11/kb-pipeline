@@ -68,12 +68,16 @@ def _safe_basename(name: str) -> str:
 #: 오버라이드가 옛 app 에 걸려 단위 테스트가 진짜 parse-svc·MinIO 를 때렸다).
 _FACADE_KEY = os.environ.get("KBP_FACADE_KEY")
 
-if _FACADE_KEY is None:
+if not (_FACADE_KEY or "").strip():
+    # 빈 문자열도 경고 대상이다 — compose 가 `${KBP_FACADE_KEY:-}` 로 빈 값을 주입하면
+    # 게이트가 조용히 꺼진 채 뜬다. 폐쇄망은 facade 가 호스트 포트로 노출되므로 그 상태가
+    # 곧 무인증 적재·삭제다. 배포 전 차단은 scripts/airgap/verify-bundle.sh 가 한다.
     logger.warning(
-        "KBP_FACADE_KEY is unset — the facade X-Facade-Key gate is DISABLED "
+        "KBP_FACADE_KEY is %s — the facade X-Facade-Key gate is DISABLED "
         "(dev mode). Set KBP_FACADE_KEY in production to lock down stateful "
         "endpoints (/search, /insert, /insert/status, /ingest, /chunks, /doc, "
-        "/communities/build)."
+        "/communities/build, /jobs, /gate, /objects).",
+        "blank" if _FACADE_KEY is not None else "unset",
     )
 
 
@@ -88,8 +92,13 @@ def require_facade_key(x_facade_key: str | None = Header(default=None)):
     라 Phase 1 동안 게이트 대상이 아니다(신규 ``/jobs/*`` 는 대상).
     """
     key = os.environ.get("KBP_FACADE_KEY")
-    if not key:
-        return  # gate disabled (dev). 빈 문자열도 미설정과 동일 취급.
+    if not (key or "").strip():
+        # gate disabled (dev). 빈 문자열·공백뿐인 값도 미설정과 동일 취급한다 —
+        # compose 가 `${KBP_FACADE_KEY:-}` 로 빈 값을 주입하거나 .env 에 공백이 섞이면,
+        # 그걸 진짜 키로 보는 순간 게이트 대상 전 경로가 401 이 된다(스택 전면 정지).
+        # 값을 strip 해서 쓰지는 않는다 — 소비자는 자기 env 값을 그대로 보내므로
+        # 양쪽이 같은 문자열이어야 한다.
+        return
     if x_facade_key != key:
         raise HTTPException(status_code=401, detail="invalid or missing X-Facade-Key")
 

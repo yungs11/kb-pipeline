@@ -31,6 +31,10 @@ x-facade-env: &facade_env
   KBP_EDGEQUAKE_URL: http://edgequake:8081
   # doc_guard — facade 가 게이트를 은닉한다(/gate/*). 소비자(kb)는 이 주소를 모른다.
   KBP_DOC_GUARD_URL: http://doc_guard:8000
+  # 공유비밀(X-Facade-Key). **비어 있으면 게이트가 꺼진다**(dev 와 동일) — 폐쇄망은
+  # facade 가 호스트 포트로 노출되므로 반드시 채운다. kb 스택의 KBP_FACADE_KEY 와
+  # 같은 값이어야 적재·검색이 통과한다. 배포 전 검증은 verify-bundle.sh 가 막는다.
+  KBP_FACADE_KEY: ${KBP_FACADE_KEY:-}
   KBP_PG_DSN: postgres://edgequake:${POSTGRES_PASSWORD:-edgequake_secret}@postgres:5432/edgequake
   # ↓ 온프렘 LLM (.env: KBP_OPENAI_*)
   KBP_OPENAI_API_KEY: ${KBP_OPENAI_API_KEY}

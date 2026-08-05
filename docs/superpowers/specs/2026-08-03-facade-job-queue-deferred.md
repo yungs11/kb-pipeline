@@ -213,7 +213,21 @@ healthcheck 가 unhealthy 로 넘어간다.
 
 **언제 필요해지나**: waiter 상한을 크게 올리거나 스레드풀 고갈이 실제로 관측될 때.
 
-## D12. airgap `KBP_FACADE_KEY` 필수화
+## D12. airgap `KBP_FACADE_KEY` 필수화 — ✅ **구현 완료 (2026-08-05)**
+
+> 네 곳을 함께 바꿨다.
+> - `service/app.py` — 게이트가 빈 문자열·**공백뿐인 값**도 미설정과 동일 취급한다.
+>   공백을 진짜 키로 보면 게이트 대상 전 경로가 401 이 되어 스택이 전면 정지한다.
+>   값을 strip 해서 쓰지는 않는다(소비자가 자기 env 값을 그대로 보내므로 양쪽이 같은
+>   문자열이어야 한다). 기동 경고도 같은 기준으로 바꿔 `blank`/`unset` 을 구분한다.
+> - `docker-compose.airgap.yml` · `docker-compose.yml` — `x-facade-env` 에
+>   `KBP_FACADE_KEY: ${KBP_FACADE_KEY:-}`. facade 와 facade-worker 가 같은 앵커를 쓴다.
+> - `.env.airgap.example` — A-0 블록 신설(kb 스택 값과 일치해야 함, `openssl rand -hex 32`).
+> - `scripts/airgap/verify-bundle.sh` — `REQUIRED_ENV` 에 등록. **비면 배포 전에 막힌다.**
+>
+> 즉 코드는 관대하게(기동 실패 없음), 배포는 엄격하게(빈 값이면 검증 실패) 나눴다.
+> 아래 원래 판단 근거는 기록으로 남긴다.
+
 
 **지적**: airgap facade 블록에 `KBP_FACADE_KEY` 가 없어 게이트가 no-op 이다. 무인증으로
 `/ingest`·`/insert`·`/search`·`/chunks`·`/doc` 가 열려 있고, 호스트 포트로 노출된다.
