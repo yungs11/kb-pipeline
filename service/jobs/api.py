@@ -433,15 +433,41 @@ def get_job_result(job_id: uuid.UUID, repo=Depends(get_job_repo),
 
 
 @router.delete("/jobs/{job_id}")
-def cancel_job(job_id: uuid.UUID, repo=Depends(get_job_repo)):
+def cancel_job(job_id: uuid.UUID, repo=Depends(get_job_repo),
+               blobs=Depends(get_job_blobs)):
+    """잡 취소.
+
+    * ``queued``      → 즉시 ``canceled`` **+ staging 객체 즉시 삭제**
+    * ``running``     → ``cancel_requested`` 플래그(진행 중 호출은 못 끊는다)
+    * ``inserting``   → **409**. edgequake 에 이미 제출해 여기서 멈추면 부분 적재가 남는다
+    * terminal/없음   → 409 / 404
+    """
     outcome = repo.cancel(job_id)
-    if outcome == "canceled":
+    if outcome is None:
+        if repo.get(job_id) is None:
+            raise HTTPException(status_code=404, detail="job not found")
+        raise HTTPException(status_code=409, detail="job already finished")
+
+    status = outcome.get("status")
+    if status == "inserting":
+        # 소비자는 이 코드를 보고 취소 버튼을 감춘다(`stage` 는 GET /jobs/{id} 에도 있다).
+        raise HTTPException(
+            status_code=409,
+            detail="job is already inserting into edgequake; cannot cancel",
+        )
+    if status == "canceled":
+        # 즉시 취소된 잡의 객체는 **지금** 지운다. TTL GC(기본 72h)까지 두면, 큰 스캔
+        # PDF 를 잘못 올려 취소해도 그 수십 MB 가 사흘을 버틴다. 트랜잭션은 이미
+        # 커밋됐고(§ repo.cancel), 삭제 실패는 비치명 — 남으면 GC 가 나중에 걷는다.
+        for ref in (outcome.get("input_ref"), outcome.get("payload_ref"),
+                    outcome.get("result_ref")):
+            if ref:
+                try:
+                    blobs.delete(ref)
+                except Exception:  # noqa: BLE001 - 취소 응답을 막지 않는다
+                    log.warning("cancel: 객체 삭제 실패 %r", ref, exc_info=True)
         return {"job_id": str(job_id), "status": "canceled"}
-    if outcome == "running":
-        return {"job_id": str(job_id), "status": "cancel_requested"}
-    if repo.get(job_id) is None:
-        raise HTTPException(status_code=404, detail="job not found")
-    raise HTTPException(status_code=409, detail="job already finished")
+    return {"job_id": str(job_id), "status": "cancel_requested"}
 
 
 def _public(repo, row) -> dict[str, Any]:

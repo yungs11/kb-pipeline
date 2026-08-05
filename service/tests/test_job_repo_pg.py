@@ -149,14 +149,14 @@ def test_stage_write_is_fenced(repo, worker):
 
 def test_cancel_queued_is_immediate(repo):
     job_id = repo.submit(kind="parse")
-    assert repo.cancel(job_id) == "canceled"
+    assert repo.cancel(job_id)["status"] == "canceled"   # D6: dict 계약
     assert repo.get(job_id)["status"] == "canceled"
 
 
 def test_cancel_running_only_flags(repo, worker):
     repo.submit(kind="parse")
     claimed = repo.claim(worker_id=worker, local_free=1)
-    assert repo.cancel(claimed[0].id) == "running"
+    assert repo.cancel(claimed[0].id)["status"] == "running"
     assert repo.is_cancel_requested(claimed[0].id)
     assert repo.get(claimed[0].id)["status"] == "running"  # 아직 실행 중
 
@@ -782,3 +782,48 @@ def test_stranded_child_no_longer_blocks_parent_ttl_gc(repo, worker):
     cc = [c for c in repo.claim(worker_id=worker, local_free=5) if c.id == child][0]
     repo.requeue(cc.id, worker_id=worker, attempt=cc.attempt, error="boom")
     assert repo.get(child)["status"] == "failed"         # 좀비가 아니라 terminal
+
+
+# ── D6: inserting 이후 취소 거부 + refs 반환 ────────────────────────────────
+
+def test_cancel_returns_refs_for_prompt_cleanup(repo, worker):
+    """즉시 취소된 잡의 객체를 곧장 지우려면 키를 함께 받아야 한다."""
+    job_id = repo.submit(kind="parse", input_ref="kbp-jobs/x/input.bin")
+    out = repo.cancel(job_id)
+    assert out["status"] == "canceled"
+    assert out["input_ref"] == "kbp-jobs/x/input.bin"
+    assert repo.get(job_id)["status"] == "canceled"
+
+
+def test_cancel_is_refused_while_inserting(repo, worker):
+    """edgequake 제출 뒤라 멈추면 부분 적재가 남는다 — 상태를 건드리지 않는다."""
+    repo.submit(kind="insert", workspace_key="ws-c1")
+    c = repo.claim(worker_id=worker, local_free=1)[0]
+    repo.set_stage(c.id, worker_id=worker, attempt=c.attempt, stage="inserting")
+
+    out = repo.cancel(c.id)
+    assert out["status"] == "inserting"
+    row = repo.get(c.id)
+    assert row["status"] == "running"            # 그대로 달린다
+    assert row["cancel_requested"] is False      # 플래그도 안 세운다
+
+
+def test_cancel_before_inserting_flags_the_running_job(repo, worker):
+    repo.submit(kind="parse", workspace_key="ws-c2")
+    c = repo.claim(worker_id=worker, local_free=1)[0]
+    repo.set_stage(c.id, worker_id=worker, attempt=c.attempt, stage="parsing")
+
+    out = repo.cancel(c.id)
+    assert out["status"] == "running"
+    assert repo.get(c.id)["cancel_requested"] is True
+
+
+def test_cancel_on_terminal_job_returns_none(repo, worker):
+    repo.submit(kind="parse", workspace_key="ws-c3")
+    c = repo.claim(worker_id=worker, local_free=1)[0]
+    repo.complete(c.id, worker_id=worker, attempt=c.attempt, status="succeeded", result={})
+    assert repo.cancel(c.id) is None
+
+
+def test_cancel_on_missing_job_returns_none(repo, worker):
+    assert repo.cancel(uuid.uuid4()) is None

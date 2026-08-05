@@ -346,3 +346,61 @@ def test_legacy_wait_timeout_returns_409_with_job_id(monkeypatch, job_queue_inli
         app.state.job_inline = True
     assert r.status_code == 409
     assert uuid.UUID(r.json()["detail"]["job_id"])
+
+
+# ── D6: 취소 — 즉시 객체 정리 / inserting 이후 거부 ─────────────────────────
+
+def test_cancel_deletes_the_staged_object_immediately(client, job_queue_inline):
+    """TTL GC(기본 72h)까지 두면 잘못 올린 큰 파일이 사흘을 버틴다."""
+    _use(get_parse_client, FakeParse())
+    repo, blobs = job_queue_inline["repo"], job_queue_inline["blobs"]
+    job_id = client.post("/jobs/parse",
+                         files={"file": ("a.pdf", b"x" * 100, "application/pdf")}).json()["job_id"]
+    # 인라인 실행이 끝나 있으므로 queued 상태로 되돌려 "접수만 된" 잡을 만든다.
+    row = repo.rows[uuid.UUID(job_id)]        # get() 은 deepcopy 라 저장된 행을 직접 잡는다
+    row["status"], row["completed_at"] = "queued", None
+    ref = row["input_ref"]
+    assert ref and blobs.get_bytes(ref)          # 취소 전에는 있다
+
+    r = client.delete(f"/jobs/{job_id}")
+    assert r.status_code == 200 and r.json()["status"] == "canceled"
+    with pytest.raises(Exception):
+        blobs.get_bytes(ref)                     # 즉시 사라졌다
+
+
+def test_cancel_is_refused_once_inserting(client, job_queue_inline):
+    """edgequake 에 이미 제출한 뒤라 여기서 멈추면 **부분 적재**가 남는다."""
+    _use(get_parse_client, FakeParse())
+    repo = job_queue_inline["repo"]
+    job_id = client.post("/jobs/parse",
+                         files={"file": ("a.pdf", b"x", "application/pdf")}).json()["job_id"]
+    row = repo.rows[uuid.UUID(job_id)]
+    row["status"], row["stage"], row["completed_at"] = "running", "inserting", None
+
+    r = client.delete(f"/jobs/{job_id}")
+    assert r.status_code == 409
+    assert "inserting" in r.json()["detail"]
+    assert repo.get(uuid.UUID(job_id))["status"] == "running"   # 상태를 안 건드린다
+
+
+def test_cancel_before_inserting_still_flags_a_running_job(client, job_queue_inline):
+    """parse·chunk 진행 중 취소는 종전대로 플래그만 세운다(회귀 방지)."""
+    _use(get_parse_client, FakeParse())
+    repo = job_queue_inline["repo"]
+    job_id = client.post("/jobs/parse",
+                         files={"file": ("a.pdf", b"x", "application/pdf")}).json()["job_id"]
+    row = repo.rows[uuid.UUID(job_id)]
+    row["status"], row["stage"], row["completed_at"] = "running", "parsing", None
+
+    r = client.delete(f"/jobs/{job_id}")
+    assert r.status_code == 200 and r.json()["status"] == "cancel_requested"
+
+
+def test_status_exposes_stage_so_the_ui_can_hide_the_button(client, job_queue_inline):
+    """프론트가 `stage=='inserting'` 으로 취소 버튼을 감춘다."""
+    _use(get_parse_client, FakeParse())
+    repo = job_queue_inline["repo"]
+    job_id = client.post("/jobs/parse",
+                         files={"file": ("a.pdf", b"x", "application/pdf")}).json()["job_id"]
+    repo.rows[uuid.UUID(job_id)]["stage"] = "inserting"
+    assert client.get(f"/jobs/{job_id}").json()["stage"] == "inserting"

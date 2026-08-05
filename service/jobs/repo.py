@@ -649,15 +649,26 @@ class JobRepo:
 
     # ── 취소 ───────────────────────────────────────────────────────────────
 
-    def cancel(self, job_id: uuid.UUID | str) -> str | None:
+    def cancel(self, job_id: uuid.UUID | str) -> dict[str, Any] | None:
         """취소를 **단일 UPDATE 로 원자 수행**한다.
 
         두 번에 나누면 그 사이에 잡이 ``running``→``queued`` 로 회수되어 양쪽 다 0행이
         되고 취소가 조용히 유실된다. 취소 API 는 advisory lock 을 잡지 않으므로 경합
         창이 실재한다.
 
-        :returns: ``'canceled'``(즉시 취소) / ``'running'``(플래그만) / ``None``
-            (없거나 이미 terminal — 호출자가 404·409 를 구분한다).
+        **``stage='inserting'`` 이면 취소하지 않는다**(D6). edgequake 에 문서를 이미
+        제출한 뒤라 여기서 멈추면 **부분 적재**가 남는다 — 잡은 취소로 끝났는데 문서는
+        절반 들어가 있는 상태가 가장 나쁘다. D5 에서 이 단계를 재시도·회수 대상에서
+        뺀 것과 같은 판정이다. 소비자는 반환된 ``stage`` 를 보고 취소 버튼을 감춘다.
+
+        객체(``*_ref``)를 함께 돌려주는 이유: **즉시 취소된 잡의 staging 을 곧장 지우기
+        위해서다.** 예전에는 TTL GC(기본 72h)까지 남아, 큰 스캔 PDF 를 잘못 올려 취소해도
+        그 수십 MB 가 사흘을 버텼다. 삭제는 **커밋 뒤 트랜잭션 밖에서** 호출자가 한다
+        (``purge_expired`` 와 같은 이유 — 롤백 시 행은 살고 객체만 사라지는 걸 막는다).
+
+        :returns: ``{"status", "stage", "input_ref", "payload_ref", "result_ref"}`` 또는
+            ``None``(없거나 이미 terminal). ``status`` 는 ``'canceled'``(즉시) /
+            ``'running'``(플래그만) / ``'inserting'``(거부).
         """
         with self._connect() as conn:
             with conn.cursor() as cur:
@@ -672,13 +683,26 @@ class JobRepo:
                            -- 취소된 잡의 키를 비워야 같은 요청을 다시 낼 수 있다.
                            idem_key = NULL
                      WHERE id = %s AND status IN ('queued', 'running')
-                    RETURNING status
+                       AND coalesce(stage, '') <> 'inserting'
+                    RETURNING status, stage, input_ref, payload_ref, result_ref
                     """,
                     (_as_uuid(job_id),),
                 )
                 row = cur.fetchone()
             conn.commit()
-        return row["status"] if row else None
+        if row:
+            return dict(row)
+        # 0행 — 없거나, terminal 이거나, inserting 이라 거부됐다. 셋을 구분한다.
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, stage FROM kbp.jobs WHERE id = %s", (_as_uuid(job_id),)
+                )
+                cur_row = cur.fetchone()
+        if cur_row and cur_row["stage"] == "inserting" and cur_row["status"] == "running":
+            return {"status": "inserting", "stage": "inserting",
+                    "input_ref": None, "payload_ref": None, "result_ref": None}
+        return None
 
     def is_cancel_requested(self, job_id: uuid.UUID) -> bool:
         with self._connect() as conn:

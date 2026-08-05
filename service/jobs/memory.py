@@ -103,16 +103,25 @@ class InMemoryJobRepo:
 
     # ── 취소 ───────────────────────────────────────────────────────────────
 
-    def cancel(self, job_id) -> str | None:
+    def cancel(self, job_id):
+        """실 repo 와 **같은 계약** — dict 또는 None. `JobRepo.cancel` 참조."""
         row = self.rows.get(_as_uuid(job_id))
         if row is None or row["status"] not in {"queued", "running"}:
             return None
+        if row.get("stage") == "inserting" and row["status"] == "running":
+            # edgequake 에 이미 제출했다 — 여기서 멈추면 부분 적재가 남는다(D6).
+            return {"status": "inserting", "stage": "inserting",
+                    "input_ref": None, "payload_ref": None, "result_ref": None}
         row["cancel_requested"] = True
         row["idem_key"] = None
+        out = {"stage": row.get("stage"),
+               "input_ref": row.get("input_ref"),
+               "payload_ref": row.get("payload_ref"),
+               "result_ref": row.get("result_ref")}
         if row["status"] == "queued":
             row["status"] = "canceled"
-            return "canceled"
-        return "running"
+            return {"status": "canceled", **out}
+        return {"status": "running", **out}
 
     def is_cancel_requested(self, job_id) -> bool:
         row = self.rows.get(_as_uuid(job_id))
