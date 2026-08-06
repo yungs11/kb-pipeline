@@ -148,7 +148,21 @@ claim 마다 단조 증가하고, 회수 없이 세대만 바뀌는 경로가 �
 해시**를 남긴다. 해시가 다르면(= ingest 재시도로 청크가 바뀜) 새로 제출해야 한다.
 폴링 재개는 문서가 아직 non-terminal 일 때만이고, terminal failed 면 재제출한다.
 
-## D6. insert / parse / chunk 의 취소 반응성 — 🟡 **부분 완료 (2026-08-05)**
+## D6. insert / parse / chunk 의 취소 반응성 — ✅ **구현 완료 (2026-08-06, 축소범위)**
+
+> kb 에 취소 기능을 만들었다. 계약은 **축소범위 (a)** — `queued` 즉시 취소, `running` 은
+> **진행 중인 단계 완주 후 다음 단계 차단**, `stage=='insert'` 이후 불가(409).
+>
+> `running` 인 parse·chunk 의 **즉시 중단은 여전히 비범위**다(원안 3). `_run_parse`·
+> `_run_chunk` 가 진입 시 `_stage()` 를 한 번만 부르고 수백 초 다운스트림으로 들어가
+> 취소를 다시 읽는 지점이 없다 — 다운스트림 폴링 훅이 필요하다.
+>
+> plan `2026-08-06-ingest-cancel-plan.md`(v7, ultracode READY 7라운드).
+> 커밋: kb `4bd434e`·`7163ed6`·`4a2f6b4`·`1d7b909`·`c01d7ec`.
+> 함께: `kb_pipeline_use_jobs` 기본값을 `True` 로(사용자 결정 — 취소·유량제어가 이 경로에
+> 달려 있다). 상세는 `_workspace/02-changes.md` §11.
+
+## D6-old. (원안 기록) insert / parse / chunk 의 취소 반응성 — 🟡 **부분 완료 (2026-08-05)**
 
 > **먼저 사실 정정**: 이 항목의 원래 서술("ingest 는 단계 경계에서 중단")은 두 군데가
 > 틀렸다.
