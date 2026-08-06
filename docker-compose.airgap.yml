@@ -125,20 +125,25 @@ services:
     environment:
       DATABASE_URL: postgres://edgequake:${POSTGRES_PASSWORD:-edgequake_secret}@postgres:5432/edgequake
       EDGEQUAKE_CHUNKER: passthrough
-      # LLM provider — 폐쇄망 실측(2026-08-07): edgequake 의 openrouter provider 는
-      # from_env() 가 OPENROUTER_API_KEY/MODEL/SITE_* 만 읽고 base_url 오버라이드가
-      # 전혀 없다(하드코딩 https://openrouter.ai) — 인터넷 없는 폐쇄망에서 문서 적재의
-      # 엔티티추출 단계가 100% 실패한다(Network error, 3회 재시도 후 문서 failed).
-      # 기본값을 openai 로 바꾸고 EDGEQUAKE_CHAT_* 별칭(코드: provider_setup.rs
-      # apply_chat_env_aliases, OPENAI_BASE_URL/API_KEY/EDGEQUAKE_LLM_MODEL 로 매핑)으로
-      # facade·parse-svc 가 이미 쓰는 온프렘 LLM(KBP_OPENAI_*)을 그대로 재사용한다
-      # (임베딩 쪽 EDGEQUAKE_EMBEDDING_PROVIDER=openai 패턴과 동일). 인터넷이 되는
-      # 개발환경 등에서 openrouter 를 계속 쓰려면 EDGEQUAKE_LLM_PROVIDER=openrouter 로
-      # .env 에서 덮어쓴다.
-      EDGEQUAKE_LLM_PROVIDER: ${EDGEQUAKE_LLM_PROVIDER:-openai}
-      EDGEQUAKE_CHAT_BASE_URL: ${KBP_OPENAI_BASE_URL}
-      EDGEQUAKE_CHAT_API_KEY: ${KBP_OPENAI_API_KEY}
-      EDGEQUAKE_CHAT_MODEL: ${KBP_LLM_MODEL:-qwen/qwen3.5-122b-a10b}
+      # LLM provider — 폐쇄망 실측(2026-08-07), 2단계로 발견:
+      # 1) openrouter provider 는 from_env() 가 OPENROUTER_API_KEY/MODEL/SITE_* 만 읽고
+      #    base_url 오버라이드가 전혀 없다(하드코딩 https://openrouter.ai) — 인터넷 없는
+      #    폐쇄망에서 엔티티추출이 100% 실패(Network error).
+      # 2) EDGEQUAKE_LLM_PROVIDER=openai + OPENAI_BASE_URL 로 바꿔도 여전히 실패 —
+      #    safety_limits.rs 의 COMPAT-GUARD(is_model_provider_mismatch)가 "openai"
+      #    provider 에 대해 모델명이 gpt-*/o1-*.. 패턴이 아니면(예: "qwen/...") "provider
+      #    default"(gpt-4.1-nano, base_url 도 api.openai.com 으로 재구성)로 조용히
+      #    바꿔버린다 — 기존에 겪은 COMPAT-GUARD 다운그레이드 버그(_workspace 기록)와
+      #    동일 메커니즘. 이 가드는 openai/anthropic/gemini/xai/minimax 에만 걸리고
+      #    openai-compatible/openrouter 는 대상이 아니다(코드 확인: match 문 `_ => false`).
+      # → provider 를 openai-compatible 로 쓰고, 전용 env(OPENAI_COMPATIBLE_*, 코드:
+      #   factory.rs create_openai_compatible_from_env)로 배선한다. 인터넷이 되는
+      #   개발환경 등에서 openrouter 를 계속 쓰려면 EDGEQUAKE_LLM_PROVIDER=openrouter 로
+      #   .env 에서 덮어쓴다.
+      EDGEQUAKE_LLM_PROVIDER: ${EDGEQUAKE_LLM_PROVIDER:-openai-compatible}
+      OPENAI_COMPATIBLE_BASE_URL: ${KBP_OPENAI_BASE_URL}
+      OPENAI_COMPATIBLE_API_KEY: ${KBP_OPENAI_API_KEY}
+      OPENAI_COMPATIBLE_MODEL: ${KBP_LLM_MODEL:-qwen/qwen3.5-122b-a10b}
       # openrouter 로 되돌릴 때 대비 — 위 openai 경로에서는 미사용.
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
       HOST: 0.0.0.0

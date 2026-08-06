@@ -108,15 +108,21 @@ services:
     environment:
       DATABASE_URL: postgres://edgequake:${POSTGRES_PASSWORD:-edgequake_secret}@postgres:5432/edgequake
       EDGEQUAKE_CHUNKER: passthrough
-      # 기본은 openrouter(불변, 현재 dev 동작 그대로) — EDGEQUAKE_LLM_PROVIDER=openai 로
-      # .env 에서 덮어쓰면 EDGEQUAKE_CHAT_* 별칭(provider_setup.rs apply_chat_env_aliases)
-      # 을 통해 KBP_OPENAI_*(폐쇄망 온프렘 LLM)로 리다이렉트된다. 폐쇄망 실측(2026-08-07):
-      # openrouter provider 의 from_env() 는 base_url 오버라이드가 없어 인터넷 없는
-      # 환경에서 100% 실패한다(docker-compose.airgap.yml 은 기본값 자체를 openai 로 바꿔둠).
+      # 기본은 openrouter(불변, 현재 dev 동작 그대로). 폐쇄망 실측(2026-08-07, 2단계):
+      # 1) openrouter provider 는 base_url 오버라이드가 없어 인터넷 없는 환경에서 100%
+      #    실패(하드코딩 https://openrouter.ai).
+      # 2) EDGEQUAKE_LLM_PROVIDER=openai 로 바꿔도 safety_limits.rs 의 COMPAT-GUARD 가
+      #    "openai" provider + 비-gpt-* 모델명(예: qwen/...)을 감지해 조용히
+      #    gpt-4.1-nano/api.openai.com 으로 되돌린다(openai/anthropic/gemini/xai/minimax
+      #    전용 가드, openai-compatible/openrouter 는 대상 아님 — 코드 확인).
+      # → 폐쇄망은 EDGEQUAKE_LLM_PROVIDER=openai-compatible + OPENAI_COMPATIBLE_*
+      #   (docker-compose.airgap.yml 기본값)를 쓴다. openrouter 기본값에서는 아래 변수들
+      #   미사용(inert).
       EDGEQUAKE_LLM_PROVIDER: ${EDGEQUAKE_LLM_PROVIDER:-openrouter}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
-      EDGEQUAKE_CHAT_BASE_URL: ${KBP_OPENAI_BASE_URL:-}
-      EDGEQUAKE_CHAT_API_KEY: ${KBP_OPENAI_API_KEY:-}
+      OPENAI_COMPATIBLE_BASE_URL: ${KBP_OPENAI_BASE_URL:-}
+      OPENAI_COMPATIBLE_API_KEY: ${KBP_OPENAI_API_KEY:-}
+      OPENAI_COMPATIBLE_MODEL: ${KBP_LLM_MODEL:-}
       # HOST/PORT (not EDGEQUAKE_HOST/EDGEQUAKE_PORT) — edgequake main.rs reads these
       HOST: 0.0.0.0
       PORT: "8081"
