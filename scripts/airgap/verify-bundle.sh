@@ -2,12 +2,14 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # verify-bundle.sh — 번들 무결성 / .env 준비상태 검사
 #
-# 두 가지 검사를 독립적으로 수행한다(Phase A 는 --images, Phase B 는 --env 를 씀):
-#   --env  [.env경로]     : 【A. 온프렘 재설정 필수】 키가 채워졌는지 + 아직 인터넷
+# 세 가지 검사를 독립적으로 수행한다(Phase A 는 --images/--imports, Phase B 는 --env 를 씀):
+#   --env     [.env경로]  : 【A. 온프렘 재설정 필수】 키가 채워졌는지 + 아직 인터넷
 #                           주소(openrouter.ai/litellm.ax-demo.com)를 가리키는지 경고.
 #   --images [tar경로]    : 로컬 이미지 스토어에 9종 이미지가 존재하고 arch 가 맞는지.
 #                           (docker/podman 자동탐지)
-# 인자 없으면 둘 다(기본 경로) 시도.
+#   --imports             : kbp-parse-svc 이미지에 kordoc 이 실제로 설치돼 있는지
+#                           (healthy 로 뜨지만 엑셀 파서 백엔드가 조용히 깨지는 것을 막음, A6)
+# 인자 없으면 셋 다(기본 경로) 시도.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
@@ -73,9 +75,37 @@ check_images() {
   return $bad
 }
 
+check_imports() {
+  echo "== 런타임 의존성 스모크(kbp-parse-svc: kordoc) =="
+  local ENGINE=""
+  command -v docker >/dev/null && ENGINE=docker
+  command -v podman >/dev/null && ENGINE="${ENGINE:-podman}"
+  [ -n "$ENGINE" ] || { echo "${RED}✗ docker/podman 둘 다 없음${RST}"; return 1; }
+  local ref; ref="$($ENGINE images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -m1 -E '^kbp-parse-svc(:|$)' || true)"
+  [ -z "$ref" ] && { echo "  ${RED}✗ kbp-parse-svc 이미지 없음 — --images 먼저 통과해야 함${RST}"; return 1; }
+  # kordoc(docx 폴백 레인은 2026-08-06 제거됐지만 엑셀 파서 백엔드로는 여전히 쓴다,
+  # A6·Dockerfile.parse-svc 참고). 이미지에 바이너리가 빠진 채로 healthy 가 뜨는
+  # 것을 배포 전에 잡는다.
+  local out
+  out="$(timeout "${IMPORTS_CHECK_TIMEOUT:-60}" "$ENGINE" run --rm --entrypoint sh "$ref" \
+    -c 'command -v kordoc && kordoc --version' 2>&1)"
+  if [ $? -eq 0 ]; then
+    echo "  ${GRN}✓ kordoc 설치 확인 ($ref)${RST}"
+  else
+    echo "  ${RED}✗ kordoc 없음/실행 실패($ref) — 엑셀 파서 kordoc 백엔드가 조용히 깨진다:${RST}"
+    echo "$out" | sed 's/^/    /'
+    return 1
+  fi
+  # ⚠️ 파일변환(한컴) API 는 이미지 안 도구가 아니라 온프렘 HTTP 엔드포인트라 여기서
+  # 도달성을 못 확인한다 — check_env() 의 KBP_FILECONVERT_URL 값 존재 확인이 유일한
+  # 사전 방어선이다. docx/hwp/ppt/html 파싱은 그 서비스가 실제로 응답해야 성공한다
+  # (A6 — 구 kordoc docx 폴백은 제거됨, 지금은 이 경로가 유일하다).
+}
+
 case "${1:-}" in
-  --env)    check_env "${2:-}"    || rc=1 ;;
-  --images) check_images          || rc=1 ;;
-  *)        check_env  || rc=1; echo; check_images || rc=1 ;;
+  --env)     check_env "${2:-}"    || rc=1 ;;
+  --images)  check_images          || rc=1 ;;
+  --imports) check_imports         || rc=1 ;;
+  *)         check_env  || rc=1; echo; check_images || rc=1; echo; check_imports || rc=1 ;;
 esac
 exit $rc

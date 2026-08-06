@@ -531,7 +531,11 @@ def test_convert_failure_is_parse_failed(monkeypatch):
     with pytest.raises(svc.FrontError) as ei:
         svc.run_parse(b"HWP", "a.hwp", text_llm=None, vision_llm=None,
                       ocr_url="", excel_url="", docs_id="d")
-    assert str(ei.value.detail if hasattr(ei.value, "detail") else ei.value) == "parse_failed"
+    # 카테고리("parse_failed")만이 아니라 실제 예외 메시지도 실어야 한다(A6) —
+    # 원인불명의 "결과가 비어있습니다" 로 소비측까지 정보가 사라지는 것을 막는다.
+    detail = str(ei.value.detail if hasattr(ei.value, "detail") else ei.value)
+    assert detail.startswith("parse_failed:")
+    assert "gateway down" in detail
 
 
 def test_non_pdf_without_convert_target_fails_locally(monkeypatch):

@@ -307,12 +307,14 @@ def run_parse(file_bytes: bytes, filename: str, *,
             wrap_modals=wrap_modals,      # 기본 on → 표를 〈MODAL〉 마커로 원자화
         )
         modal_ms = (time.perf_counter() - _t) * 1000.0
-    except ParserError:
+    except ParserError as exc:
         log.exception("parse failed for %s", filename)
-        raise FrontError("parse_failed")
-    except Exception:  # noqa: BLE001
+        # 원래는 카테고리 문자열("parse_failed")만 넘겨 실제 원인(kordoc 부재 등)이
+        # 로그에만 남고 응답 소비자(facade→kb)까지는 안 갔다 — 실제 예외 메시지를 싣는다.
+        raise FrontError(f"parse_failed: {exc}")
+    except Exception as exc:  # noqa: BLE001
         log.exception("parse-svc front-end failed for %s", filename)
-        raise FrontError("internal_error")
+        raise FrontError(f"internal_error: {exc}")
 
     # 렌더+업로드는 best-effort(비치명) — enriched/page_spans 는 위에서 이미 확정.
     _t = time.perf_counter()

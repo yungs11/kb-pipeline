@@ -29,8 +29,11 @@
 기동 순서(의존성): postgres → edgequake / (minio) / doc_guard / adaptive_chunk
 → parse-svc → facade / edgequake_webui.
 
-> **런타임 외부 의존(중요)**: 스택은 실행 중 LLM·임베딩·리랭커·VL-OCR 를 HTTP 로 호출한다.
-> 폐쇄망에서는 이 4가지가 **사내 온프렘 엔드포인트**로 `.env`에 설정돼 있어야 한다(§3). 모델
+> **런타임 외부 의존(중요)**: 스택은 실행 중 LLM·임베딩·리랭커·VL-OCR·**파일변환(한컴)** 을
+> HTTP 로 호출한다. 폐쇄망에서는 이 5가지가 **사내 온프렘 엔드포인트**로 `.env`에 설정돼
+> 있어야 한다(§3). 특히 파일변환은 2026-08-06 부로 **docx/hwp/ppt/html 파싱의 유일한
+> 경로**가 됐다(구 kordoc 폴백 레인은 제거됨, router.py 참고) — 미설정이면 그 확장자
+> 전부가 파싱 실패한다. 모델
 > 서버 자체는 번들에 포함되지 않는다(이미 사내에 존재한다는 전제).
 
 ---
@@ -89,6 +92,7 @@ vi .env      # 【A. 온프렘 재설정 필수】 블록만 사내 주소/키�
 | VL-OCR | `MODEL_API_URL`, `MODEL_API_KEY` | `http://vl.corp:8000/v1/chat/completions` | 이미지/PPTX 파싱 빈 결과 |
 | 임베딩 | `LITELLM_EMBEDDING_BASE_URL`, `ADAPTIVE_CHUNK_SCORING_EMBEDDING_BASE_URL`, `*_API_KEY`, `*_MODEL` | `http://embed.corp:8000/v1` | 적재/검색 임베딩 실패 |
 | 리랭커 | `EDGEQUAKE_RERANK_BASE_URL`(→ `/v1/rerank`), `ADAPTIVE_CHUNK_RERANK_BASE_URL`(→ `/v1`), `*_API_KEY`, `*_MODEL` | `http://rerank.corp:8000/...` | BM25 폴백(품질 저하, 비치명) |
+| 파일변환(한컴) | `KBP_FILECONVERT_URL`, `KBP_FILECONVERT_TOKEN` | `http://fileconvert.corp:8080` | **docx/hwp/ppt/html 파싱 전면 실패**(A6) — pdf·xlsx·이미지·txt 는 무관 |
 
 【B. 내부 전용】 블록(MinIO·Postgres·인트라스택 DNS)은 원칙적으로 손대지 않는다.
 검증: `./scripts/airgap/verify-bundle.sh --env .env` (빈 필수키 / 잔존 인터넷주소 경고).
@@ -138,6 +142,20 @@ curl -fsS -H "X-Facade-Key: $KBP_FACADE_KEY" http://localhost:3000/jobs/workers
 | `up` 후 health TIMEOUT | 상위 서비스 unhealthy 또는 온프렘 엔드포인트 불통 | `podman-compose -f docker-compose.airgap.yml logs edgequake` 부터. 임베딩/LLM 주소 도달성(`.env`) 확인 |
 | edgequake `OPENROUTER_API_KEY is empty` (exit 101) | `.env` 빈 값 | §3 대로 키 채우기 |
 | 이미지/PPTX 파싱 빈 결과 | `MODEL_API_URL/KEY` 미설정 | §3 VL-OCR 채우기 |
+| docx/hwp/ppt/html 파싱 실패(`enriched_content` 비어있음) | `KBP_FILECONVERT_URL` 미설정 또는 온프렘 변환 서버 불통(A6) — pdf·xlsx·이미지·txt 는 이 경로를 안 탄다 | `podman exec <parse-svc> curl -fsS "$KBP_FILECONVERT_URL"` 로 도달성 확인. facade 응답의 `detail` 필드에 실제 원인이 실려 온다(2026-08-06 이전엔 카테고리명만 있었다) |
+
+**지원 확장자**(2026-08-06 라우팅 기준, `parse_service/router.py`):
+
+| 확장자 | 경로 | 파일변환(한컴) 필요 |
+|---|---|---|
+| pdf | ODL 직행 | 불필요 |
+| xlsx/xlsm/xls | 자체 청킹(`chunk_needed=False`) | 불필요 |
+| png/jpg/jpeg 등 이미지 | VL-OCR in-process | 불필요 |
+| txt/md/markdown/csv/json/log | 그대로 블록화 | 불필요 |
+| **그 외 전부**(docx·hwp·hwpx·ppt·pptx·html·htm 등) | **파일변환 API → PDF 변환 → ODL** | **필요** — 미설정/불통이면 전면 실패 |
+
+구 kordoc docx 폴백 레인은 제거됐다(장·조 계층 인식 실패, `parse_service/router.py` 주석
+참고). kordoc 은 **엑셀 파서의 별도 백엔드**로만 남아 있다(다른 관심사).
 | 검색은 되나 순위 이상 | 리랭커 주소 불통 → BM25 폴백 | `EDGEQUAKE_RERANK_BASE_URL`/`ADAPTIVE_CHUNK_RERANK_BASE_URL` 확인 |
 | `Bind for 0.0.0.0:9000 failed` | 호스트 포트 점유 | `docker-compose.airgap.yml` 의 해당 `ports:` 좌측(호스트) 숫자만 변경 |
 | MinIO 버킷 미생성(`NoSuchBucket`) | 최초 1회 생성 필요 | load-and-up.sh 가 `mc stat` 로 존재를 실제 검증하며 자동 생성. 실패 시 `FAIL` 로 표시되고 6번 요약에 원인이 남는다. §부록 B 로 수동 생성(재실행은 스크립트를 다시 돌리는 게 우선) |
