@@ -37,8 +37,11 @@ BUILDS=(
   "kbp-edgequake_webui:${TAG}|edgequake/edgequake_webui/Dockerfile|edgequake"
 )
 # pull 대상(업스트림 태그 유지 — compose 가 이 이름으로 참조)
+# edgequake-postgres 는 digest 고정(docker-compose.airgap.yml 과 동일 digest 유지 필수 —
+# :latest 로 pull 하면 번들 재빌드 시점마다 업스트림이 바뀔 수 있고, compose 는 digest 참조라
+# 태그로만 저장하면 로드 후 참조가 안 맞아 오프라인에서 재-pull 시도로 실패한다).
 PULLS=(
-  "ghcr.io/raphaelmansuy/edgequake-postgres:latest"
+  "ghcr.io/raphaelmansuy/edgequake-postgres@sha256:61c4de562ea925c9ba7130c4e0e9649515eae7da9c0729207af8d0f79ba0471a"
   "minio/minio:latest"
   
 )

@@ -78,13 +78,20 @@ x-facade-env: &facade_env
 services:
   # ── 인프라 티어 (pull 이미지 — 업스트림 태그 유지) ──────────────────────────
   postgres:
-    image: ghcr.io/raphaelmansuy/edgequake-postgres:latest
+    # digest 고정(2026-08-07 실측 pg18.4) — :latest 만 쓰면 번들 재빌드 시점마다 업스트림이
+    # 바뀔 수 있다. 실제로 dev 스택(오래전 pull, pg16.14)과 이번 번들(오늘 pull, pg18.4)이
+    # 이미 벌어져 있었고, pg18 은 볼륨 마운트 규약이 바뀌어 아래 옛 경로로 기동이 아예
+    # 안 됐다(에러: "in 18+ ... store database data in a format ... pg_ctlcluster").
+    # 업스트림 이미지를 의도적으로 올리려면 이 digest 를 재확인해서 갱신한다.
+    image: ghcr.io/raphaelmansuy/edgequake-postgres@sha256:61c4de562ea925c9ba7130c4e0e9649515eae7da9c0729207af8d0f79ba0471a
     restart: unless-stopped
     environment:
       POSTGRES_USER: edgequake
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-edgequake_secret}
       POSTGRES_DB: edgequake
-    volumes: ["eq_pg_data:/var/lib/postgresql/data"]
+    # pg18+ 는 /var/lib/postgresql/data 직접 마운트를 거부한다(위 주석) — 부모 디렉터리에
+    # 마운트하면 이미지가 자체적으로 버전별 서브디렉터리를 관리한다(pg16 이하도 호환).
+    volumes: ["eq_pg_data:/var/lib/postgresql"]
     ports: ["5433:5432"]
     healthcheck:
       test: ["CMD-SHELL","pg_isready -U edgequake"]
