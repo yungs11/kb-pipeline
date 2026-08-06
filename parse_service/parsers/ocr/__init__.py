@@ -1,6 +1,6 @@
 """OCR 도메인 파서 — pptx + 이미지/스캔. Phase 2c: in-process VL OCR (:18050 HTTP 제거).
 
-내부: pptx→convert_to_pdf_bytes(gotenberg)→pdf_bytes_to_base64_list; 이미지→
+내부: 이미지→
 image_file_to_base64_list; 페이지별 call_vl_api_with_base64→
 parse_vision_language_response_to_elements→normalize_all_elements. 페이지 실패 비치명(skip).
 """
@@ -27,7 +27,7 @@ def _sem() -> asyncio.Semaphore:
 
 
 async def _file_to_base64_pages(file_bytes: bytes, filename: str) -> list[str]:
-    from parse_service.parsers.ocr import image_utils, pdf_converter
+    from parse_service.parsers.ocr import image_utils
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     suffix = "." + ext if ext else ""
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
@@ -36,12 +36,7 @@ async def _file_to_base64_pages(file_bytes: bytes, filename: str) -> list[str]:
     try:
         if ext in IMAGE_EXTS:
             return image_utils.image_file_to_base64_list(path)
-        # pptx (및 pdf 변환 가능 office): gotenberg → PDF → 페이지 base64
-        gotenberg = os.environ.get("GOTENBERG_URL", "http://localhost:3000")
-        pdf_bytes, ok, _name = pdf_converter.convert_to_pdf_bytes(path, gotenberg)
-        if not ok:
-            raise ParserError(f"gotenberg conversion failed for {filename}")
-        return pdf_converter.pdf_bytes_to_base64_list(pdf_bytes)
+        raise ParserError(f"ocr 파서는 이미지만 받는다 — {filename}")
     finally:
         os.unlink(path)
 
@@ -101,8 +96,9 @@ def ocr_elements_sync(file_bytes: bytes, filename: str,
         return pool.submit(_run).result()
 
 
-def _whole_file_elements(file_bytes: bytes, filename: str, ocr_url: str | None = None) -> list[dict]:
-    return ocr_elements_sync(file_bytes, filename)
+def _whole_file_elements(file_bytes: bytes, filename: str, ocr_url: str | None = None,
+                         prompt_override: tuple[str, str] | None = None) -> list[dict]:
+    return ocr_elements_sync(file_bytes, filename, prompt_override)
 
 
 def _elements_to_pages(elements: list[dict]) -> list[dict]:
@@ -117,8 +113,18 @@ def _elements_to_pages(elements: list[dict]) -> list[dict]:
 
 
 def parse(file_bytes: bytes, filename: str, *, ocr_url: str | None = None) -> RouteResult:
+    """이미지 파일 → VL. **PAGE_HYBRID 프롬프트**(전사 + 시각 서술)를 쓴다.
+
+    범용 전사 프롬프트(`build_user_prompt`)는 글자만 옮긴다 — 순서도·차트·아키텍처도
+    이미지는 노드 라벨이 조각으로 흩어져 흐름·분기·계층이 사라진다(Plan A R2/R3 실측).
+    이미지 파일은 그 자체가 시각 자료인 경우가 대부분이라 전사만으로는 부족하다.
+    PAGE_HYBRID 는 기존 전사 프롬프트에 조항을 덧붙인 것이라 표 `<table>` 계약도 유지된다(R6).
+    """
+    from parse_service.parsers.ocr import prompts
+    override = (prompts.PAGE_HYBRID_SYSTEM_PROMPT, prompts.PAGE_HYBRID_USER_PROMPT)
     try:
-        elements = _whole_file_elements(file_bytes, filename, ocr_url)
+        elements = _whole_file_elements(file_bytes, filename, ocr_url,
+                                        prompt_override=override)
     except Exception as e:  # noqa: BLE001
         raise ParserError(f"ocr failed for {filename}: {e}") from e
     if not elements:

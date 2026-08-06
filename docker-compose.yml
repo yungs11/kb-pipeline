@@ -74,20 +74,6 @@ services:
       retries: 20
     networks: [kbp]
 
-  gotenberg:
-    image: gotenberg/gotenberg:8
-    # 기본 API 타임아웃은 30s — 무거운 pptx(도형·이미지 다수)는 LibreOffice 변환이
-    # 이를 넘겨 503 "context deadline exceeded" 로 파싱 실패(2030KB 주간보고 실관측,
-    # 변환 30.3s). 300s 로 상향(parse-svc GOTENBERG_TIMEOUT=120s 가 실질 상한).
-    command: ["gotenberg", "--api-timeout=300s"]
-    networks: [kbp]
-    healthcheck:
-      # curl confirmed present in gotenberg/gotenberg:8
-      test: ["CMD","curl","-fsS","http://localhost:3000/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-
   # ┌─ 외부 MinIO 로 전환하려면(다른 곳에 이미 떠 있는 MinIO 재사용) ──────────────
   # │ ① 삭제: 아래 `minio:` 서비스 블록 전체 + 최상단 `volumes:` 의 `minio_data`
   # │        + docker-compose.override.yml 의 `minio` 호스트포트 리맵.
@@ -112,7 +98,7 @@ services:
     networks: [kbp]
 
   # Phase 2e: redis/document-parser/excel-parser 제거 — 파싱은 parse-svc in-process 소유
-  # (excel_parser_rag vendoring + VL OCR in-process). gotenberg 만 office→PDF 변환에 잔존.
+  # (excel_parser_rag vendoring + VL OCR in-process). office→PDF 는 원격 변환 API(KBP_FILECONVERT_URL).
 
   # ---------------------------------------------------------------------------
   # Knowledge-graph / vector engine
@@ -222,7 +208,10 @@ services:
       # EXCEL_PARSER_BACKEND 는 이미지 기본값 auto(Dockerfile.parse-svc) — override 없음.
       MODEL_API_URL: ${MODEL_API_URL}
       MODEL_API_KEY: ${MODEL_API_KEY}
-      GOTENBERG_URL: http://gotenberg:3000
+      KBP_FILECONVERT_URL: ${KBP_FILECONVERT_URL}
+      KBP_FILECONVERT_TOKEN: ${KBP_FILECONVERT_TOKEN}
+      KBP_FILECONVERT_TIMEOUT: ${KBP_FILECONVERT_TIMEOUT:-300}
+      KBP_FILECONVERT_CRT_ID: ${KBP_FILECONVERT_CRT_ID:-kb-pipeline}
       GUIDED_JSON_MODE: response_format   # OpenRouter/OpenAI 호환 (vLLM extra_body 아님)
       KBP_VL_MAX_CONCURRENT: "3"
       # ── VL 모델·토큰 (Plan A). 값 없이 키만 넣으면 빈 문자열이 "설정됨"이 되어
@@ -251,7 +240,6 @@ services:
       MINIO_BUCKET: ${MINIO_BUCKET:-document-parser}
       MINIO_SECURE: "false"
     depends_on:
-      gotenberg: { condition: service_healthy }
       minio: { condition: service_healthy }   # 외부 MinIO 전환 시 이 줄 제거
     ports: ["19001:19001"]
     healthcheck:

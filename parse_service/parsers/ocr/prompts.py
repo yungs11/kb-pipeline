@@ -617,6 +617,41 @@ def get_default_prompts() -> Dict[str, str]:
     }
 
 
+_PAGE_HYBRID_EXTRA = """
+
+## 추가 규칙 — 그림 영역의 처리 (category="figure" 인 경우)
+
+figure 안에 든 것이 무엇이냐에 따라 markdown 을 다르게 채운다. 위의 표 규칙은 그대로다.
+
+1. **순서도·다이어그램·아키텍처도**: 박스 안 낱말을 나열하지 말고 **논리 흐름을 서술**한다.
+   시작부터 끝까지 화살표(→)로 연결하고, 조건 분기(예/아니오, True/False)는 어느 단계에서
+   어디로 가는지 명시한다. 스윔레인(수행 주체)이 있으면 각 단계의 주체를 함께 적는다.
+
+2. **차트(막대·파이·꺾은선·간트)**: 모든 데이터 포인트를 옮기지 말고 **핵심을 3줄 이내로 요약**한다.
+   라벨과 수치가 이미지 안에서 서로 붙어 있는 것만 짝지어 쓴다. 애매하면 그 항목을 버린다.
+   하나의 수치를 두 항목에 쓰지 않는다. 범례나 축 눈금을 데이터 값으로 오인하지 않는다.
+
+3. **일반 본문·제목**: 지금까지대로 **원문 그대로 전사**한다(요약 금지).
+
+4. **의미 없는 사진·로고·장식**: 생략한다.
+
+어느 경우에도 이미지에 없는 내용을 지어내지 않는다."""
+
+
+def build_page_hybrid_prompts() -> tuple[str, str]:
+    """(system, user) — 기존 전사 프롬프트 + 그림/차트 조항."""
+    return build_system_prompt(), build_user_prompt() + _PAGE_HYBRID_EXTRA
+
+
+PAGE_HYBRID_SYSTEM_PROMPT = build_system_prompt()
+PAGE_HYBRID_USER_PROMPT = build_user_prompt() + _PAGE_HYBRID_EXTRA
+
+
+def build_page_hybrid_prompts() -> tuple[str, str]:
+    """(system, user) — 기존 전사 프롬프트 + 그림/차트 조항."""
+    return build_system_prompt(), build_user_prompt() + _PAGE_HYBRID_EXTRA
+
+
 __all__ = [
     # 하위 호환성
     'SYSTEM_PROMPT',
@@ -639,4 +674,7 @@ __all__ = [
     # 다이어그램 전용
     'DIAGRAM_SYSTEM_PROMPT',
     'DIAGRAM_USER_PROMPT',
+    # 전면 VL(전사 + 시각 서술) — 이미지 파일·스캔 그림 페이지
+    'PAGE_HYBRID_SYSTEM_PROMPT',
+    'PAGE_HYBRID_USER_PROMPT',
 ]

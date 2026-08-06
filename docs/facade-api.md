@@ -43,7 +43,7 @@ facade 가 실제로 더하는 값(단순 프록시가 아닌 이유):
         │ parse+blockify+     │  │ :18060           │  │ 추출·임베딩·AGE그래프  │
         │ modal enrich        │  │ 4방법 경쟁 청킹  │  │ ·검색  (passthrough)   │
         └──┬──────────────┬───┘  └──────────────────┘  └───────────┬────────────┘
-           │ gotenberg    │ VL/paddle_gw (원격)                    │
+           │ 변환 API     │ VL/paddle_gw (원격)                    │
            │ :3000        │ MODEL_API_URL /                        │
            │              │ KBP_PADDLE_OCR_GATEWAY_URL             │
            ▼              ▼                          ┌─────────────▼────────────┐
@@ -515,8 +515,8 @@ query `workspace_id`, `doc_id`. 성공 시 **204 No Content**(본문 없음).
 ```bash
 cd /Users/xxx/workspace/8.kb-pipeline
 
-# 1) 백킹 서비스 (postgres/minio/edgequake/adaptive_chunk/gotenberg/doc_guard)
-docker compose up -d --no-build postgres minio edgequake adaptive_chunk gotenberg
+# 1) 백킹 서비스 (postgres/minio/edgequake/adaptive_chunk/doc_guard)
+docker compose up -d --no-build postgres minio edgequake adaptive_chunk
 docker compose up -d --no-build edgequake_webui        # 그래프 보기 UI (호스트 :13000)
 
 # 2) 애플리케이션 (호스트 — 라이브 소스 반영)
@@ -524,7 +524,7 @@ bash scripts/run-parse-svc.sh    # :19001  — 반드시 facade 보다 먼저
 bash scripts/run-facade.sh       # :19000
 ```
 
-**의존 순서**: postgres → edgequake / adaptive_chunk / gotenberg / minio → parse-svc → facade.
+**의존 순서**: postgres → edgequake / adaptive_chunk / minio → parse-svc → facade.
 facade 는 기동 시 다운스트림을 확인하지 않으므로 순서를 어겨도 뜨긴 뜨지만, 첫 요청에서 연결 거부가 난다.
 
 두 런처가 공통으로 하는 일: **docker-shadow 가드**(같은 이름의 compose 컨테이너 stop) → env 로드 →

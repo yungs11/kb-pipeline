@@ -22,8 +22,11 @@ from typing import Any, Callable
 
 from fastapi import FastAPI, UploadFile, File, Form
 
-from parse_service.tools import safe_basename as _safe_basename
+from parse_service.tools import safe_basename as _safe_basename, ToolError
+from parse_service.tools import fileconvert
+from parse_service import router
 from parse_service.router import route as _route_impl
+from parse_service.parsers.ocr import IMAGE_EXTS
 from parse_service.parsers import RouteResult, ParserError
 from parse_service.pdf_pages import render_pdf_pages
 from kb_pipeline.modal import enrich_with_spans, MODAL_OPEN_PREFIX, MODAL_CLOSE
@@ -181,9 +184,14 @@ def _render_and_upload(
             })
         return page_count, pages
     # 단일 이미지 — 원본 1장을 JPEG 정규화해 page 1 로 업로드(spec §5.1.5).
-    jpeg = _image_to_jpeg(file_bytes)
+    # **이미지일 때만** 정규화를 시도한다 — 텍스트(.txt/.csv 등)까지 넣으면 업로드마다
+    # `_image_to_jpeg` 가 log.exception 을 남겨 ERROR 스택트레이스가 상시화된다.
+    # 페이지 메타 자체는 여기서도 만든다(app 상단 주석의 계약: 업로드와 무관하게 항상).
     page_uuid = f"{docs_id}_1"
-    key = minio.put_page_image(docs_id, page_uuid, jpeg) if (can_upload and jpeg) else None
+    key = None
+    if ext in IMAGE_EXTS:
+        jpeg = _image_to_jpeg(file_bytes)
+        key = minio.put_page_image(docs_id, page_uuid, jpeg) if (can_upload and jpeg) else None
     pages.append({"page_number": 1, "page_uuid": page_uuid, "minio_object": key})
     return 1, pages
 
@@ -227,7 +235,31 @@ def run_parse(file_bytes: bytes, filename: str, *,
     # 이면 bare 통과(마커 없음 → 청커가 자연 그룹핑, 하위호환).
     wrap_modals = os.environ.get("KBP_MODAL_WRAP", "1") != "0"
     modal_sink: dict = {}
+    convert_ms = 0.0
     try:
+        # ── 변환: 지원 밖 포맷 → PDF (docs/API_FILECONVERT_AGENT.md) ─────────────
+        # **여기여야 한다.** route() 안에서 filename 을 바꾸면 값 복사라
+        # _render_and_upload 가 원본 이름을 보고 단일 이미지 분기로 떨어진다
+        # → page_count=1 인데 page_spans 는 N개(2026-08-06 검증에서 잡힌 회귀).
+        # parse_pages 주입 경로는 이미 파싱 결과가 있으므로 원격 API 를 때리지 않는다.
+        if parse_pages is None and fileconvert.needs_convert(filename):
+            _tc = time.perf_counter()
+            try:
+                file_bytes = fileconvert.convert_to_pdf(file_bytes, filename)
+            except ToolError as e:
+                # ToolError 는 ParserError 서브클래스가 아니다 → 감싸지 않으면
+                # except Exception 에 걸려 internal_error 가 된다(원하는 건 parse_failed).
+                raise ParserError(str(e)) from e
+            filename = fileconvert.swap_ext_pdf(filename)
+            convert_ms = (time.perf_counter() - _tc) * 1000.0
+        # 변환 대상이 아닌데 pdf 도메인으로 갈 것들(확장자 없음·.zip 등)을 여기서 가른다.
+        # 없으면 ODL 이 비-PDF 를 받아 ToolError 가 아닌 예외를 내고 internal_error 로 샌다.
+        if parse_pages is None and router.domain_of(filename) == "pdf":
+            if b"%PDF" not in file_bytes[:1024]:
+                raise ParserError(f"not a PDF (and not convertible): {filename}")
+            if fileconvert.ext_of(filename) != "pdf":
+                filename = fileconvert.swap_ext_pdf(filename)   # "upload" → "upload.pdf"
+
         _t = time.perf_counter()
         # 라우팅: 주입된 parse_pages(테스트/레거시)가 있으면 pages 경로로 그대로 쓰고,
         # 없으면 확장자 router 가 도메인 파서를 고른다(excel → kind="chunks").
@@ -252,6 +284,7 @@ def run_parse(file_bytes: bytes, filename: str, *,
                 "page_count": 0, "pages": [], "page_spans": [],
                 # v2(리뷰 B1): pages 경로와 동일 형태(modal_llm 포함) — 모니터링 집계자 호환.
                 "timing_metrics": {"parse_ms": round((time.perf_counter() - _t) * 1000.0, 1),
+                                   "convert_ms": round(convert_ms, 1),
                                    "modal_enrich_ms": 0.0, "render_upload_ms": 0.0,
                                    "counters": {"page_count": 0, "n_blocks": len(rr.chunks)},
                                    "modal_llm": {"wall_ms": None, "calls": None,
@@ -315,6 +348,9 @@ def run_parse(file_bytes: bytes, filename: str, *,
         # modal_enrich(표/이미지 LLM) vs render_upload. modal_llm 에 표 N개×LLM 분해.
         "timing_metrics": {
             "parse_ms": round(parse_ms, 1),
+            # 원격 변환(hwp/docx/pptx→PDF)은 parse_ms 밖이라 따로 낸다 — 최대 300초라
+            # 빠뜨리면 모니터링이 "빨라졌다"고 읽는데 실제 벽시계는 는다.
+            "convert_ms": round(convert_ms, 1),
             "modal_enrich_ms": round(modal_ms, 1),
             "render_upload_ms": round(render_ms, 1),
             "counters": {

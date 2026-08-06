@@ -82,7 +82,6 @@ graph TD
 | **18081** | 19001 | parse-svc | OCR/파싱 엔진 (pdf·xlsx·docx·이미지 VL) | ✅ | 열기 |
 | 18060 | 18060 | adaptive_chunk | 청킹 허브 | 내부 | 닫기 |
 | 5433 | 5432 | postgres | edgequake 그래프 DB(pgvector+AGE) | 디버그 | **닫기** |
-| — | 3000 | gotenberg | office→PDF 변환(내부 전용, publish 없음) | 내부 | — |
 | — | 9000 | minio S3 API | 객체 저장(내부 DNS `minio:9000`) | 내부 | 닫기 |
 
 ### kb 스택

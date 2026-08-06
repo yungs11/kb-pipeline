@@ -40,7 +40,7 @@ BUILDS=(
 PULLS=(
   "ghcr.io/raphaelmansuy/edgequake-postgres:latest"
   "minio/minio:latest"
-  "gotenberg/gotenberg:8"
+  
 )
 
 log() { printf '\n\033[1;36m▶ %s\033[0m\n' "$*"; }

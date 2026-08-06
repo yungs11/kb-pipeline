@@ -71,7 +71,7 @@ log "compose up -d  (${COMPOSE[*]})"
 #
 # 컨테이너 안에서 curl 을 쏘는 방식도 안 된다 — webui 이미지에는 curl 이 없다(자체
 # healthcheck 가 wget 을 쓴다). 이미지마다 어떤 도구가 있는지를 스크립트가 알 필요가 없다.
-SERVICES=(postgres minio gotenberg edgequake doc_guard adaptive_chunk parse-svc facade
+SERVICES=(postgres minio edgequake doc_guard adaptive_chunk parse-svc facade
           edgequake_webui)
 
 # compose 프로젝트명. 라벨로 컨테이너를 고를 때 다른 스택과 섞이지 않게 한정한다.

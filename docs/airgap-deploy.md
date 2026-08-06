@@ -15,7 +15,6 @@
 |------|--------|-------------|-------------|------|
 | 인프라 | postgres | ghcr.io/raphaelmansuy/edgequake-postgres:latest | 5433 | pull |
 | 인프라 | minio | minio/minio | 3003(콘솔) | pull |
-| 인프라 | gotenberg | gotenberg/gotenberg:8 | (내부) | pull |
 | 엔진 | edgequake | kbp-edgequake:airgap | 3001 | 빌드 |
 | 문서 | doc_guard | kbp-doc_guard:airgap | (내부) | 빌드 |
 | 문서 | adaptive_chunk | kbp-adaptive_chunk:airgap | 18060 | 빌드 |
@@ -27,7 +26,7 @@
 > 포트는 **호스트 발행 포트**다(컨테이너 내부 포트가 아니다). 권위 출처는
 > `docker-compose.airgap.yml` 이고, `docs/architecture-ports.md` 에 전체 표가 있다.
 
-기동 순서(의존성): postgres → edgequake / (gotenberg·minio) / doc_guard / adaptive_chunk
+기동 순서(의존성): postgres → edgequake / (minio) / doc_guard / adaptive_chunk
 → parse-svc → facade / edgequake_webui.
 
 > **런타임 외부 의존(중요)**: 스택은 실행 중 LLM·임베딩·리랭커·VL-OCR 를 HTTP 로 호출한다.

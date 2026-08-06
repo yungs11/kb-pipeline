@@ -450,3 +450,49 @@ types·JobList known/label/TERMINAL·JobProgressInline TERMINAL·BatchStatusPane
 
 **커밋**: kb `4bd434e`(파이프라인·워커) → `7163ed6`(API·배치·기본화) → `4a2f6b4`(프론트)
 → `1d7b909`(UUID 수정) → `c01d7ec`(테스트 23건). 634 passed, 회귀 0건.
+
+---
+
+## 파일 변환 API 도입 — gotenberg·kordoc(docx) 제거 + router 4분기 (2026-08-06)
+
+**배경**: `router._domain` 의 폴백이 kordoc(docx 파서)이라 `hwp·hwpx·doc·ppt·html` 이 전부
+거기로 갔고 파싱이 안 됐다. 내규 코퍼스 247건 중 **hwp 175 + doc 5 = 180건(73%)** 이 막혀 있었다.
+gotenberg 는 `pptx → PDF` 한 경로 때문에 compose 서비스 1개로 남아 있었다(이미지·PDF 스캔은
+각각 `image_utils`·PyMuPDF 라 gotenberg 불필요).
+
+**결정**: 한컴 도큐먼트툴즈 기반 **원격 변환 API**(`docs/API_FILECONVERT_AGENT.md`)로 교체.
+폐쇄망에도 동일 API 가 들어간다(사용자 확인) → gotenberg 완전 제거.
+
+```
+excel   xlsx xlsm xls        자체 청킹 (변환 금지 — 시트 구조 손실)
+ocr     png jpg …            이미지 직행, PAGE_HYBRID(전사 + 시각 서술)
+text    txt md csv json …    평문 그대로 (신설, utf-8-sig/utf-16/cp949)
+pdf     그 외 전부            변환 API → ODL/GW/VL
+```
+
+**변환은 `run_parse` 에서 한다 — `route()` 안이 아니다.** `route()` 의 `filename` 은 값 복사라
+`_render_and_upload`(페이지 이미지)에 전파되지 않는다. 거기 두면 파싱은 17페이지인데
+`page_count=1` 이 되어 `page_spans` 와 어긋나고 인용 링크가 죽는다(검증에서 잡힌 회귀).
+
+**kordoc 은 docx 경로에서만 뺐다.** `excel_parser_rag` 의 기본 백엔드가 kordoc 이라
+(`config.py:66`) 전면 제거는 불가하다. Dockerfile 의 `npm i -g kordoc` 도 유지.
+
+**kordoc 업그레이드는 하지 않는다** — 계층 오파싱이 4.7.1 에서도 그대로다.
+실측(신한자산신탁 정관 hwp 17p):
+
+```
+                실텍스트    헤딩                 리스트
+kordoc 3.8.3    10,610자   55개 전부 ###           0     章·條 같은 레벨(평평)
+kordoc 4.7.1    10,610자   55개 전부 ###           0     개선 없음
+변환API → ODL   10,600자   #1 / ##2 / ###1       200     계층 있음
+```
+
+4.x 의 "8단계 항목부호"는 `markdown → HWPX` **생성** 방향이고 추출 방향은 안 고쳐졌다.
+
+**라이브 검증**(정관 hwp): 17페이지 · 262블록 · 14,282자, `page_count == page_spans == 17`,
+`convert_ms=3,313` · `parse_ms=2,736`. 순서도 이미지(webp)는 PAGE_HYBRID 로
+`시작 → 지름신 강림 → (YES) …` 분기까지 서술됐다.
+
+**알려진 한계**: 변환 API 가 단일 실패점이다(폴백 없음 — 잘못된 파서로 조용히 가는 것보다
+명시적 실패를 택했다). pptx 는 처리 경로가 바뀌어(gotenberg+VL 전량 → triage 라우팅) 회귀
+가능성이 있고 미검증이다.

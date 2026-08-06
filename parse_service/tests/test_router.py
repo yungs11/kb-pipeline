@@ -1,34 +1,43 @@
-"""router — 확장자 → 도메인 파서 디스패치 (Phase 2a 매핑)."""
+"""router — 확장자 → 도메인 4분기. 변환은 run_parse 가 한다(여기서 하지 않는다)."""
 import pytest
-from parse_service.parsers import RouteResult
+
 from parse_service import router
 
 
-@pytest.mark.parametrize("fname,expected_domain", [
-    ("a.pdf", "pdf"), ("a.xlsx", "excel"), ("a.xlsm", "excel"), ("a.xls", "excel"),
-    ("a.pptx", "ocr"), ("a.docx", "docx"),  # 2d: docx=kordoc 네이티브
-    ("a.png", "ocr"), ("a.webp", "ocr"),
+@pytest.mark.parametrize("filename,expected", [
+    ("a.pdf", "pdf"),
+    ("a.hwp", "pdf"),        # 변환 후 pdf 파서 — run_parse 가 .pdf 로 바꿔 보낸다
+    ("a.docx", "pdf"),       # kordoc 레인 제거(2026-08-06)
+    ("a.pptx", "pdf"),       # 구 gotenberg 레인 제거
+    ("A.HWP", "pdf"),        # 대소문자 무시
+    ("a.xlsx", "excel"), ("a.xls", "excel"),
+    ("a.png", "ocr"), ("a.jpeg", "ocr"),
+    ("a.txt", "text"), ("a.csv", "text"), ("a.md", "text"),
+    ("upload", "pdf"),       # 확장자 없음 → pdf 도메인(%PDF 가드는 run_parse 에)
 ])
-def test_dispatch(monkeypatch, fname, expected_domain):
-    called = {}
-    def fake(domain):
-        def _p(fb, fn, **kw):
-            called["domain"] = domain
-            return RouteResult(kind="pages", chunk_needed=True, pages=[])
-        return _p
-    monkeypatch.setattr(router, "_PARSERS",
-                        {d: fake(d) for d in ("pdf", "excel", "ocr", "docx", "fallback")})
-    router.route(b"x", fname, ocr_url="u", excel_url="v")
-    assert called["domain"] == expected_domain
+def test_domain_of(filename, expected):
+    assert router.domain_of(filename) == expected
 
 
-def test_unknown_ext_falls_back(monkeypatch):
-    called = {}
-    def fb_parse(fb, fn, **kw):
-        called["domain"] = "fallback"
-        return RouteResult(kind="pages", chunk_needed=True, pages=[])
-    monkeypatch.setattr(router, "_PARSERS", {"pdf": None, "excel": None,
-                                             "ocr": None, "docx": None,
-                                             "fallback": fb_parse})
-    router.route(b"x", "a.hwpx", ocr_url="u", excel_url="v")
-    assert called["domain"] == "fallback"
+def test_route_dispatches_to_domain_parser(monkeypatch):
+    seen = {}
+
+    def fake(fb, fn, **kw):
+        seen["fn"] = fn
+        return "RR"
+
+    monkeypatch.setitem(router._PARSERS, "pdf", fake)
+    assert router.route(b"%PDF", "a.pdf", ocr_url="", excel_url="") == "RR"
+    assert seen["fn"] == "a.pdf"
+
+
+def test_text_lane_decodes_cp949():
+    """cp949 평문이 mojibake 없이 블록화된다(utf-16 을 앞에 두면 조용히 깨진다)."""
+    rr = router._text_parse("휴가규정 제1조".encode("cp949"), "a.txt")
+    assert "휴가규정" in " ".join(b.get("text", "") for b in rr.pages[0]["blocks"])
+
+
+def test_text_lane_empty_raises():
+    from parse_service.parsers import ParserError
+    with pytest.raises(ParserError):
+        router._text_parse(b"   ", "a.txt")

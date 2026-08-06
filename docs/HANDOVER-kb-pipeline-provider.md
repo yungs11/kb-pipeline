@@ -59,7 +59,7 @@ dify/raganything 등 다른 provider 용). 청킹·모달원자성은 **facade `
 
 ### 2-A. Docker Compose 기동 (1순위 — 권장)
 
-`docker-compose.yml` (project name `kbp`) 이 postgres·edgequake·document-parser·adaptive_chunk·excel-parser·doc_guard·parse-svc·facade·minio·gotenberg 10개 서비스를 의존 순서(healthcheck 기반)로 함께 올린다.
+`docker-compose.yml` (project name `kbp`) 이 postgres·edgequake·document-parser·adaptive_chunk·excel-parser·doc_guard·parse-svc·facade·minio 9개 서비스를 의존 순서(healthcheck 기반)로 함께 올린다.
 
 **전제 조건**
 
@@ -101,7 +101,6 @@ docker compose ps
 | postgres (eq-pg-kbp) | 5433 → 컨테이너 5432 | named volume `eq_pg_data` |
 | minio API | 19010 → 컨테이너 9000 | |
 | minio Console | 19011 → 컨테이너 9001 | |
-| gotenberg | (내부 전용, 3000) | compose 내부 DNS만 사용 |
 
 > **컨테이너 간 DNS**: 서비스명이 곧 호스트명이다(예: facade→parse-svc는 `http://parse-svc:19001`). `localhost`가 아님에 주의.
 
@@ -266,7 +265,7 @@ echo "OCR         :18050 $(curl -s -m3 -o /dev/null -w '%{http_code}' localhost:
 1. 5개 레포 클론. **8.kb-pipeline 은 반드시 `git clone --recurse-submodules`** 또는 클론 후 `git submodule update --init --recursive edgequake`.
 2. `8.kb-pipeline/.env.example` → `.env` 복사 후 실값(API 키 등) 입력(§6.2 참고).
 3. kb-backend/redis/Qdrant 인프라(compose 범위 외) 기동.
-4. **`docker compose up -d --build`** (8.kb-pipeline/) — 10개 서비스 일괄 기동. 첫 빌드는 Rust 컴파일로 ~9-10분.
+4. **`docker compose up -d --build`** (8.kb-pipeline/) — 9개 서비스 일괄 기동. 첫 빌드는 Rust 컴파일로 ~9-10분.
 5. kb-backend/frontend 는 호스트에서 기동(§2-B 4~5번).
 6. `knowledge_base/backend/.env` 의 `kb_pipeline_base_url=http://localhost:19000` 확인. `DOCGUARD_BASE_URL=http://localhost:8001` 확인.
 7. **§3 헬스 체크** 전부 통과 확인.

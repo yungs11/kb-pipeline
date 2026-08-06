@@ -463,3 +463,100 @@ def test_no_minio_yields_no_keys_but_keeps_page_metadata():
     assert [pg["page_uuid"] for pg in pages] == [
         "ab12cd34ef560000_1", "ab12cd34ef560000_2", "ab12cd34ef560000_3"]
     assert all(pg["minio_object"] is None for pg in pages)
+
+
+# ── 변환 진입 (run_parse 레벨, 2026-08-06) ──────────────────────────────────
+def _stub_route(svc, monkeypatch, sink):
+    """router.route 를 가짜로 — 이 앵커는 parse_pages 없이 돌아 실제 ODL/JVM 을 타면 안 된다."""
+    from parse_service.parsers import RouteResult
+
+    def fake(fb, fn, **kw):
+        sink["route"] = (fb, fn)
+        return RouteResult(kind="pages", chunk_needed=True,
+                           pages=[{"page_number": 1,
+                                   "blocks": [{"type": "text", "text": "x", "page_idx": 1}]}])
+    monkeypatch.setattr(svc, "_route_impl", fake)
+
+
+def test_convert_feeds_both_consumers(monkeypatch):
+    """핵심 앵커 — 변환 바이트·`.pdf` 이름이 **라우팅과 페이지이미지 양쪽**에 간다.
+
+    route() 안에서 filename 을 바꾸면 값 복사라 _render_and_upload 가 원본 이름을 보고
+    단일 이미지 분기로 떨어진다 → page_count=1 인데 page_spans 는 N개(회귀).
+    """
+    import pytest
+    import parse_service.app as svc
+    sink = {}
+    _stub_route(svc, monkeypatch, sink)
+    monkeypatch.setattr(svc.fileconvert, "convert_to_pdf",
+                        lambda fb, fn: sink.setdefault("conv", fn) and None or b"%PDF-conv")
+
+    def capture(file_bytes, filename, docs_id, **kw):
+        sink["render"] = (file_bytes, filename)
+        return 7, [{"page_number": n, "page_uuid": f"d_{n}", "minio_object": None}
+                   for n in range(1, 8)]
+    monkeypatch.setattr(svc, "_render_and_upload", capture)
+
+    out = svc.run_parse(b"HWPBYTES", "a.hwp", text_llm=None, vision_llm=None,
+                        ocr_url="", excel_url="", docs_id="d")
+    assert sink["conv"] == "a.hwp", "변환이 1회 호출된다"
+    assert sink["route"] == (b"%PDF-conv", "a.pdf"), "라우팅이 변환 결과를 받는다"
+    assert sink["render"] == (b"%PDF-conv", "a.pdf"), "페이지이미지도 같은 바이트·이름을 받는다"
+    assert out["page_count"] == 7
+
+
+def test_pdf_does_not_convert(monkeypatch):
+    import pytest
+    import parse_service.app as svc
+    sink = {}
+    _stub_route(svc, monkeypatch, sink)
+    called = []
+    monkeypatch.setattr(svc.fileconvert, "convert_to_pdf",
+                        lambda fb, fn: called.append(fn) or b"")
+    monkeypatch.setattr(svc, "_render_and_upload", lambda *a, **k: (1, []))
+    svc.run_parse(b"%PDF-x", "a.pdf", text_llm=None, vision_llm=None,
+                  ocr_url="", excel_url="", docs_id="d")
+    assert called == []
+
+
+def test_convert_failure_is_parse_failed(monkeypatch):
+    """ToolError 는 ParserError 서브클래스가 아니다 — 감싸지 않으면 internal_error 가 된다."""
+    import pytest
+    import parse_service.app as svc
+    from parse_service.tools import ToolError
+
+    def boom(fb, fn):
+        raise ToolError("gateway down")
+    monkeypatch.setattr(svc.fileconvert, "convert_to_pdf", boom)
+    with pytest.raises(svc.FrontError) as ei:
+        svc.run_parse(b"HWP", "a.hwp", text_llm=None, vision_llm=None,
+                      ocr_url="", excel_url="", docs_id="d")
+    assert str(ei.value.detail if hasattr(ei.value, "detail") else ei.value) == "parse_failed"
+
+
+def test_non_pdf_without_convert_target_fails_locally(monkeypatch):
+    """확장자 없는 비-PDF → 원격 호출 0회 + parse_failed(internal_error 아님)."""
+    import pytest
+    import parse_service.app as svc
+    called = []
+    monkeypatch.setattr(svc.fileconvert, "convert_to_pdf",
+                        lambda fb, fn: called.append(fn) or b"")
+    with pytest.raises(svc.FrontError):
+        svc.run_parse(b"PK\x03\x04zip", "upload", text_llm=None, vision_llm=None,
+                      ocr_url="", excel_url="", docs_id="d")
+    assert called == []
+
+
+def test_text_lane_page_contract(monkeypatch):
+    """텍스트는 변환 미호출 · page_count=1 · page_uuid 유지 · minio_object None."""
+    import pytest
+    import parse_service.app as svc
+    called = []
+    monkeypatch.setattr(svc.fileconvert, "convert_to_pdf",
+                        lambda fb, fn: called.append(fn) or b"")
+    out = svc.run_parse("휴가규정 제1조".encode("cp949"), "a.txt",
+                        text_llm=None, vision_llm=None, ocr_url="", excel_url="", docs_id="d")
+    assert called == []
+    assert out["page_count"] == 1
+    assert out["pages"][0]["page_uuid"] == "d_1"
+    assert out["pages"][0]["minio_object"] is None

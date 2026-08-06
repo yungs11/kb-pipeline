@@ -14,7 +14,7 @@
 
 ## 1. 전 서비스 healthy (`docker compose up -d --wait` → exit 0)
 
-postgres · redis · minio · gotenberg · edgequake · document-parser · excel-parser · doc_guard · adaptive_chunk · parse-svc · facade — **11/11 healthy**.
+postgres · redis · minio · edgequake · document-parser · excel-parser · doc_guard · adaptive_chunk · parse-svc · facade — **11/11 healthy**.
 
 > redis 는 플랜 원본 서비스 목록에 없었으나 document-parser 가 VL 모델설정을 redis 에 저장(`core/config/model_profiles.py`)하고, redis 부재 시 `/health` 가 hang → parse-svc/facade 데드락. bring-up 중 발견해 compose 에 추가(`46309fb`). document-parser env `REDIS_HOST=redis`.
 

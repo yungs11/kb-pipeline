@@ -9,7 +9,7 @@
 #      KeyError the moment a modal block is described. So we load scripts/parse-svc.env.
 #   3) DOCKER-SHADOW (2026-07-07): parse-svc + facade are HOST dev processes here — the
 #      docker-compose stack is BACKING services only (postgres/minio:9000/edgequake/
-#      adaptive/doc_guard/gotenberg). If you `docker compose up -d` the WHOLE stack, it
+#      adaptive/doc_guard). If you `docker compose up -d` the WHOLE stack, it
 #      also starts the parse-svc/facade CONTAINERS (stale baked-in image code). facade
 #      calls parse-svc via compose DNS `parse-svc:19001`, so the CONTAINER serves and
 #      your host source edits are IGNORED → "옛날 파싱"/old behavior. This script stops

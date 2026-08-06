@@ -93,16 +93,6 @@ services:
       retries: 20
     networks: [kbp]
 
-  gotenberg:
-    image: gotenberg/gotenberg:8
-    restart: unless-stopped
-    networks: [kbp]
-    healthcheck:
-      test: ["CMD","curl","-fsS","http://localhost:3000/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-
   minio:
     image: minio/minio
     restart: unless-stopped
@@ -213,7 +203,10 @@ services:
       # ↓ 온프렘 VL-OCR (.env: MODEL_API_URL / MODEL_API_KEY)
       MODEL_API_URL: ${MODEL_API_URL}
       MODEL_API_KEY: ${MODEL_API_KEY}
-      GOTENBERG_URL: http://gotenberg:3000
+      KBP_FILECONVERT_URL: ${KBP_FILECONVERT_URL}
+      KBP_FILECONVERT_TOKEN: ${KBP_FILECONVERT_TOKEN}
+      KBP_FILECONVERT_TIMEOUT: ${KBP_FILECONVERT_TIMEOUT:-300}
+      KBP_FILECONVERT_CRT_ID: ${KBP_FILECONVERT_CRT_ID:-kb-pipeline}
       GUIDED_JSON_MODE: response_format
       KBP_VL_MAX_CONCURRENT: "3"
       # ── VL 모델·토큰 (Plan A). 온프렘 서빙 모델명을 .env 에 넣는다.
@@ -232,7 +225,6 @@ services:
       MINIO_BUCKET: ${MINIO_BUCKET:-document-parser}
       MINIO_SECURE: ${MINIO_SECURE:-false}
     depends_on:
-      gotenberg: { condition: service_healthy }
       minio: { condition: service_healthy }
     ports: ["18081:19001"]   # 외부노출(OCR/파싱 엔진): 호스트 18081 → parse-svc 19001(컨테이너 유지, facade→parse-svc:19001 내부호출 무영향)
     healthcheck:

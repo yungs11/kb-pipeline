@@ -13,15 +13,14 @@ Docker Compose로 kb-pipeline 엔진 스택 전체를 빌드·기동하는 절�
 |------|--------|--------|----------------|-------------------|
 | 인프라 | postgres | ghcr.io/raphaelmansuy/edgequake-postgres | 5432 | **5433** |
 | 인프라 | minio | minio/minio | 9000/9001 | 19010/19011* |
-| 인프라 | gotenberg | gotenberg/gotenberg:8 | 3000 | (내부) |
-| 엔진 | **edgequake** | **kbp-edgequake (docker/edgequake.Dockerfile)** | 8081 | **8081** |
+| 인프라 | | 엔진 | **edgequake** | **kbp-edgequake (docker/edgequake.Dockerfile)** | 8081 | **8081** |
 | 문서처리 | doc_guard | kbp-doc_guard (sibling repo) | 8000 | 8001 |
 | 문서처리 | adaptive_chunk | kbp-adaptive_chunk (sibling repo) | 18060 | (내부) |
 | 앱 | parse-svc | kbp-parse-svc (Dockerfile.parse-svc) | 19001 | 19001 |
 | 앱 | facade | kbp-facade (Dockerfile.facade) | 19000 | **19000** |
 | 확인용 | **edgequake_webui** | kbp-edgequake_webui (edgequake/edgequake_webui/Dockerfile) | 3000 | 3000\*\* |
 
-> **Phase 2e**: 외부 파서 서비스 `document-parser(:18050)`·`excel-parser(:18055)`·`redis` 는 제거됐다. 모든 문서 파싱(PDF/Excel/DOCX/PPTX/이미지/스캔)은 parse-svc(:19001)가 in-process 로 수행한다(이미지에 java21 + node/kordoc + PyMuPDF 내장). office(pptx/docx)→PDF 변환용 gotenberg 만 잔존.
+> **Phase 2e**: 외부 파서 서비스 `document-parser(:18050)`·`excel-parser(:18055)`·`redis` 는 제거됐다. 모든 문서 파싱(PDF/Excel/DOCX/PPTX/이미지/스캔)은 parse-svc(:19001)가 in-process 로 수행한다(이미지에 java21 + node/kordoc + PyMuPDF 내장). office/hwp→PDF 변환은 **원격 변환 API**(`KBP_FILECONVERT_URL`, 한컴 도큐먼트툴즈)가 맡는다.
 
 > **edgequake_webui(그래프 적재 확인용, 선택 서비스)**: edgequake 에 적재된 지식그래프·워크스페이스·문서를 브라우저로 조회·시각화·질의하는 확인용 UI(`http://localhost:3000`, 이 머신은 리맵 후 **13000**). **운영 적재 경로가 아니다** — 문서 적재는 facade `/ingest`(parse-svc 파싱 + adaptive 청킹 + 모달원자성)로 하고, 이 UI 로 직접 업로드하면 kb-pipeline 경로를 우회하므로 "적재 결과(그래프) 확인/디버깅" 용도로만 쓴다. `EDGEQUAKE_API_URL` 은 **브라우저가** API 에 닿는 호스트 URL(기본 `http://localhost:8081`)이며 컨테이너 DNS 가 아니다.
 
@@ -29,8 +28,8 @@ Docker Compose로 kb-pipeline 엔진 스택 전체를 빌드·기동하는 절�
 minio를 **19020/19021**로 재매핑한다(아래 5절 참고). (document-parser 재매핑은 서비스 제거로 삭제됨.)
 \*\* 이 머신은 호스트 3000 이 점유되어 override 가 webui 를 **13000**으로 리맵한다(5절).
 
-기동 순서(의존성): postgres → edgequake / (gotenberg,minio) / doc_guard /
-adaptive_chunk → parse-svc(depends_on gotenberg+minio) → facade / edgequake_webui(depends_on edgequake).
+기동 순서(의존성): postgres → edgequake / (minio) / doc_guard /
+adaptive_chunk → parse-svc(depends_on minio) → facade / edgequake_webui(depends_on edgequake).
 
 ---
 
@@ -87,7 +86,7 @@ true, `llm_provider_name:"openrouter"`, 스키마 v38.
 
 > `ADAPTIVE_CHUNK_QDRANT_URL` 은 제거됨(2026-07-01): 벡터 적재는 edgequake(pgvector)가 소유하고 adaptive_chunk 는 Qdrant 를 소비하지 않는다(compose 에도 없음).
 
-> 값이 빈 상태에서 `up`하면 인프라 티어(postgres/minio/gotenberg/doc_guard)는
+> 값이 빈 상태에서 `up`하면 인프라 티어(postgres/minio/doc_guard)는
 > healthy가 되지만 **edgequake는 OPENROUTER_API_KEY 없으면 panic**하고, 그 뒤 앱 티어
 > (parse-svc/facade)는 depends_on 때문에 못 뜬다.
 
@@ -230,7 +229,7 @@ docker compose down -v         # 볼륨까지 삭제 (postgres/minio 데이터 �
 
 ## 부록: 현재 확인된 상태 (2026-07-03, 채워진 .env 기준)
 
-- **전 서비스 healthy(8개):** postgres, minio, gotenberg, edgequake, doc_guard,
+- **전 서비스 healthy(8개):** postgres, minio, edgequake, doc_guard,
   adaptive_chunk, parse-svc, facade. `docker compose ps` 로 확인.
 - **Phase 2 파서 일원화 완료·실증:** 외부 파서 서비스(document-parser :18050 /
   excel-parser :18055 / redis) 제거됨. parse-svc(:19001) in-process 로 xlsx(→

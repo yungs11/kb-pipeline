@@ -1,4 +1,4 @@
-"""ocr_file_to_elements — 이미지/pptx 를 in-process 로 VL OCR."""
+"""ocr_file_to_elements — 이미지를 in-process 로 VL OCR(PAGE_HYBRID 프롬프트)."""
 import json
 import pytest
 from parse_service.parsers import ocr as ocr_parser
@@ -6,7 +6,7 @@ from parse_service.parsers import ocr as ocr_parser
 
 @pytest.fixture
 def fake_vl(monkeypatch):
-    async def fake_call(base64_image, user_prompt, system_prompt):
+    async def fake_call(base64_image, user_prompt, system_prompt, **_):
         return json.dumps({"elements": [
             {"category": "figure",
              "content": {"html": "", "markdown": "hello", "text": ""},

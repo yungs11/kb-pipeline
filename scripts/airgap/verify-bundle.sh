@@ -17,10 +17,11 @@ rc=0
 
 IMAGES=(
   kbp-edgequake kbp-parse-svc kbp-facade kbp-adaptive_chunk kbp-doc_guard kbp-edgequake_webui
-  ghcr.io/raphaelmansuy/edgequake-postgres minio/minio gotenberg/gotenberg
+  ghcr.io/raphaelmansuy/edgequake-postgres minio/minio
 )
 # .env 에서 반드시 채워야 하는 시크릿/엔드포인트 키
 REQUIRED_ENV=(
+  KBP_FILECONVERT_URL KBP_FILECONVERT_TOKEN
   OPENROUTER_API_KEY KBP_OPENAI_API_KEY KBP_OPENAI_BASE_URL KBP_LLM_MODEL
   MODEL_API_URL MODEL_API_KEY
   LITELLM_EMBEDDING_BASE_URL LITELLM_EMBEDDING_API_KEY

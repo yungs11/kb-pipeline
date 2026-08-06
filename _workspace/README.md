@@ -30,12 +30,11 @@
 | 구성요소 | 포트 | 한 줄 정의 |
 |----------|------|-----------|
 | facade (kb-pipeline) | 19000 | 오케스트레이터. parse→chunk→insert→search 노출, 청킹·모달원자성 소유 (`service/app.py`) |
-| parse-svc | 19001 | **모든 문서 파싱 in-process**(PDF·excel_parser_rag·docx=kordoc·VL OCR) + modal LLM 서술 → enriched_content + 모달 마커 (`parse_service/app.py`). 이미지=java+node/kordoc+PyMuPDF 통합 (Phase 2) |
+| parse-svc | 19001 | **모든 문서 파싱 in-process**(PDF·excel_parser_rag·VL OCR). hwp/doc/docx/ppt/pptx 는 원격 변환 API 로 PDF 화 후 PDF 레인 + modal LLM 서술 → enriched_content + 모달 마커 (`parse_service/app.py`). 이미지=java+node/kordoc+PyMuPDF 통합 (Phase 2) |
 | adaptive_chunk | 18060 | 청킹 허브. atomic_markers 받아 모달 원자 보존, 텍스트 갭만 4방법 경쟁 |
 | edgequake | 8081 | 베이스 엔진. passthrough 적재 + 추출/임베딩/AGE 그래프/검색 |
 | postgres (eq-pg-kbp) | 5433 | 단일 저장소. pgvector + Apache AGE |
 | 임베딩(bge-m3) | — | OpenAI-호환, 1024d. 현행 배선=원격 litellm(`https://litellm.ax-demo.com/v1`) |
-| gotenberg | 3000 | office(pptx/docx)→PDF 변환(VL OCR 전처리). parse-svc 만 소비 |
 | ~~ocr(:18050)~~ ~~excel-parser(:18055)~~ ~~redis~~ | — | **Phase 2e 제거** — parse-svc in-process 로 흡수 |
 | doc_guard | 8000 (컨테이너 내부) | 문서 게이트. **facade `/gate/*` 뒤에 숨는다** — 외부 노출 없음 |
 | minio | 9000 | 객체 저장. 제어평면은 facade `/objects/*` 뒤, 브라우저 읽기만 `/obj/*` 프록시 |
