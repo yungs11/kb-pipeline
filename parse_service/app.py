@@ -20,10 +20,11 @@ import re
 import time
 from typing import Any, Callable
 
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, Response
 
 from parse_service.tools import safe_basename as _safe_basename, ToolError
 from parse_service.tools import fileconvert
+from parse_service.tools import drm
 from parse_service import router
 from parse_service.router import route as _route_impl
 from parse_service.parsers.ocr import IMAGE_EXTS
@@ -236,7 +237,18 @@ def run_parse(file_bytes: bytes, filename: str, *,
     wrap_modals = os.environ.get("KBP_MODAL_WRAP", "1") != "0"
     modal_sink: dict = {}
     convert_ms = 0.0
+    drm_ms = 0.0
     try:
+        # ── DRM 해제(docs/REFERENCE_DRM해제_API.md) — 변환보다 먼저다. DRM 래핑된
+        # office 파일은 해제 후에도 여전히 hwp/docx 등이라 아래 fileconvert 단계를
+        # 거쳐야 한다. 매직바이트로 걸러 DRM 아닌 파일은 원격 호출 자체를 안 한다.
+        if parse_pages is None and drm.is_drm(file_bytes):
+            _td = time.perf_counter()
+            try:
+                file_bytes = drm.unpack(file_bytes, filename)
+            except ToolError as e:
+                raise ParserError(str(e)) from e
+            drm_ms = (time.perf_counter() - _td) * 1000.0
         # ── 변환: 지원 밖 포맷 → PDF (docs/API_FILECONVERT_AGENT.md) ─────────────
         # **여기여야 한다.** route() 안에서 filename 을 바꾸면 값 복사라
         # _render_and_upload 가 원본 이름을 보고 단일 이미지 분기로 떨어진다
@@ -285,6 +297,7 @@ def run_parse(file_bytes: bytes, filename: str, *,
                 # v2(리뷰 B1): pages 경로와 동일 형태(modal_llm 포함) — 모니터링 집계자 호환.
                 "timing_metrics": {"parse_ms": round((time.perf_counter() - _t) * 1000.0, 1),
                                    "convert_ms": round(convert_ms, 1),
+                                   "drm_ms": round(drm_ms, 1),
                                    "modal_enrich_ms": 0.0, "render_upload_ms": 0.0,
                                    "counters": {"page_count": 0, "n_blocks": len(rr.chunks)},
                                    "modal_llm": {"wall_ms": None, "calls": None,
@@ -353,6 +366,7 @@ def run_parse(file_bytes: bytes, filename: str, *,
             # 원격 변환(hwp/docx/pptx→PDF)은 parse_ms 밖이라 따로 낸다 — 최대 300초라
             # 빠뜨리면 모니터링이 "빨라졌다"고 읽는데 실제 벽시계는 는다.
             "convert_ms": round(convert_ms, 1),
+            "drm_ms": round(drm_ms, 1),
             "modal_enrich_ms": round(modal_ms, 1),
             "render_upload_ms": round(render_ms, 1),
             "counters": {
@@ -405,6 +419,24 @@ def healthz():
     # OCR 실제 origin 은 VL(`MODEL_API_URL`) — in-process(Phase 2c, :18050 HTTP 제거).
     # 구 `KBP_OCR_URL`(:18050) 은 dead vestige 라 표시하지 않는다(착시 방지, 01-architecture §3).
     return {"status": "ok", "deps": {"vl_ocr": os.environ.get("MODEL_API_URL")}}
+
+
+@app.post("/drm/unwrap")
+async def drm_unwrap(file: UploadFile = File(...), filename: str | None = Form(None)):
+    """DRM(Fasoo) 래핑 파일이면 해제된 바이트를, 아니면 원본 그대로 반환한다.
+
+    호출자(kb-backend 등)가 `/parse` 전에 자체적으로 파일을 열어야 하는 경우
+    (예: 청킹모드 셀렉터용 신호 추출)를 위한 것 — 그 단계는 DRM 을 모르고 raw 바이트를
+    직접 여니, 실패 시 이 엔드포인트로 해제를 받아 재시도한다(docs/REFERENCE_DRM해제_API.md).
+    매직바이트(`drm.is_drm`)로 먼저 걸러 DRM 아닌 파일은 원격 왕복 없이 그대로 echo한다.
+    """
+    data = await file.read()
+    if drm.is_drm(data):
+        try:
+            data = drm.unpack(data, filename or file.filename or "upload")
+        except ToolError as e:
+            return Response(content=str(e), status_code=502)
+    return Response(content=data, media_type="application/octet-stream")
 
 
 @app.post("/parse")

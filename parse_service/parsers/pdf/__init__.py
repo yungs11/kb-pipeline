@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 
 from parse_service.parsers import RouteResult, ParserError
@@ -41,11 +42,17 @@ def _render_pages(file_bytes: bytes):
 
 def _ocr_elements_for_page(jpeg: bytes, name: str, ocr_url: str | None = None,
                            *, diagram: bool = False) -> list[dict]:
-    # Phase 2c: in-process VL OCR (HTTP 제거). diagram=True 면 순서도 서술 전용 프롬프트.
+    # Phase 2c: in-process VL OCR (HTTP 제거). diagram=True 면 다이어그램 보충 전용
+    # 프롬프트(DIAGRAM_*, 이미 있는 블록에 추가/교체하는 좁은 경로 — 건드리지 않음).
+    # 2026-08-06: 그 외(페이지를 처음부터 전사하는 일반 경로 — _vl_lane/_odl_lane
+    # 스캔페이지)는 PAGE_HYBRID 로 통일(표/본문 원문전사 + 순서도 흐름서술 + 차트
+    # 3줄요약을 한 프롬프트에서 처리). line 260(_supplement_diagram_pages, diagram=True)
+    # 은 이미 ODL 네이티브 블록에 additive 로 얹는 경로라 PAGE_HYBRID(전체 재분해)로
+    # 바꾸면 표/본문이 중복된다 — DIAGRAM_* 유지(ultracode 검증에서 잡힌 결함, 되돌림).
     from parse_service.parsers.ocr import ocr_elements_sync
     from parse_service.parsers.ocr import prompts
-    override = ((prompts.DIAGRAM_SYSTEM_PROMPT, prompts.DIAGRAM_USER_PROMPT)
-                if diagram else None)
+    override = ((prompts.DIAGRAM_SYSTEM_PROMPT, prompts.DIAGRAM_USER_PROMPT) if diagram
+                else prompts.page_hybrid_prompts())  # call-time — env(KBP_PAGE_HYBRID_DIAGRAM_RULE) 반영
     return ocr_elements_sync(jpeg, name, override)
 
 
@@ -78,35 +85,99 @@ def parse(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteResult:
 
 
 def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteResult:
-    """문서수준 게이트 → ODL / vl(차트多) / paddle_gw(스캔) — 실패·빈결과 시 ODL/VL 폴백."""
+    """문서수준 게이트 → ODL / vl(차트多) / paddle_gw(스캔) — 실패·빈결과 시 ODL/VL 폴백.
+
+    2026-08-06: 단일 종료점으로 재구성(이미지 파서 고도화 준비 — 페이지별 판정 로그).
+    기존 분기 로직·log.exception/log.warning 호출 위치·문구·조건은 그대로다 — 오직
+    `return`을 지연시키고 결과를 변수에 담아 반환 직전 `_log_triage_table`을 호출한다.
+    """
     decision = _safe_decide_route(file_bytes)
+    result = None
+    lane_used = "odl"
+    fallback_used = False
+
     if decision is not None and decision.lane == "vl":
+        lane_used = "vl"
         # 차트/그림 페이지 비율 높음(스캔 여부 무관): 전 페이지 렌더→in-process VL(qwen).
+        pages = None                       # 예외면 None 유지(정의됨 보장)
         try:
             pages = _vl_lane(file_bytes, filename, ocr_url=ocr_url)
         except Exception:  # noqa: BLE001 — VL 레인 실패는 비치명
             log.exception("vl 레인 실패 — ODL 폴백 (%s)", filename)
+        if pages and any(p.get("blocks") for p in pages):
+            result = RouteResult(kind="pages", chunk_needed=True, pages=pages)
         else:
-            if pages and any(p.get("blocks") for p in pages):
-                return RouteResult(kind="pages", chunk_needed=True, pages=pages)
-            log.warning("vl 레인 빈 결과 — ODL 폴백 (%s)", filename)
+            if pages is not None:          # 예외가 아니라 "빈 결과"일 때만(기존과 동일 구분)
+                log.warning("vl 레인 빈 결과 — ODL 폴백 (%s)", filename)
+            fallback_used = True
+
     elif decision is not None and decision.lane == "paddle_gw":
+        lane_used = "paddle_gw"
         # 스캔 문서: PaddleOCR-VL 게이트웨이(GPU 전체 파이프라인). 실패/빈결과 → ODL 레인
         # (스캔 페이지는 그 안의 in-process VL 보충으로 처리).
+        pages = None
         try:
             from parse_service.parsers.pdf.paddle_gw import run_paddle_gateway
             pages = run_paddle_gateway(file_bytes, filename)
         except Exception:  # noqa: BLE001 — 게이트웨이 실패는 비치명
             log.exception("paddle_gw 레인 실패 — ODL/VL 폴백 (%s)", filename)
+        if pages and any(p.get("blocks") for p in pages):
+            # 다이어그램 페이지는 VL 서술로 **교체** — 게이트웨이 OCR 조각/죽은 이미지참조 제거.
+            _supplement_diagram_pages(pages, file_bytes,
+                                      decision.diagram_pages, ocr_url, replace=True)
+            result = RouteResult(kind="pages", chunk_needed=True, pages=pages)
         else:
-            if pages and any(p.get("blocks") for p in pages):
-                # 다이어그램 페이지는 VL 서술로 **교체** — 게이트웨이 OCR 조각/죽은 이미지참조 제거.
-                _supplement_diagram_pages(pages, file_bytes,
-                                          decision.diagram_pages, ocr_url, replace=True)
-                return RouteResult(kind="pages", chunk_needed=True, pages=pages)
-            log.warning("paddle_gw 빈 결과 — ODL/VL 폴백 (%s)", filename)
-    diagram_pages = tuple(getattr(decision, "diagram_pages", ()) or ()) if decision else ()
-    return _odl_lane(file_bytes, filename, ocr_url=ocr_url, diagram_pages=diagram_pages)
+            if pages is not None:
+                log.warning("paddle_gw 빈 결과 — ODL/VL 폴백 (%s)", filename)
+            fallback_used = True
+
+    if result is None:
+        lane_used = "odl"
+        diagram_pages = (tuple(getattr(decision, "diagram_pages", ()) or ())
+                         if decision else ())
+        result = _odl_lane(file_bytes, filename, ocr_url=ocr_url,
+                           diagram_pages=diagram_pages)
+
+    try:
+        _log_triage_table(decision, result, lane_used=lane_used,
+                          fallback_used=fallback_used, filename=filename)
+    except Exception:  # noqa: BLE001 — 로그 버그가 파싱을 깨면 안 됨
+        log.exception("triage 로그 실패 (%s)", filename)
+    return result
+
+
+def _log_triage_table(decision, result: RouteResult, *, lane_used: str,
+                      fallback_used: bool, filename: str) -> None:
+    """페이지별 triage 판정 로그(이미지 파서 고도화 준비, 2026-08-06) — 튜닝 근거 축적용.
+
+    `KBP_TRIAGE_LOG_TABLE=0` 이면 완전히 스킵(대량 처리 시 로그 폭주 억제 손잡이).
+    `decision`이 None(게이트 import 실패/decide_route 예외)이거나 `page_signals`가
+    없으면(triage_document 자체 실패) 그 사유만 짧게 남기고 종료한다 — 왜 로그가 없는지
+    구분되어야 게이트 실패 문서만 튜닝 근거가 안 쌓이는 사각지대를 피할 수 있다.
+    """
+    if os.environ.get("KBP_TRIAGE_LOG_TABLE", "1") == "0":
+        return
+    if decision is None or not decision.page_signals:
+        log.info("triage %s: decision=None(게이트 실패/신호없음) — 페이지 로그 생략",
+                 filename)
+        return
+
+    log.info("triage %s: decision=%s used=%s fallback=%s",
+             filename, decision.lane, lane_used, fallback_used)
+    log.info("| p | triage | dia | char | img | imgcov | curve | line | 판정근거 | "
+             "성공여부 | 실패시 재시도(fallback) 여부 | 선택 fallback |")
+    log.info("|---|---|---|---|---|---|---|---|---|---|---|---|")
+    page_map = {p.get("page_number"): p for p in (result.pages or [])}
+    for sig in decision.page_signals:
+        entry = page_map.get(sig.page_number)
+        has_blocks = bool(entry and entry.get("blocks"))
+        log.info("| %d | %s | %s | %d | %d | %.2f | %d | %d | %s | %s | %s | %s |",
+                 sig.page_number, sig.bucket.name if sig.bucket else "-", sig.is_diagram,
+                 sig.char_count, sig.image_count, sig.image_coverage,
+                 sig.curve_count, sig.line_count, sig.reason,
+                 "성공" if has_blocks else "실패",
+                 "Y" if fallback_used else "N",
+                 lane_used if fallback_used else "-")
 
 
 def _vl_lane(file_bytes: bytes, filename: str, *, ocr_url: str) -> list[dict]:

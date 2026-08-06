@@ -6,6 +6,7 @@ VL API 호출 시 사용되는 모든 프롬프트를 모듈 단위로 관리합
 - 재시도 시 선택적 강화
 """
 
+import os
 from typing import List, Dict, Optional, Set
 
 
@@ -617,15 +618,31 @@ def get_default_prompts() -> Dict[str, str]:
     }
 
 
-_PAGE_HYBRID_EXTRA = """
+# 순서도/다이어그램 조항 — 라벨 유지 vs 흐름서술 사이에서 모델이 라벨을 "첫 번째 단계"
+# 식으로 일반화해버리는 문제가 실측(2026-08-06, 가로형 합성 PDF: "접수→검토→승인" 박스가
+# "첫 번째 단계→두 번째 단계→세 번째 단계"로 뭉개짐)됐다. 그래서 "라벨은 원문 그대로 보존"을
+# 첫 문장에 명시하고, 화살표 연결은 그 다음이라는 순서로 강제한다.
+_DEFAULT_PAGE_HYBRID_DIAGRAM_RULE = """1. **순서도·다이어그램·아키텍처도**: 박스·도형 안에 적힌 라벨(단계명·항목명)은
+   **이미지에 보이는 글자 그대로** 옮긴다 — "첫 번째 단계"/"단계1"처럼 일반화하거나 순서
+   번호로 바꾸지 않는다. 그 라벨들을 화살표(→)로 연결해 **논리 흐름을 서술**한다. 조건
+   분기(예/아니오, True/False)는 어느 라벨에서 어느 라벨로 가는지 명시한다. 스윔레인
+   (수행 주체)이 있으면 각 단계의 주체를 함께 적는다."""
+
+
+def _page_hybrid_diagram_rule() -> str:
+    """순서도 조항 — env 로 소스 수정 없이 조정 가능(2026-08-06). 호출 시점에 읽는다
+    (다른 KBP_TRIAGE_*/KBP_GATE_* 와 동일 관례 — monkeypatch.setenv 테스트 가능)."""
+    return os.environ.get("KBP_PAGE_HYBRID_DIAGRAM_RULE") or _DEFAULT_PAGE_HYBRID_DIAGRAM_RULE
+
+
+def _page_hybrid_extra() -> str:
+    return f"""
 
 ## 추가 규칙 — 그림 영역의 처리 (category="figure" 인 경우)
 
 figure 안에 든 것이 무엇이냐에 따라 markdown 을 다르게 채운다. 위의 표 규칙은 그대로다.
 
-1. **순서도·다이어그램·아키텍처도**: 박스 안 낱말을 나열하지 말고 **논리 흐름을 서술**한다.
-   시작부터 끝까지 화살표(→)로 연결하고, 조건 분기(예/아니오, True/False)는 어느 단계에서
-   어디로 가는지 명시한다. 스윔레인(수행 주체)이 있으면 각 단계의 주체를 함께 적는다.
+{_page_hybrid_diagram_rule()}
 
 2. **차트(막대·파이·꺾은선·간트)**: 모든 데이터 포인트를 옮기지 말고 **핵심을 3줄 이내로 요약**한다.
    라벨과 수치가 이미지 안에서 서로 붙어 있는 것만 짝지어 쓴다. 애매하면 그 항목을 버린다.
@@ -638,13 +655,20 @@ figure 안에 든 것이 무엇이냐에 따라 markdown 을 다르게 채운다
 어느 경우에도 이미지에 없는 내용을 지어내지 않는다."""
 
 
-def build_page_hybrid_prompts() -> tuple[str, str]:
-    """(system, user) — 기존 전사 프롬프트 + 그림/차트 조항."""
-    return build_system_prompt(), build_user_prompt() + _PAGE_HYBRID_EXTRA
+def page_hybrid_prompts() -> tuple[str, str]:
+    """(system, user) — 기존 전사 프롬프트 + 그림/차트 조항. **호출 시점에** env
+    (`KBP_PAGE_HYBRID_DIAGRAM_RULE`)를 읽는다 — 소비자(`pdf/__init__.py`,
+    `ocr/__init__.py`)는 이 함수를 매 호출마다 불러야 env 변경이 반영된다."""
+    return build_system_prompt(), build_user_prompt() + _page_hybrid_extra()
 
 
+# 하위 호환 별칭(구 이름 — 일부 소비자가 여전히 import 할 수 있음).
+build_page_hybrid_prompts = page_hybrid_prompts
+
+# 정적 상수(하위 호환) — **모듈 로드 시점** 값이라 이후 env 변경을 반영하지 않는다.
+# 실제 소비자는 반드시 `page_hybrid_prompts()`(call-time) 를 쓴다.
 PAGE_HYBRID_SYSTEM_PROMPT = build_system_prompt()
-PAGE_HYBRID_USER_PROMPT = build_user_prompt() + _PAGE_HYBRID_EXTRA
+PAGE_HYBRID_USER_PROMPT = build_user_prompt() + _page_hybrid_extra()
 
 
 def build_page_hybrid_prompts() -> tuple[str, str]:

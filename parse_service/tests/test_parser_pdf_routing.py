@@ -1,7 +1,10 @@
 """PDF parse() 문서수준 분기(ODL/VL/Paddle gateway)와 fallback."""
+import logging
+
 from parse_service.parsers import RouteResult
 from parse_service.parsers import pdf as pdf_parser
 from parse_service.parsers.pdf.gate import RouteDecision
+from parse_service.parsers.pdf.triage import PageSignals, Bucket
 
 
 def test_odl_lane_when_gate_says_odl(monkeypatch):
@@ -239,6 +242,127 @@ def test_parse_filters_degenerate_vl_blocks(monkeypatch):
     assert not any("기계음 손상완" in t for t in texts), "퇴화 블록 제거"
 
 
+def _psig(page_number, bucket, **kw):
+    s = PageSignals(page_number=page_number, width=600, height=800)
+    s.bucket = bucket
+    for k, v in kw.items():
+        setattr(s, k, v)
+    return s
+
+
+# ── 페이지별 판정 로그(2026-08-06, 이미지 파서 고도화 준비) ────────────────────
+
+def test_triage_log_table_appears_with_page_signals(monkeypatch, caplog):
+    """page_signals 가 채워진 decision 이면 헤더+행이 로그에 남는다."""
+    sigs = (_psig(1, Bucket.TEXT_ONLY), _psig(2, Bucket.TEXT_ONLY))
+    monkeypatch.setattr(pdf_parser, "_safe_decide_route",
+                        lambda b: RouteDecision(lane="odl", page_signals=sigs))
+    monkeypatch.setattr(pdf_parser, "_page_markdowns", lambda fb, fn: ["# p1", "# p2"])
+    with caplog.at_level(logging.INFO, logger=pdf_parser.log.name):
+        pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    msgs = [r.message for r in caplog.records]
+    assert any("판정근거" in m for m in msgs), "헤더 행 출현"
+    assert any(m.startswith("| 1 |") for m in msgs), "페이지 1 행 출현"
+    assert any(m.startswith("| 2 |") for m in msgs), "페이지 2 행 출현"
+
+
+def test_triage_log_table_toggle_off(monkeypatch, caplog):
+    """KBP_TRIAGE_LOG_TABLE=0 이면 완전히 스킵."""
+    monkeypatch.setenv("KBP_TRIAGE_LOG_TABLE", "0")
+    sigs = (_psig(1, Bucket.TEXT_ONLY),)
+    monkeypatch.setattr(pdf_parser, "_safe_decide_route",
+                        lambda b: RouteDecision(lane="odl", page_signals=sigs))
+    monkeypatch.setattr(pdf_parser, "_page_markdowns", lambda fb, fn: ["# p1"])
+    with caplog.at_level(logging.INFO, logger=pdf_parser.log.name):
+        pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    assert not any("판정근거" in r.message for r in caplog.records)
+
+
+def test_triage_log_handles_decision_none(monkeypatch, caplog):
+    """decision=None(게이트 import 실패/decide_route 예외) — AttributeError 없이 짧은
+    안내 로그만 남기고 정상 반환한다(§C 가드 앵커)."""
+    monkeypatch.setattr(pdf_parser, "_page_markdowns", lambda fb, fn: ["# 텍스트"])
+    import parse_service.parsers.pdf.gate as gate
+    monkeypatch.setattr(gate, "decide_route",
+                        lambda b: (_ for _ in ()).throw(RuntimeError("boom")))
+    with caplog.at_level(logging.INFO, logger=pdf_parser.log.name):
+        res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    assert res.kind == "pages"  # 예외 없이 정상 완료
+    assert any("decision=None" in r.message for r in caplog.records)
+
+
+def test_triage_log_fallback_used_and_lane_used_on_vl_empty_result(monkeypatch, caplog):
+    """vl 레인이 빈 결과 → ODL 폴백 — fallback=True, used=odl 로 기록된다."""
+    sigs = (_psig(1, Bucket.LLM_NEEDED),)
+    monkeypatch.setattr(pdf_parser, "_safe_decide_route",
+                        lambda b: RouteDecision(lane="vl", page_signals=sigs))
+
+    class RP1:
+        page_number, jpeg = 1, b"j1"
+
+    monkeypatch.setattr(pdf_parser, "_render_pages", lambda fb: [RP1()])
+
+    def empty_vl(jpeg, name, ocr_url):
+        return []
+
+    monkeypatch.setattr(pdf_parser, "_ocr_elements_for_page", empty_vl)
+    monkeypatch.setattr(pdf_parser, "_page_markdowns", lambda fb, fn: ["# 폴백 텍스트"])
+    with caplog.at_level(logging.INFO, logger=pdf_parser.log.name):
+        pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    summary = next(r.message for r in caplog.records if r.message.startswith("triage "))
+    assert "fallback=True" in summary and "used=odl" in summary
+
+
+def test_triage_log_fallback_used_and_lane_used_on_paddle_gw_exception(monkeypatch, caplog):
+    """paddle_gw 레인이 예외로 실패 → ODL 폴백 — fallback=True, used=odl 로 기록된다."""
+    sigs = (_psig(1, Bucket.OCR_NEEDED),)
+    monkeypatch.setattr(pdf_parser, "_safe_decide_route",
+                        lambda b: RouteDecision(lane="paddle_gw", page_signals=sigs))
+    import parse_service.parsers.pdf.paddle_gw as pg
+
+    def boom(fb, fn):
+        raise RuntimeError("gateway down")
+
+    monkeypatch.setattr(pg, "run_paddle_gateway", boom)
+    monkeypatch.setattr(pdf_parser, "_page_markdowns", lambda fb, fn: ["   "])
+
+    class RP1:
+        page_number, jpeg = 1, b"j1"
+
+    monkeypatch.setattr(pdf_parser, "_render_pages", lambda fb: [RP1()])
+    monkeypatch.setattr(pdf_parser, "_ocr_elements_for_page",
+                        lambda jpeg, name, ocr_url: [
+                            {"category": "text", "content": {"markdown": "폴백"}, "page": 0}])
+    with caplog.at_level(logging.INFO, logger=pdf_parser.log.name):
+        pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    summary = next(r.message for r in caplog.records if r.message.startswith("triage "))
+    assert "fallback=True" in summary and "used=odl" in summary
+
+
+def test_gate_lane_rewiring_reaches_paddle_gw_dispatch(monkeypatch):
+    """§B 보장 회귀 앵커 — KBP_GATE_VL_LANE=paddle_gw(화이트리스트 내 비-기본값)로 재배선하면
+    실제 gate.decide_route()(mock 아님)가 반환한 lane 이 __init__.py 의 기존 리터럴 비교와
+    그대로 맞물려 run_paddle_gateway 경로를 탄다 — 이번 기능(레인 재배선)의 핵심 주장."""
+    monkeypatch.setenv("KBP_GATE_VL_LANE", "paddle_gw")
+    import parse_service.parsers.pdf.gate as gate
+    monkeypatch.setattr(gate, "triage_document",
+                        lambda b: [_psig(1, Bucket.LLM_NEEDED), _psig(2, Bucket.LLM_NEEDED)])
+
+    called = {}
+
+    import parse_service.parsers.pdf.paddle_gw as pg
+
+    def fake_gateway(fb, fn):
+        called["hit"] = True
+        return [{"page_number": 1, "blocks": [{"type": "text", "text": "gw", "page_idx": 1}]},
+                {"page_number": 2, "blocks": [{"type": "text", "text": "gw", "page_idx": 2}]}]
+
+    monkeypatch.setattr(pg, "run_paddle_gateway", fake_gateway)
+    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    assert called.get("hit") is True
+    assert res.kind == "pages"
+
+
 def test_diagram_supplement_uses_diagram_prompt(monkeypatch):
     """다이어그램 보충은 순서도 전용 프롬프트(DIAGRAM_*)로 VL 호출 — 범용 전사 프롬프트 아님."""
     monkeypatch.setattr(
@@ -261,4 +385,53 @@ def test_diagram_supplement_uses_diagram_prompt(monkeypatch):
     res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
     from parse_service.parsers.ocr import prompts
     assert seen["override"] == (prompts.DIAGRAM_SYSTEM_PROMPT, prompts.DIAGRAM_USER_PROMPT)
+    assert res.kind == "pages"
+
+
+def test_vl_lane_uses_page_hybrid_prompt(monkeypatch):
+    """vl 레인(문서수준, 페이지를 처음부터 전사)은 PAGE_HYBRID 를 쓴다(2026-08-06 통일 —
+    범용 밋밋한 전사 프롬프트 아님, 순서도/차트/표 조항 포함)."""
+    monkeypatch.setattr(pdf_parser, "_safe_decide_route",
+                        lambda b: RouteDecision(lane="vl"))
+
+    class RP1:
+        page_number, jpeg = 1, b"j1"
+
+    monkeypatch.setattr(pdf_parser, "_render_pages", lambda fb: [RP1()])
+    seen = {}
+
+    def fake_sync(fb, fn, override=None):
+        seen["override"] = override
+        return [{"category": "text", "content": {"markdown": "본문"}, "page": 0}]
+
+    import parse_service.parsers.ocr as ocr_mod
+    monkeypatch.setattr(ocr_mod, "ocr_elements_sync", fake_sync)
+    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    from parse_service.parsers.ocr import prompts
+    assert seen["override"] == (prompts.PAGE_HYBRID_SYSTEM_PROMPT, prompts.PAGE_HYBRID_USER_PROMPT)
+    assert res.kind == "pages"
+
+
+def test_odl_scanned_page_uses_page_hybrid_prompt(monkeypatch):
+    """ODL 레인의 스캔 페이지(네이티브 텍스트 없음, 처음부터 전사)도 PAGE_HYBRID 를 쓴다
+    (2026-08-06 통일). 다이어그램 보충(line 260, DIAGRAM_*)과는 다른 경로."""
+    monkeypatch.setattr(pdf_parser, "_safe_decide_route",
+                        lambda b: RouteDecision(lane="odl"))
+    monkeypatch.setattr(pdf_parser, "_page_markdowns", lambda fb, fn: ["   "])  # 스캔(빈 텍스트)
+
+    class RP1:
+        page_number, jpeg = 1, b"j1"
+
+    monkeypatch.setattr(pdf_parser, "_render_pages", lambda fb: [RP1()])
+    seen = {}
+
+    def fake_sync(fb, fn, override=None):
+        seen["override"] = override
+        return [{"category": "text", "content": {"markdown": "스캔 본문"}, "page": 0}]
+
+    import parse_service.parsers.ocr as ocr_mod
+    monkeypatch.setattr(ocr_mod, "ocr_elements_sync", fake_sync)
+    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    from parse_service.parsers.ocr import prompts
+    assert seen["override"] == (prompts.PAGE_HYBRID_SYSTEM_PROMPT, prompts.PAGE_HYBRID_USER_PROMPT)
     assert res.kind == "pages"

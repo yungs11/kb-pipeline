@@ -121,7 +121,7 @@ def parse(file_bytes: bytes, filename: str, *, ocr_url: str | None = None) -> Ro
     PAGE_HYBRID 는 기존 전사 프롬프트에 조항을 덧붙인 것이라 표 `<table>` 계약도 유지된다(R6).
     """
     from parse_service.parsers.ocr import prompts
-    override = (prompts.PAGE_HYBRID_SYSTEM_PROMPT, prompts.PAGE_HYBRID_USER_PROMPT)
+    override = prompts.page_hybrid_prompts()  # call-time — env(KBP_PAGE_HYBRID_DIAGRAM_RULE) 반영
     try:
         elements = _whole_file_elements(file_bytes, filename, ocr_url,
                                         prompt_override=override)

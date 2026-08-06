@@ -40,3 +40,14 @@ class ParseSvcClient:
         )
         r.raise_for_status()
         return r.json() or {}
+
+    def unwrap_drm(self, *, file_bytes: bytes, filename: str) -> bytes:
+        """POST to parse-svc ``/drm/unwrap`` — returns decrypted bytes (or original,
+        unchanged, if not DRM-wrapped — parse-svc's own fallback semantics)."""
+        r = self.http.post(
+            f"{self.base}/drm/unwrap",
+            files={"file": (filename, file_bytes, "application/octet-stream")},
+            data={"filename": filename},
+        )
+        r.raise_for_status()
+        return r.content

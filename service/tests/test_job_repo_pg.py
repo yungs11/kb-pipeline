@@ -368,6 +368,26 @@ def test_succeeded_job_keeps_idem_key(repo, worker):
     assert repo.submit(kind="parse", idem_key="k1") == first
 
 
+def test_succeeded_domain_failure_releases_idem_key(repo, worker):
+    """job 은 succeeded 지만 본문이 도메인 실패(parse-svc {"status":"failed"})면
+    clear_idem=True 로 idem_key 를 비운다(2026-08-06).
+
+    실관측: html 문서 하나가 이 상태로 굳어(job succeeded, enriched_content 없음)
+    명시적 idem_key(시간창 없음)가 영구 캐싱돼, 근본 원인(변환/파싱 실패)을 고친
+    뒤에도 재시도가 계속 같은 빈 결과를 받았다.
+    """
+    first = repo.submit(kind="parse", idem_key="k1")
+    claimed = repo.claim(worker_id=worker, local_free=1)[0]
+    repo.complete(claimed.id, worker_id=worker, attempt=claimed.attempt,
+                  status="succeeded", result={"status": "failed", "detail": "parse_failed"},
+                  clear_idem=True)
+    row = repo.get(first)
+    assert row["status"] == "succeeded"  # 계약 불변 — 도메인 실패는 잡 실패가 아니다
+    assert row["idem_key"] is None
+    second = repo.submit(kind="parse", idem_key="k1")
+    assert second != first
+
+
 def test_cancelled_job_releases_idem_key(repo):
     first = repo.submit(kind="parse", idem_key="k1")
     repo.cancel(first)

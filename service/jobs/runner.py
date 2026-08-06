@@ -34,6 +34,18 @@ def strip_modal(s: str) -> str:
     return _MODAL_OPEN_RE.sub("", s.replace("〈/MODAL〉", ""))
 
 
+def is_domain_failure(result: Any) -> bool:
+    """job 은 succeeded 로 끝나지만 본문이 도메인 실패(parse-svc {"status":"failed"})인가.
+
+    parse/ingest kind 의 "파싱 실패는 잡 실패가 아니다"(§리뷰 B10) 계약 자체는 유지한다
+    (HTTP 200 + parse-svc 원본 그대로 반환) — 다만 그 결과를 **명시적 idem_key 로 영구
+    캐싱**하면(2026-08-06 실관측: html 문서 하나가 이 상태로 굳어 이후 모든 재파싱 시도가
+    같은 빈 enriched_content 를 영원히 돌려받음) 근본 원인을 고쳐도 재현이 안 된다.
+    complete() 호출부가 이 값으로 `clear_idem` 을 결정한다.
+    """
+    return isinstance(result, dict) and result.get("status") == "failed"
+
+
 class JobFailed(Exception):
     """재시도해도 소용없는 실패 — 즉시 ``failed``(§5.1)."""
 

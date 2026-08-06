@@ -225,6 +225,25 @@ def healthz():
 app.include_router(_jobs_router, dependencies=[Depends(require_facade_key)])
 
 
+@app.post("/drm/unwrap")
+def drm_unwrap(file: UploadFile = File(...), filename: str | None = Form(None)):
+    """DRM(Fasoo) 해제 — parse-svc `/drm/unwrap` 순수 프록시(잡 큐 미경유).
+
+    job 경유가 아닌 이유: 이건 java/OCR/LLM 같은 무거운 fleet 을 쓰지 않는 가벼운
+    호출(~수백ms)이라 worker 슬롯·DB 잡 행을 쓸 이유가 없다 — `/parse`(무거운 파싱)와
+    달리 유량제어 대상이 아니다. 호출자(kb-backend)가 provider 분기 이전 신호추출
+    단계에서 raw 파일을 못 열 때(DRM 암호화) 재시도용으로 쓴다.
+    """
+    data = file.file.read()
+    name = _safe_basename(filename or file.filename or "upload")
+    client = _resolve(get_parse_client)
+    try:
+        content = client.unwrap_drm(file_bytes=data, filename=name)
+    except Exception as e:  # noqa: BLE001 - parse-svc 오류를 502 로 표면화
+        raise HTTPException(status_code=502, detail=str(e)) from e
+    return Response(content=content, media_type="application/octet-stream")
+
+
 @app.post("/parse")
 def parse(file: UploadFile = File(...), content_type: str | None = Form(None),
                 docs_id: str | None = Form(None),

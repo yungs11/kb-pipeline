@@ -25,6 +25,7 @@ class FakeRepo:
         self.heartbeats: list[list] = []
         self.marks: list[int] = []
         self.completed: list[tuple] = []
+        self.clear_idem_calls: list[tuple] = []
         self.requeued: list[tuple] = []
         self.jobs: dict = {}
         self._hb_raises_left = heartbeat_raises
@@ -54,9 +55,10 @@ class FakeRepo:
                                       "parent_job_id": None})
 
     def complete(self, job_id, *, worker_id, attempt, status, result=None,
-                 result_ref=None, error=None):
+                 result_ref=None, error=None, clear_idem=False):
         with self.lock:
             self.completed.append((job_id, status, result, error))
+            self.clear_idem_calls.append((job_id, clear_idem))
 
     def requeue(self, job_id, *, worker_id, attempt, error):
         with self.lock:
@@ -124,6 +126,31 @@ def test_successful_job_is_completed_with_result():
     job_id, status, result, error = repo.completed[0]
     assert job_id == jobs[0].id and status == "succeeded"
     assert result == {"enriched_content": "x"}
+
+
+def test_domain_failure_result_clears_idem_key():
+    """job 은 succeeded 로 끝나지만(파싱 실패는 잡 실패가 아니다) 본문이 parse-svc
+    {"status":"failed"} 면 idem_key 를 비운다 — 안 그러면 명시적 idem_key(시간창 없음)가
+    영구 캐싱돼 근본 원인을 고쳐도 재현이 안 된다(2026-08-06 실관측: html 문서 1건이
+    이 상태로 굳어 이후 모든 재시도가 같은 빈 enriched_content 를 영원히 돌려받음)."""
+    jobs = _claim(1)
+    repo = FakeRepo(to_claim=jobs)
+    w = _worker(repo, FakeRunner(result={"status": "failed", "detail": "parse_failed"}))
+    w._tick()
+    _wait(lambda: repo.completed)
+    job_id, status, result, error = repo.completed[0]
+    assert status == "succeeded"  # 계약 불변 — 도메인 실패는 잡 실패가 아니다
+    assert repo.clear_idem_calls[0] == (job_id, True)
+
+
+def test_normal_success_result_keeps_idem_key():
+    jobs = _claim(1)
+    repo = FakeRepo(to_claim=jobs)
+    w = _worker(repo, FakeRunner(result={"enriched_content": "x"}))
+    w._tick()
+    _wait(lambda: repo.completed)
+    job_id = repo.completed[0][0]
+    assert repo.clear_idem_calls[0] == (job_id, False)
 
 
 def test_retryable_failure_requeues():

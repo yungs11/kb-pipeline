@@ -22,7 +22,8 @@ from fastapi import (APIRouter, Body, Depends, File, Form, Header, HTTPException
 
 from service.jobs import blobs as blobs_mod
 from service.jobs.repo import JobRepo
-from service.jobs.runner import JobAborted, JobFailed, JobRetryable, JobRunner
+from service.jobs.runner import (JobAborted, JobFailed, JobRetryable, JobRunner,
+                                 is_domain_failure)
 
 log = logging.getLogger("kb_pipeline.service.jobs.api")
 
@@ -246,8 +247,10 @@ def _run_inline(repo, blobs, job_id, runner) -> None:
                       status="failed", error=str(exc))
         return
     inline_result, ref = blobs.store_json(job_id, "result", result)
+    # worker.py 의 _finish 와 동일 — 도메인 실패 본문이면 idem_key 를 비운다(2026-08-06).
     repo.complete(job_id, worker_id=worker_id, attempt=attempt,
-                  status="succeeded", result=inline_result, result_ref=ref)
+                  status="succeeded", result=inline_result, result_ref=ref,
+                  clear_idem=is_domain_failure(result))
 
 
 def result_body(blobs, row) -> Any:

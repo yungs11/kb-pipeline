@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Optional
@@ -62,21 +63,48 @@ class PageSignals:
     bucket: Optional[Bucket] = field(default=None, init=False)
     reason: str = field(default="", init=False)
     is_diagram: bool = field(default=False, init=False)
+    # 가로형 페이지(width>height) — 2026-08-06, pptx 유래 등 방향 자체가 VL 필요 신호.
+    is_landscape: bool = field(default=False, init=False)
 
 
 def classify(
     sig: PageSignals,
     *,
-    mixed_image_cov: float = 0.25,
-    content_min: int = 300,
-    diagram_curve_min: int = 30,
-    diagram_line_min: int = 100,
-    diagram_img_count: int = 5,
-    diagram_combo_curve_min: int = 10,
+    mixed_image_cov: float | None = None,
+    content_min: int | None = None,
+    diagram_curve_min: int | None = None,
+    diagram_line_min: int | None = None,
+    diagram_img_count: int | None = None,
+    diagram_combo_curve_min: int | None = None,
 ) -> PageSignals:
-    """native text 유무가 1차 갈림길. mixed/diagram 은 native text 있는 쪽에서만 판정."""
+    """native text 유무가 1차 갈림길. mixed/diagram 은 native text 있는 쪽에서만 판정.
+
+    임계치 6개는 env 로 소스 수정 없이 조정 가능하다(2026-08-06, 이미지 파서 고도화 준비).
+    인자를 명시하면 그 값이 우선하고, `None`(기본)이면 **호출 시점에** env 를 읽는다 —
+    모듈 로드 시 읽으면 `monkeypatch.setenv` 가 안 먹는다(`tools/fileconvert.py` 관례).
+    호출부(`gate.py`의 `triage_document(pdf_bytes)`)는 인자를 안 넘기므로 env 미설정 시
+    아래 하드코딩 기본값과 100% 동일하게 동작한다(회귀 0).
+    """
+    if mixed_image_cov is None:
+        mixed_image_cov = float(os.environ.get("KBP_TRIAGE_MIXED_IMAGE_COV") or 0.25)
+    if content_min is None:
+        content_min = int(os.environ.get("KBP_TRIAGE_CONTENT_MIN") or 300)
+    if diagram_curve_min is None:
+        diagram_curve_min = int(os.environ.get("KBP_TRIAGE_DIAGRAM_CURVE_MIN") or 30)
+    if diagram_line_min is None:
+        diagram_line_min = int(os.environ.get("KBP_TRIAGE_DIAGRAM_LINE_MIN") or 100)
+    if diagram_img_count is None:
+        diagram_img_count = int(os.environ.get("KBP_TRIAGE_DIAGRAM_IMG_COUNT") or 5)
+    if diagram_combo_curve_min is None:
+        diagram_combo_curve_min = int(os.environ.get("KBP_TRIAGE_DIAGRAM_COMBO_CURVE_MIN") or 10)
+
     chars = sig.char_count
     imgcov = sig.image_coverage
+    # 가로형 페이지(width>height) → 묻고 따질 것 없이 LLM_NEEDED(VL). 2026-08-06, 사용자
+    # 지시 — pptx 유래 등 방향 자체가 VL 필요 신호. 단, 진짜 다이어그램/혼합 판정보다
+    # **우선순위를 낮춘다**(다이어그램 신호가 있으면 diagram_pages 집계용 is_diagram=True
+    # 를 계속 보존해야 하므로 — ultracode 검증에서 잡힌 결함, 즉시 return 하지 않는다).
+    landscape_to_llm = os.environ.get("KBP_TRIAGE_LANDSCAPE_TO_LLM", "1") != "0"
 
     if sig.has_native_text:
         # 다이어그램(순서도/차트) = ① 곡선 커넥터형(curve 多) or ② 직선화살표+도형이미지 복합형.
@@ -96,12 +124,22 @@ def classify(
         elif sig.image_count > 0 and imgcov >= mixed_image_cov:
             sig.bucket = Bucket.LLM_NEEDED
             sig.reason = f"혼합 콘텐츠(텍스트+이미지={imgcov:.2f})"
+        elif landscape_to_llm and sig.is_landscape:
+            sig.bucket = Bucket.LLM_NEEDED
+            sig.reason = f"가로형 문서 페이지 (width={sig.width:.0f} > height={sig.height:.0f})"
         else:
             sig.bucket = Bucket.TEXT_ONLY
             sig.reason = f"디지털 텍스트 (글자={chars}, 단어={sig.word_count})"
         return sig
 
-    # 텍스트 레이어 없음: 내용 있으면 OCR(스캔·아웃라인·벡터표), 없으면 빈 페이지.
+    # 텍스트 레이어 없음(스캔): landscape 는 OCR_NEEDED/SKIP 보다 우선(사용자 의도 — 스캔
+    # 여부와 무관하게 가로형이면 무조건 VL).
+    if landscape_to_llm and sig.is_landscape:
+        sig.bucket = Bucket.LLM_NEEDED
+        sig.reason = f"가로형 문서 페이지(스캔) (width={sig.width:.0f} > height={sig.height:.0f})"
+        return sig
+
+    # 내용 있으면 OCR(스캔·아웃라인·벡터표), 없으면 빈 페이지.
     if sig.image_count > 0 or sig.content_len > content_min:
         sig.bucket = Bucket.OCR_NEEDED
         sig.reason = f"텍스트없는 콘텐츠 (이미지={sig.image_count}, content={sig.content_len}B) → OCR/VL"
@@ -117,11 +155,14 @@ def extract_signals(page: "pymupdf.Page") -> PageSignals:
     rect = page.rect
     page_area = (rect.width * rect.height) or 1.0
     sig = PageSignals(page_number=page.number + 1, width=rect.width, height=rect.height)
+    sig.is_landscape = sig.width > sig.height
 
     words = page.get_text("words")  # (x0,y0,x1,y1,word,block,line,word_no)
     sig.word_count = len(words)
     sig.char_count = sum(len(w[4]) for w in words)
-    sig.has_native_text = sig.char_count > 20
+    # env 로 조정 가능(2026-08-06) — 호출 시점에 읽는다(classify() 와 동일 관례).
+    native_text_min_chars = int(os.environ.get("KBP_TRIAGE_NATIVE_TEXT_MIN_CHARS") or 20)
+    sig.has_native_text = sig.char_count > native_text_min_chars
 
     blocks = page.get_text("blocks")  # (x0,y0,x1,y1,text,block_no,block_type)
     text_area = sum((b[2] - b[0]) * (b[3] - b[1]) for b in blocks if b[6] == 0)

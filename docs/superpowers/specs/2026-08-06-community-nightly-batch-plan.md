@@ -1,0 +1,647 @@
+<!-- plan-version: v8 -->
+<!-- ultracode-validation: PENDING -->
+
+# [A] 커뮤니티 야간 배치
+
+> **v6 에서 범위를 쪼갰다.** v1~v5 는 "야간 배치 + global 검색 버튼" 두 기능을 한 문서에
+> 담아 admission·GC·LLM·스키마·챗 계약·프론트를 동시에 건드렸고, 5회 검증에서 blocking 이
+> 계속 남았다. **이 문서는 야간 배치만** 다룬다. global 검색 버튼은
+> `2026-08-06-global-search-button-plan.md`(B) 로 분리했다.
+>
+> **A 와 B 는 코드 의존이 없다.** 어느 쪽을 먼저 구현해도 된다.
+>
+> **개정 이력**
+> - v1 폐기: D22("검색이 웹 워커를 2시간 점유")가 거짓 — `global_search` 는 미배선이다.
+> - v2(blocking 12): payload 대신 `workspace_key` 로 대상 선정.
+> - v3(blocking 13): lookback 창 제거, 키 통일(§2.7) **철회**(적재 슬롯을 먹어 더 나빴다).
+> - v4(blocking 8): `kbp.community_builds` 도입, fail-open/fail-closed 분리, 마감 취소.
+> - v5 → v6: 범위 축소. 내용 변경 없음(§3.2~§3.6 을 B 로 이관).
+> - v6 → **v7**: blocking 11건. 실행 판정 로직을 **다시 짰다**(자정 랩이 실제로는 안 됐고
+>   마감 취소가 죽은 코드였다). `fail_streak`·idem 충돌 집계·`batch_runs` 이력을 실제로
+>   기록하는 경로를 넣었다. 스윕의 uuid/text 타입 불일치, 수동 재빌드가 스킵 가드에 막히는
+>   문제, 끝나지 않는 대형 빌드에 대한 방어를 추가했다.
+
+---
+
+## 0. 사용자 결정 (2026-08-06)
+
+**커뮤니티 빌드를 야간 배치로 일원화한다.** 적재 직후 트리거를 없앤다.
+목적은 웹 프로세스 보호가 아니라 **주간 LLM 부하 회피 + 진입점 단일화**.
+
+**대가**: 적재한 문서의 커뮤니티가 **최대 하루** 뒤 반영된다. 사용자가 인지하고 택했다.
+
+---
+
+## 1. 실측 사실 (2026-08-06. 라인번호 3회 재검증)
+
+| # | 사실 | 근거 |
+|---|---|---|
+| 1 | 러너는 DSN 을 인라인. `dsn` 지역변수 **없음** | `runner.py:276` |
+| 2 | 러너는 `community_builder`·`eq_factory` 를 주입받는다 | `runner.py:78-94` |
+| 3 | payload 는 256KB 초과 시 오프로드 → `payload` 컬럼 NULL | `blobs.py:29,183-187` |
+| 4 | insert payload 는 chunks 전량 | `app.py:345` |
+| 5 | `workspace_key` 는 insert·ingest 에서 **kb id** | `app.py:348,389` |
+| 6 | `/communities/build` 는 **payload 에 kb id 를 그대로 담고**(`payload={"workspace_id": workspace_id}`), **`workspace_key`·`idem_key` 만 eq UUID** 로 쓴다 | `app.py:527-531` |
+| 7 | `_EXEMPT_WORKSPACE = None`(**`admission.py:37`**) — community 도 workspace 상한에 계산 | `:66,111,116` |
+| 8 | 버킷 상한은 **`admission.py:145`** `_env_int("KBP_JOB_LIMIT_COMMUNITY", 1)` — env 로 상향 가능. (`:31` 은 kind→버킷 매핑) | 해당 파일 |
+| 9 | kind별 `max_attempts` override 는 `KBP_JOB_MAX_ATTEMPTS_INSERT` **하나뿐**. community 는 기본 3 | `repo.py:74-82` |
+| 10 | `KBP_JOB_MAX_ATTEMPTS_COMMUNITY` 는 리포지토리에 **0건** | grep |
+| 11 | idem 충돌 시 기존 job_id 만 반환 — `batch_key` 를 UPDATE 하지 않는다 | `repo.py:171,186-190` |
+| 12 | claim 시 community 만 `idem_key` 를 NULL 로 비운다 | `repo.py:491` |
+| 13 | **claim 경로에 시간 조건이 없다** — 09시에도 queued community 를 계속 집는다 | `repo.py:470-500` |
+| 14 | `build_workspace_communities` 는 진입 즉시 `fetch_graph` **1회** — **시작 시점 스냅샷**만 본다 | `community.py:507-527` |
+| 15 | 라이브: community `created 09:10:21 → completed 09:48:37`(38분), 그 사이 09:12:31 insert 성공 | 라이브 |
+| 16 | `public.community_reports` 는 `store_reports` 안의 `cur.execute(_DDL)` 에서만 **lazy 생성** | `community.py:484` |
+| 17 | `store_reports` 는 DELETE 없이 upsert. `community_id` = Louvain enumerate 인덱스 | `community.py:468-498` |
+| 18 | `_NODE_SQL` 은 표현식 인덱스가 없어 **Seq Scan**(실측 16ms, Rows Removed 2325) | EXPLAIN |
+| 19 | GC 는 **fail-closed** 를 명문화한다 | `gc.py:9-13` |
+| 20 | TTL 은 `gc.ttl_seconds()` — `KBP_JOB_TTL_SECONDS` 를 **먼저** 읽고 없으면 `_HOURS`(72) | `gc.py:45-60`; compose `:52` |
+| 21 | community `max_runtime` 7200s | `repo.py:102` |
+| 22 | 라이브 실측 빌드 1건 = **29~38분** | 검증 측정 |
+| 23 | 트리거 가드 `or extract_graph is False` | `tasks.py:401`. 호출부 `:360`, 정의 `:385` |
+| 24 | `test_community_job.py` 5건은 함수 **직접 호출** 단위테스트(첫 테스트 `:37`) | 해당 파일 |
+| 25 | 호출부(`tasks.py:360`)를 덮는 테스트 **0건** | grep |
+| 26 | facade·facade-worker 가 같은 매핑 앵커 공유 — compose `:10`/`:257`/`:286`, airgap `:27`/`:240`/`:267` | grep |
+| 27 | facade-worker `restart: unless-stopped` = compose `:293`; heartbeat 사망 시 자체 종료 | `worker.py:292-294` |
+| 28 | 컨테이너 TZ 미설정 → UTC. **dev 호스트는 이미 KST** | compose·Dockerfile |
+| 29 | facade `DELETE /doc` 은 잡 행을 만들지 않는다 | `app.py:398-402` |
+| 30 | worker 는 `JobRunner(repo=…, blobs=…)` 만 만든다 — eq 는 `eq_factory` 지연 조립 | `worker.py:54` |
+| 31 | dev 는 호스트 런처 | `scripts/run-facade-worker.sh`, `scripts/facade.env` |
+| 32 | 단건 `cancel`(API)은 `idem_key = NULL` 을 명시하지만, **bulk 취소 `_finish_cancelled_queued` 는 비우지 않는다** | `repo.py:698-708`, `:381-384` |
+| 33 | `submit_job` 은 `created`(job_id) **하나만** 반환한다 — 신규 생성인지 idem 충돌인지 호출자가 구분할 수 없다 | `api.py:162,170,174,180` |
+| 34 | `public.community_reports.workspace_id` 컬럼은 **`uuid` 타입**(text 아님) | `community.py:437` |
+| 35 | `_NODE_SQL`/`_EDGE_SQL` 의 비교식 좌변은 `properties::text::jsonb ->> 'workspace_id'` — **text** | `community.py:154-162` |
+| 36 | `worker.py` 의 폴 간격은 `KBP_JOB_POLL_INTERVAL_SECONDS`(기본 **2초**) | `worker.py:57` |
+| 37 | `kb_pipeline/tests/` 는 **pytest 수집 대상이 아니다**(`testpaths = ["tests", "service/tests"]`) | `pyproject.toml:30` |
+| 38 | `test_job_repo_pg.py` 는 `pytest.mark.requires_pg` + `KBP_PG_DSN` 미설정·활성 워커 감지 시 **모듈 전체 skip**. `_truncate()` 는 `kbp.jobs`·`kbp.job_workers` **만** 지운다 | `test_job_repo_pg.py:22-53,56-61` |
+| 39 | 라이브에 커뮤니티 231개(`e512080e…`)·111개(`f404411e…`) 보유 workspace 존재 — 그래프는 적재마다 단조 증가한다 | 라이브 |
+
+---
+
+## 2. 설계
+
+### 2.1 `kbp.community_builds` — 빌드 이력을 잡 테이블에서 분리한다
+
+v4 이전은 빌드 이력을 `kbp.jobs` 에서 유추했고 **네 가지가 동시에 깨졌다**: (a) 완료 시각
+기준이라 빌드 중 도착한 적재를 영구히 잃고(사실 14·15), (b) 그래프가 안 바뀐 vector-only
+적재도 매일 밤 재빌드하고, (c) in-flight 잡을 못 보고, (d) TTL GC 가 이력을 지운다.
+
+```sql
+CREATE TABLE IF NOT EXISTS kbp.community_builds (
+  workspace_key   text PRIMARY KEY,        -- kb id (insert 측과 같은 축)
+  eq_workspace_id text,
+  snapshot_at     timestamptz,             -- ★ 그래프를 읽은 시각(빌드 시작)
+  finished_at     timestamptz,
+  status          text,                    -- succeeded | failed | skipped
+  node_count      integer,
+  edge_count      integer,
+  fail_streak     integer NOT NULL DEFAULT 0
+);
+```
+러너가 빌드 전후로 갱신한다. `ensure_schema` 에 추가.
+
+### 2.2 대상 선정
+
+```sql
+WITH last_insert AS (
+  SELECT workspace_key, MAX(COALESCE(completed_at, created_at)) AS inserted_at
+  FROM kbp.jobs
+  WHERE kind IN ('insert','ingest') AND status = 'succeeded'
+    AND workspace_key IS NOT NULL
+  GROUP BY workspace_key
+)
+SELECT li.workspace_key
+FROM last_insert li
+LEFT JOIN kbp.community_builds cb ON cb.workspace_key = li.workspace_key
+WHERE (cb.snapshot_at IS NULL OR li.inserted_at > cb.snapshot_at)     -- ★ 스냅샷 시각
+  AND NOT EXISTS (                                                     -- ★ in-flight 제외
+        SELECT 1 FROM kbp.jobs j
+        WHERE j.kind = 'community' AND j.status IN ('queued','running')
+          AND j.payload->>'workspace_id' = li.workspace_key)
+ORDER BY COALESCE(cb.fail_streak, 0) ASC, li.inserted_at ASC          -- ★ 실패 반복은 후순위
+LIMIT %(cap)s
+```
+
+- **`snapshot_at` 비교**: 빌드는 시작 시점 그래프만 본다(사실 14). 완료 시각으로 비교하면
+  38분 빌드 중 도착한 적재가 "이미 포함됨"으로 오판돼 **영구 탈락**한다(사실 15).
+- **in-flight 제외**: 전날 것이 running 이면 claim 이 `idem_key` 를 비워(사실 12) **중복
+  잡**이 생기고 §3 의 `replace=True` 두 트랜잭션이 겹친다. queued 면 idem 충돌로 캡만 헛소진.
+- **`fail_streak` 후순위**: `max_attempts=1` 이면 2시간 넘는 workspace 가 매 밤 실패하며
+  오래된-순 큐 선두를 영구 점유한다(다른 형태의 굶김).
+- `payload` 대신 `workspace_key`(insert 측) — payload 는 오프로드되면 NULL 이다(사실 3·4).
+
+**백로그**: 후보 > 캡이면 `제출/잔여` 를 `batch_runs` 에 기록하고 잔여 > 0 이면 warning.
+**잔여 residual**: `last_insert` 는 여전히 `kbp.jobs` 에 의존하므로 캡에 밀린 채 TTL(72h)이
+지나면 조용히 탈락한다. 캡 8 · 오래된-순이면 3일치 = 24개 여유지만 **완전 방어는 아니다**
+→ 잔여 > 0 이 3일 연속이면 `log.error`, deferred 에 올린다.
+
+### 2.3 잡 키 — `/communities/build` 와 동일 (v3 §2.7 철회)
+
+`_EXEMPT_WORKSPACE = None`(사실 7)이라 community 도 workspace 상한 2 에 계산된다. 키를
+kb id 로 통일하면 30~120분 빌드가 그 KB 의 **적재 슬롯 1개를 점유**해 업로드 처리량이
+절반이 된다. 지금 네임스페이스가 갈린 것은 **의도된 격리**다.
+
+배치가 eq UUID 를 해석해 기존 키를 그대로 쓴다. **`submit_job` 의 반환 계약은 건드리지
+않는다** — v7 이전 초안은 이걸 `(job_id, created)` 튜플로 바꾸려 했으나, `submit_job` 은
+legacy 동기 엔드포인트 4개(`app.py` `_legacy_job()` → `/parse`·`/chunk`·`/insert`·
+`/ingest`)와 비동기 `/jobs/*` 라우터 4개(`jobs/api.py:293,325,352,381` — 응답 바디에
+`str(job_id)` 를 그대로 싣는다)가 **공유하는 진입점**이라, 반환형을 바꾸면 8곳이 동시에
+깨지거나(legacy 는 즉시 예외, `/jobs/*` 는 **조용히 잘못된 job_id 문자열을 응답에 실어
+보낸다** — 더 위험하다) 8곳을 전부 갱신해야 한다. 야간 배치 하나를 위해 공유 진입점의
+계약을 흔들 이유가 없다.
+
+**대신 새 함수를 하나 더 둔다** — `submit_job` 내부 로직을 그대로 재사용하되 신규/충돌
+여부만 함께 반환한다:
+
+```python
+# service/jobs/api.py — submit_job 은 무변경. 신규 함수만 추가.
+def submit_job_ex(repo, blobs, *, kind, payload, workspace_key=None, idem_key=None,
+                   batch_key=None, parent_job_id=None, legacy=False,
+                   file_bytes=None) -> tuple[uuid.UUID, bool]:
+    """submit_job 과 동일한 본문이지만 (job_id, created: bool) 을 반환한다.
+
+    `submit_job` 은 공유 진입점(legacy 4경로 + /jobs/* 4라우터)이라 반환형을 못 바꾼다.
+    이 함수는 그 8곳을 안 건드리고 새 소비자(야간 배치)에게만 필요한 정보를 준다.
+    """
+    job_id = uuid.uuid4()
+    ...   # submit_job 의 본문과 동일(중복을 피하려면 submit_job 이 내부 헬퍼로 위임하도록
+          # 리팩터할 수도 있으나, v7 은 안전하게 복제로 시작한다 — 리팩터는 별건)
+    created_id = repo.submit(job_id=job_id, kind=kind, ...)
+    if created_id != job_id:
+        blobs.delete(input_ref)          # 기존 submit_job 과 동일한 고아 정리
+        if payload_ref: blobs.delete(payload_ref)
+    return created_id, created_id == job_id
+```
+
+```python
+eq_ws = self.runner.eq_client.ensure_workspace(kb_id, name=kb_id)   # 사실 30(지연 조립)
+job_id, created = submit_job_ex(repo, blobs, kind="community",
+           payload={"workspace_id": kb_id},
+           workspace_key=eq_ws, idem_key=f"community:{eq_ws}",
+           batch_key=f"community-nightly:{run_date}")               # ★ run_date, §2.4
+if created: submitted += 1
+else:       deduped += 1
+```
+
+→ **`service/app.py` 무변경, `test_app.py:99-101` 무변경, admission 영향 없음, 기존
+`submit_job` 호출부 8곳(legacy 4 + `/jobs/*` 4) 전부 무변경.** `/communities/build` 는
+계속 `submit_job`(단일 반환값)을 쓴다 — 이 잡 kind 는 여러 함수에서 제출될 수 있으므로
+어느 함수를 쓰든 같은 `kbp.jobs` 행 규약을 따른다.
+
+### 2.4 실행 판정 — 마커 이력 테이블 + 실행 창 + 마감 취소 (재설계)
+
+v6 의 시각 판정은 **세 가지가 동시에 깨졌다**: (a) 매 틱 `now.date()` 로 창을 재계산해
+`BUILD_AT=23:30` 같은 자정 랩 설정에서 창의 후반이 통째로 죽고, (b) 마감 취소를 창 판정
+**뒤**에 둬 `DEADLINE(420분)` 이 정의상 `WINDOW(120분)` 밖이라 **영원히 도달 불가능한 죽은
+코드**였고, (c) `batch_runs` 가 `name` 단일 PK 라 매일 덮어써 "3일 연속 잔여" 를 셀 수 없었다.
+
+```sql
+CREATE TABLE IF NOT EXISTS kbp.batch_runs (
+  name        text NOT NULL,
+  run_date    date NOT NULL,
+  run_at      timestamptz NOT NULL DEFAULT now(),
+  submitted   integer NOT NULL DEFAULT 0,
+  deduped     integer NOT NULL DEFAULT 0,
+  backlog     integer NOT NULL DEFAULT 0,
+  PRIMARY KEY (name, run_date)                    -- ★ 이력 보존(v6 은 단일행이라 못 셌다)
+);
+```
+
+**"밤(run_date)" 을 매 틱 재계산하지 않고 한 번 고정한다** — 자정 랩의 근본 원인은 창의
+시작·끝을 그 순간의 날짜로 다시 계산하는 것이었다:
+
+```python
+def _current_run_date(now: datetime, build_at: time) -> date:
+    """지금이 어느 '밤'에 속하는지. BUILD_AT 이전이면 전날 밤이 아직 안 끝난 것으로 본다."""
+    return now.date() if now.time() >= build_at else now.date() - timedelta(days=1)
+
+run_date = _current_run_date(now, build_at)
+start = datetime.combine(run_date, build_at, tz)     # ★ run_date 고정 — 재계산 안 함
+end   = start + timedelta(minutes=window)             # end 가 자정을 넘어도 start 는 안 바뀐다
+deadline = start + timedelta(minutes=deadline_minutes)
+
+# ── 마감 취소: 창 판정과 무관하게, 매 틱 무조건 먼저 확인한다 ──
+if now >= deadline:
+    n = cancel_queued_by_batch_key(f"community-nightly:{run_date}")   # §2.4.1
+    if n: log.warning("nightly deadline passed; canceled %d queued community jobs", n)
+
+# ── 실행 창 ──
+if not (start <= now < end):
+    return
+if not claim_run("community-nightly", run_date):     # PK (name, run_date) 로 원자적 삽입
+    return
+```
+
+- **`claim_run`**: `INSERT INTO kbp.batch_runs (name, run_date) VALUES (%s, %s) ON CONFLICT (name, run_date) DO NOTHING RETURNING 1`.
+  대상 0건이어도 이 INSERT 는 일어난다 → **마커가 항상 남는다.**
+- **자정 랩**: `run_date` 를 한 번 고정하므로 `BUILD_AT=23:30, WINDOW=120` 이면 `start=23:30`,
+  `end=01:30(다음날)` 이 되고, 00:30 틱에도 `run_date` 는 그대로라 창 판정이 그대로 유지된다.
+- **마감 취소가 실제로 도달 가능**: 창 판정 앞에 무조건 두었으므로 `DEADLINE > WINDOW` 여도
+  실행된다. `KBP_COMMUNITY_DEADLINE_MINUTES` 기본 **420**(10:00).
+
+#### 2.4.1 `cancel_queued_by_batch_key` — idem_key 를 함께 비운다
+
+마감 취소 대상은 **한 번도 claim 되지 않은 queued** 라 claim 시의 idem_key NULL 화(사실 12)를
+거치지 않는다. 단건 `cancel` API 는 명시적으로 비우지만(사실 32) bulk 취소 경로를 새로
+쓰는 것이므로 **처음부터 맞게 짠다**:
+
+```sql
+UPDATE kbp.jobs
+   SET status = 'canceled', completed_at = now(), idem_key = NULL   -- ★ 반드시 함께
+ WHERE kind = 'community' AND status = 'queued' AND batch_key = %s
+```
+안 하면 취소된 잡이 `idem_key='community:{eq_ws}'` 를 쥔 채 남아, 다음 밤 제출이
+`ON CONFLICT DO NOTHING` 으로 그 취소된 job_id 를 돌려주고(사실 33 이 고친 반환 계약에서
+`created=False`) `deduped` 로만 세어져 **경고 없이 그 KB 만 GC TTL(72h)까지 조용히 멈춘다.**
+
+---
+
+### 2.5 그래프 변화 판정 — vector-only 를 실제로 거른다
+
+`has_graph()`(있나/없나)로 `extract_graph` 가드(사실 23)를 대체하는 것은 **동치가 아니다**:
+이미 그래프가 있는 KB 에 vector-only 문서를 적재하면 후보에 오르고 `has_graph` 는 True 라
+**그래프가 안 바뀌었는데 매일 밤 30~38분 전체 재빌드**가 돈다 — §0 목적에 정면 위배.
+
+```python
+# kb_pipeline/community.py — 신규 공개 헬퍼
+def graph_counts(workspace_id: str, dsn: str) -> tuple[int, int]:
+    """(node_count, edge_count). **DB 오류를 삼키지 않는다**(fail-closed)."""
+def delete_reports(workspace_id: str, dsn: str, *, level: int = 0) -> int:
+```
+
+**야간 배치가 스킵을 판단하고, 수동 재빌드는 항상 강제한다.** v6 은 `_run_community` 안에
+스킵 판정을 넣어 `/communities/build`(같은 `kind='community'`)도 똑같이 스킵됐다 — 리포트가
+깨져 수동으로 다시 돌리려는 운영자에게 **유일한 탈출구가 no-op** 이 되는 문제였다. 판정을
+잡 payload 의 명시적 플래그로 옮긴다:
+
+```python
+# service/worker.py — 야간 배치 제출 시에만 스킵을 요청한다(§2.3 의 submit_job_ex 사용)
+submit_job_ex(..., payload={"workspace_id": kb_id, "skip_if_unchanged": True}, ...)
+# app.py:527-531 /communities/build 는 submit_job 을 쓰고 이 키를 안 넣는다 → 기본 False → 항상 빌드
+```
+
+```python
+# runner._run_community
+dsn = os.environ["KBP_PG_DSN"]                 # ← v6 스케치엔 이 줄이 없어 NameError(사실 1)
+snapshot_at = datetime.now(timezone.utc)       # ← now_utc() 는 존재하지 않는다
+skip_if_unchanged = bool(ctx.payload.get("skip_if_unchanged"))
+try:
+    nodes, edges = self.graph_probe(eq_ws, dsn)
+except Exception:
+    raise JobRetryable("graph probe failed")   # fail-closed — 삭제도 스킵도 하지 않는다
+
+if nodes == 0:
+    removed = self.report_cleaner(eq_ws, dsn)
+    self._record_build(workspace_id, eq_ws, snapshot_at, "skipped", 0, 0, failed=False)
+    return {"workspace_id": eq_ws, "skipped": "empty graph", "reports_removed": removed}
+
+prev = self.repo.last_community_build(workspace_id)
+if skip_if_unchanged and prev and (prev.node_count, prev.edge_count) == (nodes, edges):
+    self._record_build(workspace_id, eq_ws, snapshot_at, "skipped", nodes, edges, failed=False)
+    return {"workspace_id": eq_ws, "skipped": "graph unchanged"}   # ★ 야간 배치만 여기로 온다
+
+result = builder(eq_ws, llm=get_text_llm(), dsn=dsn)
+self._record_build(workspace_id, eq_ws, snapshot_at, "succeeded", nodes, edges, failed=False)
+return {"workspace_id": eq_ws, "result": result if isinstance(result, (dict, list, str, int)) else None}
+```
+
+**`_record_build` 가 `fail_streak` 를 실제로 관리한다** — v6 은 이 필드를 스키마에만
+선언하고 갱신하는 코드가 없어 `ORDER BY fail_streak` 가 항상 0 인 no-op 이었다:
+
+```python
+def _record_build(self, workspace_key, eq_ws, snapshot_at, status, nodes, edges, *, failed):
+    self.repo.record_community_build(
+        workspace_key, eq_ws, snapshot_at, status, nodes, edges,
+        fail_streak_delta="reset" if not failed else "increment",
+    )
+```
+`record_community_build` 는 UPSERT 로 `fail_streak = 0`(reset) 또는
+`fail_streak = kbp.community_builds.fail_streak + 1`(increment) 를 적용한다.
+**러너가 예외로 빠지는 경로(`JobRetryable`/`JobFailed`)도 잡아야 한다** — `runner.run()` 의
+공통 예외 처리부에서 `kind == "community"` 이면 `record_community_build(..., failed=True,
+snapshot_at=None)` 을 호출한다(스냅샷을 안 남겨 §2.2 의 `snapshot_at IS NULL` 로 계속
+후보에 남되, `fail_streak` 증가로 후순위로 밀린다).
+
+- **`graph_probe`·`report_cleaner` 를 주입 가능하게** 한다(`community_builder` 와 같은 방식,
+  사실 2). 안 그러면 가짜 DSN 을 쓰는 `test_job_runner.py:345,366` 이 실제 접속으로 깨진다.
+- **카운트 동일 = 생략은 근사다.** 수가 같은데 내용만 바뀐 경우를 놓친다. 적재는 거의 항상
+  노드를 늘리므로 실용적으로 충분하고 **놓쳐도 다음 적재 때 잡힌다**. 대안(그래프 해시)은
+  Seq Scan 전량 읽기라 더 비싸다 — 의도적 트레이드오프로 기록한다.
+
+#### 2.5.1 끝날 수 없는 빌드에 대한 방어
+
+`build_workspace_communities`(`community.py:519-531`)는 커뮤니티마다 LLM 1회를 순차로 부르고
+`store_reports` 는 **루프가 끝난 뒤 한 번만** 실행돼 중간 진척이 안 남는다. 라이브에 이미
+231개(사실 39) 보유 workspace 가 있고 111개가 29~38분이므로 **231개는 60~80분** — 그래프는
+적재마다 단조 증가하니 이 숫자는 앞으로도 는다. `max_runtime`(7200s) 을 넘으면 회수되고
+`max_attempts=1`(§2.7) 로 **즉시 failed** → 예외 경로 기록(위)으로 `fail_streak` 는 늘지만
+**성공 없이 매 밤 2시간치 LLM 비용을 반복 태우는 상태가 조용히 지속될 수 있다.**
+
+```python
+# kb_pipeline/community.py — 커뮤니티 수 상한
+def build_workspace_communities(..., max_communities: int | None = None):
+    ...
+    if max_communities and len(communities) > max_communities:
+        log.warning("workspace %s has %d communities, capping to %d",
+                    workspace_id, len(communities), max_communities)
+        communities = sorted(communities, key=len, reverse=True)[:max_communities]  # 큰 것 우선
+```
+`KBP_COMMUNITY_MAX_COMMUNITIES_PER_BUILD`(기본 **150** — 111개 38분 기준 150개는 ~50분,
+7200s 상한에 여유가 크다)를 야간 배치·수동 빌드 양쪽에 적용한다. 잘린 커뮤니티는 다음
+빌드에서 다시 후보가 될 수 있다(작은 커뮤니티가 영구히 안 만들어질 수 있음을 §6 에 남긴다).
+
+### 2.6 스테일 리포트 스윕 — fail-closed, **타입 일치**
+
+`DELETE /doc` 은 잡 행을 안 남기므로(사실 29) 문서를 전량 지운 workspace 는 후보에 안 잡히고
+리포트만 남아 **삭제된 문서 기반으로 답한다.**
+
+야간 배치 앞에 LLM 없는 스윕을 붙인다:
+```sql
+SELECT DISTINCT workspace_id FROM public.community_reports   -- 테이블 부재 시 no-op(사실 16)
+```
+`workspace_id` 는 **`uuid` 컬럼**(사실 34)이라 드라이버가 `uuid.UUID` 로 반환한다. 그런데
+`graph_counts` 가 쓰는 `_NODE_SQL`/`_EDGE_SQL` 의 비교식 좌변은 **text**(사실 35) — 그대로
+넘기면 `operator does not exist: text = uuid` 로 매 workspace 가 예외를 내고 fail-closed 로
+전부 건너뛰어 **스윕이 영구 no-op** 이 된다.
+
+```python
+for row in rows:
+    ws = str(row["workspace_id"])          # ★ uuid → text 명시 캐스트
+    nodes, edges = graph_counts(ws, dsn)
+    if (nodes, edges) == (0, 0):
+        delete_reports(ws, dsn)
+```
+
+**fail-closed 를 명문화한다**(사실 19 의 GC 원칙과 동일):
+- `graph_counts` 가 **예외를 올리면 그 workspace 를 건너뛴다.** "모른다"로 삭제하지 않는다.
+  이 레포의 기존 관례(`search.py:143-146` 의 `except psycopg.Error: return False`)가 정확히
+  위험한 방향이라 **반복하지 않는다.**
+- 1회 스윕당 삭제 상한 `KBP_COMMUNITY_SWEEP_MAX_DELETES`(기본 **5**). 초과분은 로그만 남기고
+  다음 밤으로 — 스키마 사고로 전량 삭제되는 것을 막는다.
+- **정합성 체크**: 직전 `community_builds.node_count > 0` 인데 이번 `graph_counts` 가
+  `(0, 0)` 이면 **한 밤 사이 그래프 전체가 사라진 것** — 정상적 문서 삭제 흐름보다 스키마
+  사고를 의심할 근거가 크다. 이 경우 삭제를 보류하고 `log.error` 만 남긴다(1회 스윕당
+  이런 보류가 발생해도 상한 계산에는 포함하지 않는다 — 삭제 자체를 안 했으므로).
+- **비용**: `graph_counts` 는 표현식 인덱스가 없어 **Seq Scan** 이다(사실 18, 실측 16ms).
+  현재 리포트 보유 5개 workspace 기준 무시할 만하고, 커지면 표현식 인덱스를 검토한다
+  (**지금은 만들지 않는다** — 범위 밖).
+
+> **잔여**: **일부** 문서만 지운 workspace 는 다음 적재까지 낡은 리포트를 쓴다. 완전 해법
+> (삭제도 잡을 남긴다)은 **범위 밖 → deferred**.
+
+### 2.7 실행 예산·타임존
+
+실측 상단 38분(사실 22), 버킷 상한 1(사실 8) → 직렬.
+
+- `KBP_COMMUNITY_MAX_PER_NIGHT` 기본 **8** → 8 × 38분 = **5시간 04분**(03:00~08:04).
+  하단값 30분으로 계산하면 캡 10 이 6시간 20분(09:20)이 된다 — **상단값으로 잡는다.**
+- **`repo.py` 를 고쳐** `"community": _env_int("KBP_JOB_MAX_ATTEMPTS_COMMUNITY", 1)` 추가.
+  지금은 override 가 없어 기본 3 이고(사실 9·10) compose 에 env 만 넣으면 **조용한 no-op**
+  이다. 3 × 7200s = 워크스페이스당 최악 6h 이고, `max_runtime` 회수는 진행 중 호출을 못 끊어
+  **2중 실행**된다 — §3 의 `replace=True` 와 겹치면 두 트랜잭션이 서로의 리포트를 지운다.
+  **부수효과**: `max_attempts_by_kind()` 는 kind 단위(사실 9)라 이 값은 **수동
+  `/communities/build` 에도 적용된다** — 일시적 DB·LLM 오류 한 번이 재시도 없이 그 밤(또는
+  수동 재빌드 1회 호출)을 통째로 실패시킨다. §2.5 의 `JobRetryable` 은 `attempt_count <
+  max_attempts` 가 성립할 때만 재시도되므로, `max_attempts=1` 에서는 사실상 `JobFailed` 와
+  동치다 — 감수한다(다음 밤이 어차피 재시도한다).
+- **진짜 최악**: 7200s 짜리가 연달아 나면 8 × 2h = 16h. §2.4 의 **마감 취소**가 queued 를
+  자른다. running 1건은 최대 2h 더 갈 수 있다 — 감수한다. §2.5.1 의 커뮤니티 수 상한이
+  7200s 도달 자체를 줄인다.
+- 버킷 상한을 올리는 것은 답이 아니다(동시 LLM 이 임베딩·추출과 경합).
+
+**틱 간격** — 기존 폴 간격(사실 36, 기본 2초)을 그대로 쓰면 2시간 창 안에서 초당 수회 DB
+쿼리가 된다. `kbp-gc` 와 같은 방식으로 **별도 간격**을 둔다: `KBP_COMMUNITY_POLL_SECONDS`
+기본 **60**(창 판정·마감 취소 정확도에 60초면 충분하고, 후보 쿼리 비용도 분당 1회로 낮다).
+
+**타임존** — `worker.py` 는 전부 `datetime.now(timezone.utc)` 관례라(사실 28) 그대로 따라
+쓰면 03:00 UTC = **12:00 KST** 로 목적이 정반대가 된다.
+```python
+def _zone():
+    name = os.environ.get("TZ") or "Asia/Seoul"
+    try: return ZoneInfo(name)
+    except Exception:                       # POSIX 'KST-9' · 오타 → 스레드 즉사 방지
+        log.warning("TZ=%r unusable; falling back to Asia/Seoul", name)
+        return ZoneInfo("Asia/Seoul")
+```
+- **`TZ` 를 `facade_env` 앵커에 넣는다**(사실 26 — 서비스별 분리는 앵커를 쪼개야 하고,
+  facade 가 `TZ` 를 갖는 것은 무해하다). `TZ: ${TZ:-Asia/Seoul}`.
+- `KBP_COMMUNITY_BUILD_AT` 기본 `"03:00"`. 파싱 실패 → 기본값 + warning.
+- 기동 로그에 **다음 실행 시각을 절대시각으로** 찍는다.
+- `KBP_COMMUNITY_BUILD_ENABLED` 기본 `true`. `false` 면 스레드를 안 띄운다.
+- **TTL 경고**: `gc.ttl_seconds()`(사실 20 — `_SECONDS` 를 먼저 읽는다)가 48h 미만이면 기동 시
+  warning. 기본 72h 에선 발화하지 않으므로 백로그 잔여 경고(§2.2)가 주 감지 수단이다.
+
+**부분 실패 복구** — 후보 제출 루프 중 `ensure_workspace`(edgequake HTTP) 가 5xx 로 끊기면
+그 밤은 `submitted < cap` 인 채로 끝난다. **재시도하지 않는다** — `claim_run` 마커가 이미
+섰고, 다음 밤에 같은 후보가 (스냅샷이 안 바뀌었으므로) 다시 최우선으로 잡힌다. 이 경우
+`backlog` 카운트는 실제보다 낮게 잡히지만, §2.2 의 오래된-순 정렬이 결국 따라잡는다 —
+당장 별도 재시도 로직을 추가하지 않는다(의도적으로 범위를 좁힌다).
+
+### 2.8 적재 직후 트리거 제거 (kb)
+
+`tasks.py:360` 의 호출을 제거한다. 함수 정의(`:385`)·`build_communities_task`·arq 등록은
+남긴다. 주석: *"커뮤니티 빌드는 facade-worker 야간 배치가 소유한다(진입점 단일화). 수동
+재빌드는 facade `/communities/build` 직접 호출뿐이다."*
+
+> `test_community_job.py` 5건은 함수를 **직접 호출**하는 단위테스트라(사실 24) 무변경으로
+> 통과한다. 문제는 호출부를 덮는 테스트가 **0건**이라는 것이다(사실 25).
+
+---
+
+## 3. 리포트 세대 정리 (재빌드가 원인이라 A 에 속한다)
+
+`store_reports` 는 DELETE 없이 upsert 하고(사실 17) `community_id` 는 enumerate 인덱스다.
+재빌드로 커뮤니티가 줄면 낡은 리포트가 영구히 남아 **존재하지 않는 커뮤니티의 요약으로
+답한다.** 야간 재빌드가 규칙화되면 확정적으로 터진다.
+
+```python
+def store_reports(..., *, replace: bool = False) -> int:
+    # replace=True 이고 reports 가 **비어 있지 않으면** 같은 트랜잭션에서
+    #   DELETE FROM public.community_reports WHERE workspace_id=%s AND level=%s
+    # 를 먼저 실행. 실패하면 롤백되어 옛 리포트가 살아남는다.
+```
+- **`reports == []` 면 DELETE 생략.** 안 그러면 `min_community_size` 로 전부 걸러진 빌드가
+  리포트 전량(라이브 231·111·92·39행)을 **정상 종료로 소각**한다. 빈 그래프 정리는
+  §2.5·§2.6 이 **명시적으로** 담당한다.
+- 기본값 `False` → 기존 호출자·테스트 무변경. `build_workspace_communities` 만 `True`.
+
+---
+
+## 4. 변경 목록
+
+**kbp — 코드**
+- `service/worker.py` — `kbp-community` 스레드(60s 폴 간격·창·`claim_run`·스윕·후보·제출·
+  마감 취소·백로그/TTL 경고). 스레드 로직은 §2.4 의 `_current_run_date` 고정 방식을 따른다
+- `service/jobs/schema.py` — `kbp.batch_runs`(PK `(name, run_date)`), `kbp.community_builds`
+- `service/jobs/api.py` — **`submit_job` 은 무변경.** 신규 `submit_job_ex(...) -> tuple[uuid.UUID, bool]`
+  추가(§2.3) — `submit_job` 의 공유 호출부 8곳(legacy 4경로 + `/jobs/*` 라우터 4개,
+  `app.py:200` `_legacy_job()` 및 `jobs/api.py:293,325,352,381`)은 **전부 무변경**
+- `service/jobs/repo.py` — `"community": _env_int("KBP_JOB_MAX_ATTEMPTS_COMMUNITY", 1)`;
+  `claim_run(name, run_date)`; `record_community_build(workspace_key, eq_ws, snapshot_at,
+  status, nodes, edges, *, fail_streak_delta)`; `last_community_build(workspace_key)`;
+  `cancel_queued_by_batch_key(batch_key)`(§2.4.1 — **`idem_key=NULL` 을 함께 세팅**)
+- `service/jobs/runner.py` — `graph_probe`·`report_cleaner` 주입 seam + `_run_community`
+  재작성(§2.5) + 공통 예외 처리부에서 `kind=="community"` 실패를 `record_community_build
+  (failed=True)` 로 기록, `dsn` 지역변수
+- `service/jobs/memory.py` — `InMemoryJobRepo` 에 신규 메서드 대응
+- `kb_pipeline/community.py` — `graph_counts()`·`delete_reports()` 신규;
+  `store_reports(replace=)`; `build_workspace_communities(max_communities=)`(§2.5.1)
+- **`service/app.py` 무변경** — `/communities/build` 는 계속 `submit_job`(단일 반환값)을
+  쓴다(§2.3)
+
+**kbp — 테스트**
+- `service/tests/test_job_runner.py` — 주입 seam·`graph_counts` 분기·예외 시 `fail_streak`
+  증가 기록
+- `service/tests/test_job_repo_pg.py` — `_truncate()` 에 `kbp.batch_runs`·
+  `kbp.community_builds` 추가(사실 38 — 안 하면 `claim_run` 테스트가 같은 날 재실행에서
+  실패); `claim_run`·`max_attempts["community"]`·`cancel_queued_by_batch_key` 의
+  `idem_key=NULL` 검증
+- **신규** `service/tests/test_community_nightly.py` — `pytestmark =
+  pytest.mark.requires_pg`(사실 38, `test_job_repo_pg.py` 와 동일 skip 규약). 창·마커·후보
+  쿼리·마감 취소·스윕·자정 랩을 **실 Postgres** 로 검증한다(순수 SQL 의미론이라 인메모리
+  모킹으로는 못 잡는다)
+- `tests/test_community.py`(**기존 파일**, `kb_pipeline/tests/` 아님 — 사실 37, 그 디렉터리는
+  `testpaths` 에 없어 수집되지 않는다) — `store_reports(replace=)`·`graph_counts`·
+  `delete_reports`·`build_workspace_communities(max_communities=)`
+
+**kbp — 설정/배포**
+- compose ×2 `facade_env` **앵커**(compose `:10`, airgap `:27`) — `TZ: ${TZ:-Asia/Seoul}`,
+  `KBP_COMMUNITY_BUILD_AT/ENABLED/WINDOW_MINUTES/DEADLINE_MINUTES/MAX_PER_NIGHT`,
+  `KBP_COMMUNITY_SWEEP_MAX_DELETES`, `KBP_JOB_MAX_ATTEMPTS_COMMUNITY`,
+  `KBP_COMMUNITY_POLL_SECONDS`, `KBP_COMMUNITY_MAX_COMMUNITIES_PER_BUILD`
+  (전부 `${VAR:-기본}`)
+- `scripts/facade.env` — 같은 변수(dev 는 호스트 런처, 사실 31)
+- `.env.airgap.example` — **`TZ` 만 A 섹션**(배포지 시각은 운영자 결정). 나머지는 compose
+  기본값 관례를 따라 B-3 튜닝 섹션에 넣지 않는다
+- `scripts/airgap/verify-bundle.sh` — `REQUIRED_ENV` 에 `TZ`
+
+**kb**
+- `workers/tasks.py:360`(실제 경로 `backend/app/workers/tasks.py:360`) — 트리거 호출 제거 +
+  주석 (§2.8)
+- **신규 회귀** — `backend/tests/test_worker_kb_pipeline_stages.py`(기존 하네스, 이미
+  `ingest_document_task` 를 직접 구동한다)에 "성공해도 `BUILD_COMMUNITIES_TASK` 를
+  enqueue 하지 않는다" 케이스 추가
+- `test_community_job.py` 5건은 **호출부 삭제 후에도 남긴다** — 함수 자체(단위 동작)는
+  여전히 유효하고, 수동 재빌드 경로(§2.8 주석이 가리키는 `/communities/build`)가 내부적으로
+  이 함수를 다시 쓸 가능성에 대비한 회귀다. "죽은 코드의 초록불" 이 아니라 "함수 계약 보존"
+  으로 문서에 명시한다
+
+**문서**
+- `_workspace/02-changes.md` — 진입점 일원화, "최대 하루 지연" 계약, 세대 정리,
+  키 통일을 **기각한 근거**, `submit_job_ex` 신규 도입(공유 `submit_job` 은 무변경)
+- `_workspace/03-dev-progress.md` — phase 진행
+- `docs/airgap-deploy.md` — 야간 LLM 부하·`TZ`
+- deferred — D21 종결, 신규 3건: **문서 삭제가 재빌드를 트리거하지 않는다**,
+  **캡 백로그가 TTL 로 탈락할 수 있다**, **커뮤니티 수 상한을 넘긴 workspace 는 작은
+  커뮤니티가 영구히 안 만들어질 수 있다**(§2.5.1)
+
+---
+
+## 5. 테스트
+
+**대상 선정**
+- `workspace_key` 로 뽑는다: `payload` NULL(오프로드) 행도 **포함** ← 회귀 핵심
+- **`snapshot_at` 비교**: 빌드 중(09:10 시작·09:48 완료) 도착한 09:12 insert 가 **다음 밤
+  후보에 든다** ← 영구 탈락 회귀
+- 빌드 이력 없음 → 포함 / `snapshot_at` 이 더 최신 → 제외
+- **queued·running community 가 있으면 제외** ← 중복 빌드 회귀
+- **실패 후(`snapshot_at IS NULL`, `fail_streak > 0`)에도 후보에는 남되 정렬에서 뒤로 간다**
+  ← `fail_streak` 가 실제로 갱신되는지(§2.5 예외 처리부) 확인하는 게 이 테스트의 핵심이다.
+  갱신 코드 없이는 이 항목이 항상 통과하므로 **`record_community_build` mock 의 호출 인자를
+  단언**해야 한다
+- 캡 초과 시 오래 밀린 순, 잔여 warning, 3일 연속이면 error(`batch_runs` 가 `(name,
+  run_date)` 이력을 보존하는지 확인 — 단일행이면 이 테스트 자체가 3일치를 못 만든다)
+- 실패 상태·`workspace_key IS NULL` 제외
+
+**제출 계약**
+- `payload == {"workspace_id": kb_id, "skip_if_unchanged": True}`(야간 배치만),
+  `workspace_key == eq_ws`, `idem_key == f"community:{eq_ws}"`,
+  `batch_key == f"community-nightly:{run_date}"`(§2.4 의 고정된 `run_date`, 틱 시각 아님)
+- kb id 와 eq UUID 를 **뒤바꾸지 않는다**
+- **`submit_job_ex` 가 `(job_id, created)` 를 반환하고, idem 충돌은 `created=False` →
+  `deduped` 로 센다** ← 반환 계약 확장이 실제로 있는지의 회귀
+- `/communities/build` 는 `skip_if_unchanged` 를 **넣지 않는다**(기본 False → 항상 빌드)
+
+**실행 판정**
+- 창 안 + 오늘 마커 없음 → 실행 / **창 밖(14:00 기동) → 실행 안 함**
+- **대상 0건이어도 `claim_run` INSERT 가 일어나고** 같은 `run_date` 의 다음 틱은 skip
+  ← 밤새 루프 회귀
+- `claim_run` 동시 호출에서 하나만 이긴다(`(name, run_date)` UNIQUE 충돌)
+- **자정 랩**(`BUILD_AT=23:30, WINDOW=120`): 23:40 과 00:30 두 틱 모두 **같은 `run_date`**
+  로 판정되고, 00:30 틱에서 창이 살아있다 ← v6 은 이 시나리오에서 창 후반이 죽었다
+- **마감 취소가 실제로 실행된다**: `DEADLINE`(기본 420분, `WINDOW` 120분보다 큼) 이후
+  틱에서 창 판정과 **무관하게** `cancel_queued_by_batch_key` 가 호출된다 ← v6 은 창 판정
+  뒤에 둬 도달 불가능했다. 취소 대상은 오늘 batch_key 의 **queued 만**, running 은 보존
+- **`cancel_queued_by_batch_key` 가 `idem_key` 를 NULL 로 세팅한다** — 세팅 안 하면 다음 밤
+  제출이 취소된 job_id 를 재사용해 `deduped` 로 잘못 세어지는 것을 재현하는 테스트
+- `ZoneInfo` 기준(TZ=Asia/Seoul 에서 03:00 KST) / `TZ` 가 `KST-9`·오타여도 **스레드가 안 죽고**
+  Asia/Seoul 폴백 + warning
+- `BUILD_AT` 파싱 실패 → 기본값 + warning
+- `KBP_COMMUNITY_BUILD_ENABLED=false` → 스레드 미기동
+- DB 조회·큐 제출 실패가 스레드를 죽이지 않는다
+- `ttl_seconds() < 48h` → warning (`KBP_JOB_TTL_SECONDS` 경로 포함)
+- **`test_community_nightly.py` 는 `pytest.mark.requires_pg` 로 마킹돼 있고, `KBP_PG_DSN`
+  미설정 또는 활성 워커 감지 시 skip 된다** ← 소유 위치·실행 조건이 명시돼 있는지의 회귀
+
+**러너**
+- `nodes == 0` → builder 미호출, `report_cleaner` 호출, `skipped: empty graph`
+- **야간 배치 제출(`skip_if_unchanged=True`)이고 카운트가 직전과 같으면** builder 미호출
+  `skipped: graph unchanged` ← vector-only 회귀
+- **수동 `/communities/build`(`skip_if_unchanged` 없음)는 카운트가 같아도 항상 빌드한다**
+  ← v6 이 막았던 수동 재빌드 탈출구 회귀
+- 카운트가 다르면 빌드 + `community_builds` 갱신(`snapshot_at` = **빌드 시작 시각**,
+  `fail_streak` **리셋**)
+- **`graph_probe` 예외 → `JobRetryable`, `delete_reports` 미호출** ← fail-closed
+- **러너가 예외로 종료하면(`JobRetryable`/`JobFailed`) `community_builds.fail_streak` 가
+  1 증가하고 `snapshot_at` 은 그대로(NULL 이면 NULL)** ← fail_streak 실제 기록 회귀
+- 기존 2건(`test_job_runner.py:345,366`)이 가짜 DSN 으로 통과(주입 seam)
+- `max_attempts_by_kind()["community"] == 1`, env 로 상향 가능
+- **`build_workspace_communities(max_communities=150)`**: 커뮤니티가 200개면 150개로 잘리고
+  나머지는 `log.warning` ← 끝나지 않는 빌드 방어 회귀
+
+**스테일 스윕**
+- 리포트 있음 + 그래프 비었음 → 삭제, LLM 미호출
+- 그래프 있음 → 무변경
+- **`workspace_id`(uuid) 를 `str()` 캐스트해 `graph_counts` 에 넘긴다 — 캐스트 없이 호출하면
+  `text = uuid` 오류가 나는 것을 재현하는 테스트를 포함한다** ← 타입 불일치 회귀(v6 의 스윕은
+  이 캐스트가 없어 영구 no-op 이었다)
+- **`graph_counts` 예외 → 그 workspace 를 건너뛴다(삭제 안 함)** ← fail-closed
+- **정합성 보류**: 직전 `node_count > 0` 인데 이번이 `(0,0)` 이면 삭제하지 않고 `log.error`
+- 삭제 상한 초과 시 나머지는 다음 밤
+- **`community_reports` 테이블 부재 → no-op**(예외 아님)
+
+**리포트 세대**
+- `replace=True` 로 커뮤니티가 줄면 낡은 행이 사라진다
+- **`reports == []` → DELETE 생략** ← 전량 소각 회귀
+- 빌드 실패 시 롤백되어 옛 리포트가 살아남는다
+- `replace=False`(기본)는 기존 동작
+
+**kb**
+- **신규**: `backend/tests/test_worker_kb_pipeline_stages.py` 에 `ingest_document_task`
+  성공 후 `BUILD_COMMUNITIES_TASK` **미 enqueue** 케이스(사실 25)
+- `test_community_job.py` 5건 **무변경 통과**(사실 24)
+- 회귀 기준선: **착수 시 `cd backend && pytest -q` 로 기존 실패 건수를 측정해 이 문서에
+  기록하고** 그 수를 늘리지 않는다(직전 관측 19건은 미확정으로 취급).
+
+---
+
+## 6. 리스크
+
+| 리스크 | 완화 |
+|---|---|
+| 커뮤니티가 최대 하루 지연 | 사용자가 인지하고 택했다(§0) |
+| 야간이 업무시간 침범 | 캡 8 × **상단값 38분** = 5h04(§2.7) + **마감 취소**(§2.4, 도달 가능하게 재설계) + `MAX_ATTEMPTS=1`(**repo.py 코드 변경**) |
+| running 1건이 마감 후 2h 더 감 | 중단해도 LLM 호출을 못 끊어 작업만 버린다 — 감수 |
+| `MAX_ATTEMPTS=1` 이 일시 오류를 재시도 없이 실패시킨다(수동 빌드 포함) | 다음 밤이 재시도한다. §2.7 에 부수효과 명시 |
+| 캡 초과 굶김 | 오래 밀린 순 + `fail_streak` 후순위(§2.2) — **`fail_streak` 를 실제로 기록하는 경로 필요**(§2.5) |
+| **백로그가 TTL 로 조용히 탈락** | 잔여 로그(`(name, run_date)` 이력) + 3일 연속 error. **완전 방어 아님 → deferred** |
+| **끝나지 않는 대형 빌드(커뮤니티 200+개)** | `max_communities` 상한(§2.5.1). 잘린 것은 다음 빌드로 미루되 영구히 못 만들어질 수 있음 → deferred |
+| 카운트 같지만 내용이 바뀐 그래프 | 재빌드를 놓친다. 다음 적재 때 잡힌다 — 의도적 근사(§2.5) |
+| **수동 재빌드가 스킵 가드에 막힌다** | `skip_if_unchanged` 를 야간 배치 payload 에만 명시(§2.5) — 수동은 항상 빌드 |
+| 낡은 리포트로 답한다 | `replace=True`(§3) + 빈 그래프 정리(§2.5) + 스윕(§2.6) |
+| **일부만 삭제한 workspace 의 낡은 리포트** | 다음 적재까지 남는다 → **deferred**(§2.6) |
+| 스윕이 살아있는 리포트를 지운다 | **fail-closed** + uuid/text 캐스트(§2.6) + 1회 삭제 상한 5 + 정합성 보류 |
+| **취소된 queued 잡이 idem_key 를 쥔 채 남아 그 KB 만 조용히 멈춘다** | `cancel_queued_by_batch_key` 가 `idem_key=NULL` 을 함께 세팅(§2.4.1) |
+| **자정을 넘는 `BUILD_AT` 설정에서 창 후반이 죽는다** | `run_date` 를 한 번 고정(§2.4) |
+| `TZ` 누락·이상값 | 앵커 기본값 + `ZoneInfo` 폴백 + 기동 로그에 다음 실행 절대시각 |
+| 초당 수회 DB 폴링 | `KBP_COMMUNITY_POLL_SECONDS=60`(§2.7) |

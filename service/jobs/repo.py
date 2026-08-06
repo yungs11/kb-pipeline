@@ -581,6 +581,7 @@ class JobRepo:
         result: dict[str, Any] | None = None,
         result_ref: str | None = None,
         error: str | None = None,
+        clear_idem: bool = False,
     ) -> None:
         if status not in TERMINAL:
             raise ValueError(f"not a terminal status: {status!r}")
@@ -591,12 +592,16 @@ class JobRepo:
                    completed_at = now(), heartbeat_at = NULL, stage = NULL,
                    -- 실패로 끝나면 멱등키를 비운다. 설정을 고치고 같은 파일을 다시
                    -- 올렸을 때 옛 실패 job_id 가 반환되어 영구 실패로 굳는 것을 막는다.
-                   idem_key = CASE WHEN %s = 'succeeded' THEN idem_key ELSE NULL END
+                   -- clear_idem(2026-08-06): job 자체는 succeeded 지만 본문이 도메인
+                   -- 실패(parse-svc {"status":"failed"})면 명시적 idem_key 는
+                   -- 시간창이 없어 영구 캐싱된다 — 그 경우도 비워서 재시도가 재실행되게 한다.
+                   idem_key = CASE WHEN %s = 'succeeded' AND NOT %s
+                                   THEN idem_key ELSE NULL END
              WHERE id = %s AND claimed_by = %s AND attempt_count = %s
                AND status = 'running'
             """,
             (status, Jsonb(result) if result is not None else None,
-             result_ref, error, status, job_id, worker_id, attempt),
+             result_ref, error, status, clear_idem, job_id, worker_id, attempt),
         )
 
     def requeue(

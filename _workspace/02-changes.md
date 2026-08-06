@@ -512,3 +512,107 @@ kordoc(구 경로)         표 9개    — 여러 표를 하나로 병합해 과
 **표 경계가 원본과 다르게 재구성**되지만 청킹 시 헤더 컨텍스트가 인접 청크에 남아있을
 가능성이 높아 콘텐츠 손실보다는 구조 재배치로 판단, **허용**하기로 확정(사용자 결정).
 kordoc으로 되돌리지 않는다 — kordoc도 원본과 다른 표 개수를 내므로 우열이 명확하지 않다.
+
+### DRM(Fasoo) 해제 지원 추가 (2026-08-06)
+
+`docs/REFERENCE_DRM해제_API.md` 스펙으로 `parse_service/tools/drm.py` 를 신설했다.
+fileconvert.py 와 같은 인프라(base host)를 쓰지만 path prefix 가 달라(`/api/drm/agent/tool`
+vs `/api/fileconvert/agent/tool`) 별도 `KBP_DRM_URL` env 로 뺐다. **토큰은 값이 fileconvert 와
+현재 동일하지만 별도 env(`KBP_DRM_TOKEN`)로 분리**했다 — 사용자 지시("혹시 모르니까 따로
+변수 놔줘, 값은 우선 동일하게") — 서버가 나중에 분리될 가능성에 대비.
+
+`run_parse`(app.py) 의 변환 단계 **앞**에 `drm.is_drm(file_bytes)` 매직바이트
+휴리스틱(`DRMONE`, 실측: 길이-프리픽스 2바이트 뒤에 온다)으로 게이트해 DRM 파일만 원격
+호출한다(비-DRM 파일 매 요청마다 왕복 추가하지 않음). 해제 후 바이트는 여전히 원래
+포맷(hwp/docx/pdf 등)이므로 기존 fileconvert 변환 단계가 이어서 처리한다 — 순서:
+**DRM 해제 → (필요시) 포맷 변환 → 라우팅**. `timing_metrics.drm_ms` 로 계측.
+
+**라이브 검증**: `docs/1. 자금집행 요청서 및 동의서.pdf`(Fasoo DRM 래핑, `file` 명령이
+"OpenPGP Public Key"로 오판)로 `/parse` 호출 → `drm_ms=268.6`, `convert_ms=0.0`(해제 후
+이미 PDF), `page_count=1`, `n_blocks=20`, `enriched_content` 4,291자. 해제된 PDF 1페이지는
+텍스트 레이어가 없는 스캔 이미지 1장(PyMuPDF `get_text()` 빈 문자열, `get_images()`==1) —
+정상(스캔 서식 특성), VL/OCR 경로가 승계해 콘텐츠를 뽑아냈다.
+
+### PDF 트리아제 임계치·레인 env화 + 페이지별 판정 로그 (2026-08-06, plan v3 READY)
+
+이미지 파서 고도화 준비 — 사용자 지시: "트리아제 룰 임계치는 환경변수화 한다. 임계치
+설정값·임계치 도달 시 갈 레인 둘 다 소스 변경 없이 조정 가능해야 한다." + "지금 판정 로그를
+남기고, 나중에 env 조정만으로 라우팅을 바꿀 수 있게 준비." plan(ultracode 경쟁 검증 3라운드,
+v1→v3 READY, `/Users/xxx/.claude/plans/mighty-whistling-quiche.md`)대로 구현. **동작
+불변**(env 미설정 시 기존 하드코딩 값과 100% 동일) — 527 passed(506 기존 + 21 신규), 회귀 0.
+
+- `parse_service/parsers/pdf/triage.py`: `classify()` 6개 파라미터(`mixed_image_cov`/
+  `content_min`/`diagram_curve_min`/`diagram_line_min`/`diagram_img_count`/
+  `diagram_combo_curve_min`) + `extract_signals()`의 `has_native_text` 임계(20)를 `None`
+  sentinel + 호출시점 env 읽기로 전환(`KBP_TRIAGE_*` 7개). 호출부(`gate.py`)는 무변경 —
+  `test_pdf_gate.py`가 `triage_document`를 단항 lambda 로 monkeypatch 하므로 호출부에
+  kwargs 를 추가하면 안 됨.
+- `parse_service/parsers/pdf/gate.py`: `_VL_RATIO` 모듈로드시점 읽기를 `decide_route()`
+  호출시점으로 이동(`KBP_GATE_VL_RATIO`, float 파싱 실패 시 경고+0.5 폴백 — triage 예외
+  처리와 별개 try/except). 레인 선택 3곳도 env 화(`KBP_GATE_VL_LANE`/`KBP_GATE_OCR_LANE`/
+  `KBP_GATE_DEFAULT_LANE`) — 값은 `{odl,vl,paddle_gw}` 화이트리스트 검증, 밖이면 경고+그
+  변수 고유 기본값 폴백. 이 보장 덕분에 `__init__.py`의 `decision.lane=="vl"` 등 기존
+  리터럴 비교는 무수정으로 재배선을 그대로 인식한다(§B 핵심 — ultracode adversarial-break
+  렌즈가 v2 라운드에서 잡아낸 결함, __init__.py 를 안 고쳐도 되는 이유를 코드 주석으로 명시).
+  `RouteDecision.page_signals` 필드 순수 추가 — triage 성공한 모든 경로(전부 SKIP/빈
+  페이지 `total==0` 분기 포함)가 채움, `triage_document()` 예외 경로만 `()`(공유 싱글턴
+  `_ODL`). `total==0`은 의도적으로 `KBP_GATE_DEFAULT_LANE`을 적용하지 않고 `lane="odl"`
+  리터럴 고정(분석할 신호가 없는 축퇴 케이스를 vl/paddle_gw로 보내는 건 위험).
+- `parse_service/parsers/pdf/__init__.py`: `_parse_routed()`를 단일 종료점으로 재구성
+  (기존 `log.exception`/`log.warning` 위치·문구·조건은 한 글자도 안 바꿈 — `pages=None`
+  선-초기화로 "예외 실패" vs "빈 결과 실패"를 구분 유지). 반환 직전 `_log_triage_table()`
+  호출 — `decision is None`(게이트 실패)이나 `page_signals` 없음이면 짧은 안내 로그만
+  남기고 종료, 그 외엔 페이지별 마크다운 표(`| p | triage | dia | char | img | imgcov |
+  curve | line | 판정근거 | 성공여부 | 실패시 재시도(fallback) 여부 | 선택 fallback |`)를
+  찍는다. `KBP_TRIAGE_LOG_TABLE=0`으로 완전 스킵 가능. 이중 try/except 격리(로그 버그가
+  파싱을 절대 못 깨게).
+- env 12개(`KBP_TRIAGE_*` 7 + `KBP_GATE_*` 4 + `KBP_TRIAGE_LOG_TABLE`)를 `.env.example`/
+  `.env.airgap.example`/`scripts/parse-svc.env.example`(bare `KEY=값`)과
+  `docker-compose.yml`/`docker-compose.airgap.yml`(`${VAR:-값}`)에 각 파일 실제 컨벤션대로
+  추가. `KBP_GATE_VL_RATIO`는 코드엔 이미 있었지만 이 5개 파일 어디에도 문서화가 안 돼
+  있었다(ultracode completeness-and-tests 렌즈가 grep 으로 확인한 실측 — 이번에 처음 추가).
+
+### 가로형 페이지 → LLM_NEEDED + 페이지 전사 프롬프트 PAGE_HYBRID 통일 (2026-08-06, plan v5 READY)
+
+사용자 지시: "문서가 가로형 문서이면 묻고 따질 것도 없이 그냥 VL로 가자" + (확인 질문에 이어)
+"PAGE 전사는 가로형뿐 아니라 전체적으로 통일해야 한다 — 표·순서도·차트 프롬프트 통합". plan
+(ultracode 경쟁 검증 5라운드, v1→v5 READY — v1/v2 는 diagram_pages 배제 회귀를 3개 독립
+렌즈가 수렴 지적해 재설계, v4 는 "DIAGRAM_USER_PROMPT가 표/본문 규칙이 없다"는 잘못된 전제로
+다이어그램 보충까지 통합하려다 2개 렌즈가 additive-모드 중복 회귀를 잡아 되돌림).
+
+- `parse_service/parsers/pdf/triage.py`: `PageSignals.is_landscape`(파생, `width>height`)를
+  `extract_signals()`가 채운다. `classify()`는 **다이어그램 판정을 최우선으로 유지**하고
+  landscape 는 mixed/text_only/OCR_NEEDED/SKIP 을 대체하는 차선 조건으로 끼운다 — 진짜
+  다이어그램(curve/line/img 임계 충족)이면서 가로형인 페이지도 `is_diagram=True`를 그대로
+  얻어 `gate.py`의 `diagram_pages` 집계에서 안 빠진다(v1 즉시-return 설계였다면 빠졌을
+  결함). `KBP_TRIAGE_LANDSCAPE_TO_LLM`(기본 1)로 규칙 자체를 끌 수 있다.
+- `parse_service/parsers/pdf/__init__.py`: `_ocr_elements_for_page`의 `else` 분기(비-다이어
+  그램 호출)가 이제 밋밋한 기본 프롬프트 대신 `PAGE_HYBRID_SYSTEM_PROMPT`/`PAGE_HYBRID_
+  USER_PROMPT`를 쓴다 — `_vl_lane`(문서수준 vl 레인)과 `_odl_lane`의 스캔페이지 일반 OCR
+  둘 다 적용(페이지를 **처음부터** 전사하는 경로). `_supplement_diagram_pages`(다이어그램
+  보충, `diagram=True`)는 **그대로 `DIAGRAM_*` 유지** — ODL 레인에서 이미 있는 네이티브
+  블록에 additive 로 얹는 경로라 PAGE_HYBRID(표/본문/그림을 전부 재분해하는 범용 프롬프트)
+  로 바꾸면 표/본문이 중복되는 회귀가 생긴다(ultracode 가 잡은 결함, 상세는
+  `docs/superpowers/specs/2026-08-06-triage-landscape-deferred.md` D2). `diagram`/`else`
+  분기 구조 자체는 안 바꿔서(반환값만 교체) 기존 테스트가 전부 무변경으로 통과.
+- 회귀 0(535 passed, 1 skipped — 기존 527 + 신규 8건 triage/prompt 테스트).
+
+**후속 — 순서도 라벨 보존 프롬프트 수정 + env화 (2026-08-06)**: 라이브 검증(실제 OpenRouter
+VL 호출) 중 순서도 박스 라벨("접수/검토/승인")이 "첫 번째 단계/두 번째 단계/세 번째 단계"로
+일반화되는 문제를 발견 — `prompts.py`의 순서도 조항을 "박스 안 라벨은 이미지에 보이는 글자
+그대로 옮긴다"로 명시 강화. **원인 진단 중 최초 재현 PDF 자체의 결함도 발견**: PyMuPDF 기본
+폰트가 한글 글리프를 지원하지 않아 라벨이 렌더링 단계에서부터 읽을 수 없는 점(dots)으로
+나왔던 것 — 모델은 그 이미지에 대해 그럴듯한 라벨을 지어낸 것이었다(할루시네이션). 한글
+폰트(AppleGothic)를 임베드해 재현 PDF를 다시 만들자 원래 프롬프트도 문제없이 라벨을
+보존했고, 강화된 프롬프트도 동일하게 정확했다 — 즉 실제 결함은 "모델이 라벨을 못 지킨다"가
+아니라 "테스트 이미지 자체가 읽을 수 없었다"였음을 실측으로 확인.
+
+- `parse_service/parsers/ocr/prompts.py`: 순서도 조항을 `_DEFAULT_PAGE_HYBRID_DIAGRAM_RULE`
+  상수로 분리하고 `KBP_PAGE_HYBRID_DIAGRAM_RULE` env로 전체 교체 가능(소스 수정 없이 프롬프트
+  튜닝). `page_hybrid_prompts()` 함수를 신설해 **호출 시점에** env를 읽는다(이번 세션
+  확립된 관례). 기존 `PAGE_HYBRID_SYSTEM_PROMPT`/`PAGE_HYBRID_USER_PROMPT` 정적 상수는
+  하위호환으로 유지하되 모듈 로드 시점 값이라 env 변경을 반영하지 않는다는 점을 문서화 —
+  실제 소비자(`pdf/__init__.py`의 `_ocr_elements_for_page`, `ocr/__init__.py`의 이미지
+  도메인 `parse()`) 둘 다 `page_hybrid_prompts()`로 전환.
+- env 1개(`KBP_PAGE_HYBRID_DIAGRAM_RULE`, 기본 빈 문자열=코드 기본값)를 5개 env 파일에
+  문서화. dotenv는 여러 줄 값을 지원하지 않아 값은 줄바꿈 없이 한 줄로 적어야 함을 명시.

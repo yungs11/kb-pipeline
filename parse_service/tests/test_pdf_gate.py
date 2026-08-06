@@ -84,3 +84,85 @@ def test_paddle_gw_route_carries_diagram_pages(monkeypatch):
     d = gate.decide_route(b"%PDF")
     assert d.lane == "paddle_gw"      # 스캔 존재, 차트 1/7 < 0.5
     assert d.diagram_pages == (4,)
+
+
+# ── 레인/비율 env화(2026-08-06, 이미지 파서 고도화 준비) ────────────────────────
+
+def test_page_signals_filled_for_normal_routes(monkeypatch):
+    """정상 라우팅(비-빈문서)도 page_signals 를 채워 반환한다(§C 로깅 소비 대상)."""
+    sigs = [_sig(T), _sig(T)]
+    monkeypatch.setattr(gate, "triage_document", lambda b: sigs)
+    d = gate.decide_route(b"%PDF")
+    assert d.page_signals == tuple(sigs)
+
+
+@pytest.mark.parametrize("buckets", [[S], []])
+def test_page_signals_filled_even_when_total_zero(monkeypatch, buckets):
+    """전부 SKIP/빈 페이지(total==0)도 sigs 는 이미 확보했으므로 page_signals 를 채운다
+    (싱글턴 `_ODL` 재사용 금지 — §B 핵심 규칙). lane 은 그대로 "odl" 리터럴."""
+    sigs = [_sig(b) for b in buckets]
+    monkeypatch.setattr(gate, "triage_document", lambda b: sigs)
+    d = gate.decide_route(b"%PDF")
+    assert d.lane == "odl"
+    assert d.page_signals == tuple(sigs)
+
+
+def test_triage_exception_has_no_page_signals(monkeypatch):
+    """triage_document 자체가 예외로 실패한 경로만 page_signals=()(공유 싱글턴)로 남는다."""
+    def boom(b):
+        raise RuntimeError("corrupt page iteration")
+    monkeypatch.setattr(gate, "triage_document", boom)
+    d = gate.decide_route(b"%PDF")
+    assert d.page_signals == ()
+
+
+def test_vl_lane_env_override(monkeypatch):
+    monkeypatch.setenv("KBP_GATE_VL_LANE", "paddle_gw")
+    monkeypatch.setattr(gate, "triage_document", lambda b: [_sig(L), _sig(L)])
+    d = gate.decide_route(b"%PDF")
+    assert d.lane == "paddle_gw"  # 비율 조건 충족(2/2) 시 재배선된 레인으로
+
+
+def test_ocr_lane_env_override(monkeypatch):
+    monkeypatch.setenv("KBP_GATE_OCR_LANE", "vl")
+    monkeypatch.setattr(gate, "triage_document", lambda b: [_sig(O)])
+    d = gate.decide_route(b"%PDF")
+    assert d.lane == "vl"
+
+
+def test_default_lane_env_override(monkeypatch):
+    monkeypatch.setenv("KBP_GATE_DEFAULT_LANE", "vl")
+    monkeypatch.setattr(gate, "triage_document", lambda b: [_sig(T), _sig(T)])
+    d = gate.decide_route(b"%PDF")
+    assert d.lane == "vl"
+
+
+def test_invalid_lane_env_warns_and_falls_back(monkeypatch, caplog):
+    """화이트리스트 밖 레인 값 → log.warning + 그 변수 고유 기본값으로 폴백."""
+    import logging
+    monkeypatch.setenv("KBP_GATE_VL_LANE", "bogus")
+    monkeypatch.setattr(gate, "triage_document", lambda b: [_sig(L), _sig(L)])
+    with caplog.at_level(logging.WARNING, logger=gate.log.name):
+        d = gate.decide_route(b"%PDF")
+    assert d.lane == "vl"  # 기본값으로 폴백
+    assert any("bogus" in r.message for r in caplog.records)
+
+
+def test_vl_ratio_env_override(monkeypatch):
+    """비율 임계를 낮추면 더 적은 차트 비율로도 vl 레인으로 간다."""
+    monkeypatch.setenv("KBP_GATE_VL_RATIO", "0.1")
+    monkeypatch.setattr(gate, "triage_document", lambda b: [_sig(T), _sig(T), _sig(L)])
+    d = gate.decide_route(b"%PDF")
+    assert d.lane == "vl"  # 1/3=0.33 ≥ 0.1(낮춘 임계) — 기본 0.5 였으면 paddle_gw/odl
+
+
+def test_invalid_vl_ratio_env_warns_and_falls_back(monkeypatch, caplog):
+    """숫자로 파싱 안 되는 KBP_GATE_VL_RATIO 도 레인 문자열과 동일하게 경고+기본값(0.5) 폴백."""
+    import logging
+    monkeypatch.setenv("KBP_GATE_VL_RATIO", "abc")
+    # 1/2=0.5 는 기본 임계(0.5) 를 충족 → 파싱 실패 시 기본값으로 폴백됨을 이 결과로 확인.
+    monkeypatch.setattr(gate, "triage_document", lambda b: [_sig(T), _sig(L)])
+    with caplog.at_level(logging.WARNING, logger=gate.log.name):
+        d = gate.decide_route(b"%PDF")
+    assert d.lane == "vl"
+    assert any("abc" in r.message for r in caplog.records)

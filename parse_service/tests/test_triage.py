@@ -2,7 +2,7 @@
 
 결정트리: native text → mixed?LLM:TEXT / no text → content?OCR:SKIP.
 """
-from parse_service.parsers.pdf.triage import PageSignals, Bucket, classify
+from parse_service.parsers.pdf.triage import PageSignals, Bucket, classify, extract_signals
 
 
 def _sig(**kw) -> PageSignals:
@@ -202,3 +202,122 @@ def test_textless_vector_page_skips_drawing_scan():
     assert s.curve_count == 0 and s.line_count == 0   # 스캔 안 함
     assert not s.is_diagram
     assert s.bucket == Bucket.OCR_NEEDED
+
+
+# ── 임계치 env 화(2026-08-06, 이미지 파서 고도화 준비) — 미설정 시 회귀 0 + override 확인 ──
+
+def test_env_unset_matches_hardcoded_default():
+    """env 미설정이면 classify() 결과가 기존 하드코딩 기본값과 완전히 동일(회귀 앵커)."""
+    s = classify(_sig(char_count=500, has_native_text=True, image_count=2, image_coverage=0.24))
+    assert s.bucket is Bucket.TEXT_ONLY  # mixed_image_cov=0.25 기본 — 0.24 는 미달
+
+
+def test_mixed_image_cov_env_override(monkeypatch):
+    monkeypatch.setenv("KBP_TRIAGE_MIXED_IMAGE_COV", "0.1")
+    s = classify(_sig(char_count=500, has_native_text=True, image_count=2, image_coverage=0.24))
+    assert s.bucket is Bucket.LLM_NEEDED  # 낮춘 임계(0.1) 는 0.24 를 충족
+
+
+def test_diagram_curve_min_env_override(monkeypatch):
+    """curve=10 인 페이지는 기본 임계(30) 로는 미검출, KBP_TRIAGE_DIAGRAM_CURVE_MIN=5 로
+    낮추면 다이어그램으로 잡힌다."""
+    s1 = classify(_sig(char_count=500, has_native_text=True, curve_count=10))
+    assert not s1.is_diagram
+
+    monkeypatch.setenv("KBP_TRIAGE_DIAGRAM_CURVE_MIN", "5")
+    s2 = classify(_sig(char_count=500, has_native_text=True, curve_count=10))
+    assert s2.is_diagram and s2.bucket is Bucket.LLM_NEEDED
+
+
+def test_content_min_env_override(monkeypatch):
+    monkeypatch.setenv("KBP_TRIAGE_CONTENT_MIN", "10000")
+    # content_len=50000 은 기본 300 기준으론 OCR_NEEDED(test_vector_outlined_no_image_ocr),
+    # 임계를 10000 으로 올려도 여전히 초과라 동일 판정(경계 반대편 검증).
+    s = classify(_sig(char_count=0, has_native_text=False, image_count=0, content_len=5000))
+    assert s.bucket is Bucket.SKIP  # 5000 < 10000(상향된 임계) → SKIP
+
+
+def test_native_text_min_chars_env_override(monkeypatch):
+    """extract_signals() 의 has_native_text 판정 — classify() 가 아니라 fitz 페이지 필요.
+
+    글자수 15인 페이지는 기본 임계(20) 로 has_native_text=False, env 로 10 으로 낮추면 True.
+    """
+    import pymupdf
+    from parse_service.parsers.pdf.triage import extract_signals
+
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "0123456789ABCDE")  # 정확히 15자
+    try:
+        sig_default = extract_signals(page)
+        assert sig_default.char_count == 15
+        assert sig_default.has_native_text is False  # 15 <= 20(기본)
+
+        monkeypatch.setenv("KBP_TRIAGE_NATIVE_TEXT_MIN_CHARS", "10")
+        sig_override = extract_signals(page)
+        assert sig_override.has_native_text is True  # 15 > 10(낮춘 임계)
+    finally:
+        doc.close()
+
+
+# ── 가로형 페이지 → LLM_NEEDED(2026-08-06, "가로형이면 묻고 따질 것 없이 VL") ──────────────
+
+def test_extract_signals_derives_is_landscape():
+    """실제 fitz 페이지의 width>height 비교로 is_landscape 가 파생되는지(_sig() 직접 구성이
+    아니라 extract_signals() 자체를 거쳐야 검증되는 파생 로직)."""
+    import pymupdf
+    doc = pymupdf.open()
+    page = doc.new_page(width=800, height=600)
+    page.insert_text((50, 50), "가로형 슬라이드", fontsize=11)
+    try:
+        sig = extract_signals(page)
+        assert sig.is_landscape is True
+    finally:
+        doc.close()
+
+    # 세로형(기존 _synth_pdf 기본 width=600,height=800) 은 False 로 남아야 함(회귀 앵커).
+    portrait = _synth_pdf(text="세로형 문서")
+    assert _first_sig(portrait).is_landscape is False
+
+
+def test_landscape_scanned_page_is_llm_needed():
+    """가로형 + native text 없음(스캔 슬라이드) → LLM_NEEDED(OCR_NEEDED 아님)."""
+    s = classify(_sig(char_count=0, has_native_text=False, image_count=1,
+                      image_coverage=1.0, is_landscape=True))
+    assert s.bucket is Bucket.LLM_NEEDED
+
+
+def test_landscape_with_real_diagram_keeps_is_diagram_true():
+    """가로형 + native text 있음 + 진짜 diagram 신호(curve 多) → LLM_NEEDED 이고
+    is_diagram 은 True 로 보존돼야 한다(diagram 우선순위가 landscape 보다 높음 — v1 이
+    낸 3-렌즈 수렴 결함 재발 방지 앵커: diagram_pages 집계에서 빠지면 안 됨)."""
+    s = classify(_sig(char_count=500, has_native_text=True, curve_count=40,
+                      is_landscape=True))
+    assert s.bucket is Bucket.LLM_NEEDED
+    assert s.is_diagram is True
+
+
+def test_landscape_without_diagram_or_mixed_is_llm_needed_not_diagram():
+    """가로형 + native text 있음 + diagram/mixed 신호 둘 다 없음 → LLM_NEEDED(가로형
+    단독 사유), is_diagram 은 False."""
+    s = classify(_sig(char_count=500, has_native_text=True, word_count=80,
+                      is_landscape=True))
+    assert s.bucket is Bucket.LLM_NEEDED
+    assert s.is_diagram is False
+    assert "가로형" in s.reason
+
+
+def test_portrait_page_unaffected_by_landscape_rule():
+    """세로형(is_landscape=False) 페이지는 기존 판정 불변(회귀 앵커)."""
+    s = classify(_sig(char_count=500, has_native_text=True, word_count=80,
+                      is_landscape=False))
+    assert s.bucket is Bucket.TEXT_ONLY
+
+
+def test_landscape_to_llm_toggle_off(monkeypatch):
+    """KBP_TRIAGE_LANDSCAPE_TO_LLM=0 → 가로형이어도 기존 로직(디지털 텍스트면 TEXT_ONLY)
+    으로 정상 판정(끄기 스위치 확인)."""
+    monkeypatch.setenv("KBP_TRIAGE_LANDSCAPE_TO_LLM", "0")
+    s = classify(_sig(char_count=500, has_native_text=True, word_count=80,
+                      is_landscape=True))
+    assert s.bucket is Bucket.TEXT_ONLY

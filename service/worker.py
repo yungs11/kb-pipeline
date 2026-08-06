@@ -33,7 +33,8 @@ from datetime import datetime, timezone
 from service.jobs import blobs as blobs_mod
 from service.jobs import gc as gc_mod
 from service.jobs.repo import JobRepo, LeaseLost
-from service.jobs.runner import JobAborted, JobFailed, JobRetryable, JobRunner
+from service.jobs.runner import (JobAborted, JobFailed, JobRetryable, JobRunner,
+                                 is_domain_failure)
 from service.jobs.schema import ensure_schema
 
 log = logging.getLogger("kb_pipeline.service.worker")
@@ -212,6 +213,9 @@ class Worker:
         self._finish(job_id, attempt, "succeeded", result=result)
 
     def _finish(self, job_id, attempt, status, *, result=None, error=None) -> None:
+        # job 은 succeeded 지만 본문이 도메인 실패(parse-svc {"status":"failed"})면
+        # idem_key 를 비운다 — 안 그러면 명시적 키(시간창 없음)가 영구 캐싱된다(2026-08-06).
+        clear_idem = is_domain_failure(result)
         inline, ref = (None, None)
         if result is not None:
             try:
@@ -221,7 +225,7 @@ class Worker:
                 status, error, inline, ref = "failed", f"result store failed: {exc}", None, None
         self._safe(self.repo.complete, job_id, worker_id=self.worker_id,
                    attempt=attempt, status=status, result=inline,
-                   result_ref=ref, error=error)
+                   result_ref=ref, error=error, clear_idem=clear_idem)
         self._purge_legacy_inputs(job_id)
 
     def _purge_legacy_inputs(self, job_id) -> None:
