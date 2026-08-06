@@ -64,9 +64,12 @@ check_images() {
   command -v podman >/dev/null && ENGINE="${ENGINE:-podman}"
   [ -n "$ENGINE" ] || { echo "${RED}✗ docker/podman 둘 다 없음${RST}"; return 1; }
   local bad=0
+  local EXPECT_TAG="${EXPECT_TAG:-airgap}"
   for img in "${IMAGES[@]}"; do
-    # 태그 없이 이름만으로 조회(첫 매치)
-    local ref; ref="$($ENGINE images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -m1 -E "^${img}(:|$)" || true)"
+    # 번들 태그(기본 airgap)를 우선 매칭 — 개발기에 같은 이름의 :latest/:local 등이
+    # 같이 있으면 태그 무시 첫 매치가 엉뚱한(번들과 무관한) 이미지를 "확인됨"으로 오판정한다.
+    local ref; ref="$($ENGINE images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -m1 -E "^${img}:${EXPECT_TAG}\$" || true)"
+    [ -z "$ref" ] && ref="$($ENGINE images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -m1 -E "^${img}(:|$)" || true)"
     if [ -z "$ref" ]; then echo "  ${RED}✗ 없음: $img${RST}"; bad=1; continue; fi
     local a; a="$($ENGINE image inspect --format '{{.Architecture}}' "$ref" 2>/dev/null || echo '?')"
     if [ "$a" = "$ARCH_EXPECT" ]; then echo "  ${GRN}✓ $ref ($a)${RST}"
@@ -86,9 +89,20 @@ check_imports() {
   # kordoc(docx 폴백 레인은 2026-08-06 제거됐지만 엑셀 파서 백엔드로는 여전히 쓴다,
   # A6·Dockerfile.parse-svc 참고). 이미지에 바이너리가 빠진 채로 healthy 가 뜨는
   # 것을 배포 전에 잡는다.
+  # timeout(1) 은 macOS 기본 설치엔 없다(GNU coreutils 전용) — 검증을 macOS 개발기에서도
+  # 돌릴 수 있어야 하므로 gtimeout(brew coreutils) 폴백, 둘 다 없으면 타임아웃 없이 실행.
+  local TIMEOUT_BIN=""
+  command -v timeout >/dev/null && TIMEOUT_BIN=timeout
+  [ -z "$TIMEOUT_BIN" ] && command -v gtimeout >/dev/null && TIMEOUT_BIN=gtimeout
   local out
-  out="$(timeout "${IMPORTS_CHECK_TIMEOUT:-60}" "$ENGINE" run --rm --entrypoint sh "$ref" \
-    -c 'command -v kordoc && kordoc --version' 2>&1)"
+  if [ -n "$TIMEOUT_BIN" ]; then
+    out="$("$TIMEOUT_BIN" "${IMPORTS_CHECK_TIMEOUT:-60}" "$ENGINE" run --rm --entrypoint sh "$ref" \
+      -c 'command -v kordoc && kordoc --version' 2>&1)"
+  else
+    echo "  ${YEL}! timeout/gtimeout 없음 — 타임아웃 없이 실행${RST}"
+    out="$("$ENGINE" run --rm --entrypoint sh "$ref" \
+      -c 'command -v kordoc && kordoc --version' 2>&1)"
+  fi
   if [ $? -eq 0 ]; then
     echo "  ${GRN}✓ kordoc 설치 확인 ($ref)${RST}"
   else
