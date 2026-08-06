@@ -158,19 +158,35 @@ case "$worker_online" in
     FAIL=1 ;;
 esac
 
-# ── 5) MinIO 버킷 생성 (멱등) ─────────────────────────────────────────────────
+# ── 5) MinIO 버킷 생성 (멱등, 존재 검증) ──────────────────────────────────────
 log "MinIO 버킷 생성"
-BUCKET="$(grep -E '^MINIO_BUCKET=' "$BUNDLE_ROOT/.env" | cut -d= -f2 | tr -d '[:space:]')"
+# ★ grep 매치 0건(exit 1)이면 set -e 아래서 파이프 전체가 실패해 스크립트가 죽는다.
+#   `.env.airgap.example` 에 MINIO_BUCKET 키가 우연히 있어서 지금까지 안 터졌을 뿐이라
+#   여기서 `|| true` 로 방어한다(v3→v4, 실제 bash 재현으로 확인).
+BUCKET="$(grep -E '^MINIO_BUCKET=' "$BUNDLE_ROOT/.env" | cut -d= -f2 | tr -d '[:space:]')" || true
 BUCKET="${BUCKET:-document-parser}"
 # 같은 함정 — `grep -i minio` 는 다른 스택의 minio 를 집어 **남의 버킷**에 만든다.
 MC_CTR="$(ctr minio)"
-if [ -n "$MC_CTR" ]; then
-  podman exec "$MC_CTR" sh -c \
-    'mc alias set local http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null 2>&1 \
-     && mc mb -p local/'"$BUCKET"' 2>/dev/null; mc ls local/' \
-    && echo "  ✓ 버킷 '$BUCKET' 준비됨" || warn "버킷 생성 실패(파싱은 되나 페이지 이미지 업로드 skip)"
+if [ -z "$MC_CTR" ]; then
+  warn "minio 컨테이너를 찾지 못함 — 버킷 생성 건너뜀"
+  FAIL=1                                    # ★ die 아님 — 6번 요약까지 도달시킨다
 else
-  warn "minio 컨테이너를 찾지 못해 버킷 생성 건너뜀"
+  podman exec "$MC_CTR" sh -c \
+    'mc alias set local http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null 2>&1' \
+    || { warn "mc alias 설정 실패 — MinIO 컨테이너 상태 확인"; FAIL=1; }
+
+  # mc mb -p 는 이미 --ignore-existing 이라 존재하는 버킷에서 실패하지 않는다.
+  # || true 는 그 외의(권한·용량 등) 진짜 오류에 대한 방어적 안전망일 뿐이다.
+  podman exec "$MC_CTR" mc mb -p "local/$BUCKET" >/dev/null 2>&1 || true
+
+  # mc mb 의 성패가 아니라 mc stat 의 실제 존재 여부로 판정한다(전체 버킷 목록을
+  # 보는 `mc ls local/` 는 항상 비어있지 않아 실패를 삼켰다).
+  if podman exec "$MC_CTR" mc stat "local/$BUCKET" >/dev/null 2>&1; then
+    echo "  ✓ 버킷 '$BUCKET' 존재 확인"
+  else
+    warn "버킷 '$BUCKET' 생성 실패 — mc stat 로 존재 확인 안 됨. MinIO 자격증명·용량 확인"
+    FAIL=1                                  # ★ die 아님 — 아래 근거
+  fi
 fi
 
 # ── 6) 요약 ───────────────────────────────────────────────────────────────────

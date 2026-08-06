@@ -575,3 +575,61 @@ D10 의 claim-clear 설계(트리거마다 새 잡 + 상한 1 직렬화)와 겹�
 의존, (b) 검색이 큐에 잡을 넣고 그 회차는 커뮤니티 없이 답한다, (c) 현행 유지하고 D10 의
 직렬화 보장을 "엔드포인트 경유분에 한한다" 로 축소 서술. 검색 품질 결정이 섞여 있어
 사용자 판단이 필요하다.
+
+### D23. kb — `GateOptions` 폼→잡→워커 왕복 경로 제거 (2026-08-06)
+
+**지적**: `backend/app/core/pipeline.py` 의 `GateOptions`(`disabled_rules`·
+`severity_threshold`·`disable_llm`)는 D19 가 겨냥한 죽은 multipart `/v1/check` 카탈로그용
+운반체다. `ingest_document` 의 독스트링이 스스로 명시하듯 "**더 이상 사용하지 않는다**
+(파서-후단 엑셀 게이트로 전환, 13규칙 게이트 제거)" — 시그니처만 하위호환으로 남고 값은
+버려진다.
+
+**하지만 이건 죽은 주석이 아니라 끝까지 살아서 왕복하는 파이프다**(2026-08-06 확인):
+- `frontend/lib/api.ts` 업로드 함수 3곳이 `disabledRules`/`severityThreshold` 를 실제
+  멀티파트 필드(`disabled_rules`, `severity_threshold`)로 보낸다
+- `backend/app/routers/kb.py`(2곳)·`batches.py` 가 받아 `gate_options_payload` dict 로
+  잡 kwargs 에 싣는다
+- `backend/app/workers/tasks.py`(2곳)·`batch_worker.py` 가 풀어 `GateOptions.from_payload()`
+  로 복원해 `ingest_document(gate_options=...)` 에 넘긴다
+- `pipeline.py` 가 받아서 **버린다**
+- 테스트 5개 파일(`test_pipeline.py`·`test_pipeline_excel.py`·`test_parse_preview_routes.py`·
+  `test_worker_parse_preview.py`·`test_jobs_multifile.py`)이 이 왕복을 검증한다(일부는 현재
+  실패 중)
+
+프론트 룰 선택 패널이 이미 없어(`disabledRules={[]}` 고정) 사용자가 이 값을 실제로 바꿀
+방법이 없다 — 순수하게 죽은 왕복이다.
+
+**왜 지금 안 하나**: 13개 파일(frontend 1, backend 라우터/워커/파이프라인 6, 테스트 5)에
+걸친 삭제라 plan+검증이 필요한데, 지금 A2/A3 폐쇄망 준비 작업 중이라 별건으로 미룬다.
+
+**함께 정정할 것**: `GateOptions` 클래스 독스트링의 "룰이 정해지면 이 운반 경로(폼→잡
+payload→GateOptions)가 그대로 쓰일 자리다" 서술도 **틀렸다**(2026-08-06 정정) — 실제
+게이트는 파서-후단(파서 실행 → `gate_summary` 산출 → doc_guard 검증) 패턴이고, pdf/docx
+게이트가 켜지면 지금 엑셀과 같은 패턴(파서가 만든 산출물 기반 판정)을 따를 것으로 보인다.
+사용자가 사전에 선택하는 옵션 객체가 아니다. D19 가 향후 설계할 때 이 정정을 전제로 한다.
+
+**할 일**: D19(pdf/docx 게이트 룰 확정) 와 별개로, `GateOptions` 왕복 경로 자체를 삭제하는
+plan 을 잡는다 — 13개 파일 목록은 위에 있다. D19 의 향후 설계는 이 삭제와 무관하게 새
+경로(파서-후단)를 쓸 것이므로, 삭제가 D19 를 막지 않는다.
+
+### D24. MinIO 버킷 익명 읽기 정책 (2026-08-06)
+
+**지적**: `docs/airgap-known-issues.md` A3 절이 요구한 4건 중 "버킷 생성 실패를 실제로
+감지한다"는 plan `2026-08-06-airgap-a3-minio-bucket-plan.md`(v4, READY)로 구현 착수한다.
+그런데 같은 A3 절이 요구한 **익명 읽기 정책**(`/obj/*` same-origin 프록시가 인증 없이
+MinIO 를 직접 GET 하므로 필요)은 **같은 plan 에 함께 들어 있었다** — 원래 지적된 버그
+(버킷 존재 확인 실패)와는 무관한, 필자가 부가적으로 끼워넣은 범위였다.
+
+이 기능은 보안 민감(버킷 전체를 잘못 열면 신탁 문서 원본이 인증 없이 노출됨)이라 검증
+4라운드(v1→v4) 중 3라운드가 이 부분에서만 blocking 이 나왔다(캔드 정책이 버킷 전체를
+열던 것 → JSON 정책의 Deny prefix 가 리터럴이라 커스텀 배포에서 무력화 → 그 수정에 쓴
+grep 이 `set -e` 아래서 스크립트를 죽임). 최종적으로 v4 는 READY 검증을 통과했다 —
+**설계 자체는 완성돼 있다.**
+
+**왜 미룬다**: 사용자 결정(2026-08-06) — 원래 버그(버킷 존재 확인)만 먼저 좁게 구현하고,
+익명 정책은 필요성이 실제로 확인될 때 따로 착수한다.
+
+**할 일**: `docs/superpowers/specs/2026-08-06-airgap-a3-minio-bucket-plan.md` §2.1.1(익명
+정책, JSON Deny 정책 전문 포함)을 그대로 재사용한다 — 이미 READY 검증을 통과했으므로
+재검증 없이 구현만 하면 된다. 착수 조건: `/obj/*` 프록시로 인한 실제 403(챗 인용·썸네일
+깨짐)이 관측되거나, 폐쇄망 배포에서 요구될 때.

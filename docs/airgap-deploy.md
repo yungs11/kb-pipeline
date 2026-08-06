@@ -140,7 +140,7 @@ curl -fsS -H "X-Facade-Key: $KBP_FACADE_KEY" http://localhost:3000/jobs/workers
 | 이미지/PPTX 파싱 빈 결과 | `MODEL_API_URL/KEY` 미설정 | §3 VL-OCR 채우기 |
 | 검색은 되나 순위 이상 | 리랭커 주소 불통 → BM25 폴백 | `EDGEQUAKE_RERANK_BASE_URL`/`ADAPTIVE_CHUNK_RERANK_BASE_URL` 확인 |
 | `Bind for 0.0.0.0:9000 failed` | 호스트 포트 점유 | `docker-compose.airgap.yml` 의 해당 `ports:` 좌측(호스트) 숫자만 변경 |
-| MinIO 버킷 미생성(`NoSuchBucket`) | 최초 1회 생성 필요 | load-and-up.sh 가 자동 생성. 실패 시 §부록 수동 생성 |
+| MinIO 버킷 미생성(`NoSuchBucket`) | 최초 1회 생성 필요 | load-and-up.sh 가 `mc stat` 로 존재를 실제 검증하며 자동 생성. 실패 시 `FAIL` 로 표시되고 6번 요약에 원인이 남는다. §부록 B 로 수동 생성(재실행은 스크립트를 다시 돌리는 게 우선) |
 | SELinux 로 컨테이너가 볼륨 접근 거부 | bind mount 라벨 | 본 스택은 **named volume**(eq_pg_data/minio_data)만 써서 relabel 불필요. bind mount 를 추가한다면 `:Z` 를 붙일 것 |
 | load 한 이미지를 compose 가 못 찾고 pull 시도 | 태그 불일치 | `podman images | grep kbp-` 로 `:airgap` 태그 확인. compose `image:` 와 일치해야 함 |
 
@@ -183,10 +183,14 @@ podman-compose -f docker-compose.airgap.yml down -v     # 볼륨까지 삭제(�
 ## 부록 B. MinIO 버킷 수동 생성
 
 ```bash
-CTR=$(podman ps --format '{{.Names}}' | grep -i minio | head -1)
+CTR=$(podman ps -a --filter "label=com.docker.compose.service=minio" \
+                   --format '{{.Names}}' | head -1)
 podman exec "$CTR" sh -c \
   'mc alias set local http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" \
-   && mc mb -p local/document-parser && mc ls local/'
+   && mc mb -p local/document-parser && mc stat local/document-parser'
 ```
 > 호스트에서 바로 `mc mb` 하면 alias 자격증명이 비어 `Access Denied`. 반드시 컨테이너 내부
-> `$MINIO_ROOT_USER/$MINIO_ROOT_PASSWORD` 로 alias 를 잡는다.
+> `$MINIO_ROOT_USER/$MINIO_ROOT_PASSWORD` 로 alias 를 잡는다. 컨테이너 탐색은 본문
+> `load-and-up.sh` 와 같은 compose 라벨 기반이다(`grep -i minio` 는 다른 스택의 minio 를
+> 집을 수 있어 쓰지 않는다). 성공 여부는 `mc stat` 로 확인한다(`mc ls local/` 는 버킷 전체
+> 목록이라 특정 버킷의 존재를 보장하지 않는다).
