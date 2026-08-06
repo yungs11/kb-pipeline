@@ -373,3 +373,80 @@ c785964(배치 워커 도입) 시점부터의 동작이며 이번 변경과 무�
 거치지 않는다. pdf·docx 게이트를 켤 때 `/gate/check` 를 함께 설계한다.
 
 **불변식 유지**: 청크 KB당 단일우주 / 표 `<table>` 보존 / 단일 Postgres+RLS / BGE-M3 1024d.
+
+## 11. 적재 잡 취소 + 잡 경로 기본화 (2026-08-06)
+
+> 계기: kb 에 취소 기능이 아예 없었다. facade 는 `DELETE /jobs/{id}` 를 갖고 있었지만
+> 소비자가 없었고, kb 프론트의 `✕` 는 "잡 **기록** 삭제(데이터 보존)" 라 의미가 다르다.
+
+### 계약 — 축소범위 (a)
+
+| 상태 | 동작 |
+|---|---|
+| `queued` | **즉시 `canceled`**(+ 문서·배치아이템 전이) |
+| `running` | **진행 중인 그 단계는 완주**하고 다음 단계를 제출하지 않는다 |
+| `stage == 'insert'` | **취소 불가**(409) — edgequake 부분 적재 방지 |
+| provider ≠ `kb_pipeline` | **409** |
+
+`running` 인 parse·chunk 의 **즉시 중단은 비범위**다. `_run_parse`·`_run_chunk` 는 진입 시
+`_stage()` 를 한 번만 부르고 수백 초 다운스트림으로 들어가 취소를 다시 읽는 지점이 없다 —
+다운스트림 폴링 훅이 필요하고 그건 별개 작업이다. UI 문구가 이 계약을 그대로 말한다.
+
+### 설계 — 예외가 아니라 결과 상태
+
+`JobCanceled` 예외로 가려던 초기안은 두 번 막혔다. pipeline 체크포인트가 예외가 아니라
+**값을 반환**하고(`return _bad(...)`), `_fail` 을 건너뛰면 정리가 안 된다. 그런데 워커는
+이미 `result.status` 로 분기한다(`rejected`→`gate_failed`) — 거기에 `canceled` 를 더하면
+새 예외도 재-raise 도 광범위 except 우회도 필요 없다.
+
+**취소는 `delete_doc` 을 부르지 않는다.** 취소는 insert 제출 전에만 성립해 edgequake 에
+정리할 게 없는데, `_fail` 의 정리 대상은 `content_hash[:16]` 이고 중복 스킵 가드는
+**파일명 기준**이라, 같은 내용을 다른 이름으로 올려 취소하면 **이미 `ready` 로 적재된 첫
+문서를 지운다**(kb 행은 `ready` 로 남아 조용한 손실).
+
+취소 API 는 **단일 원자 UPDATE** 다(facade `JobRepo.cancel` 과 같은 형태) —
+`canceled`/`running`/0행 세 분기가 한 문장에서 갈린다. 읽고-판단-쓰기로 나누면 그 사이
+잡이 종결돼 취소가 유실되거나 **이미 끝난 잡을 뒤집는다**(중복 스킵 경로는 외부 호출 없이
+밀리초 안에 `succeeded` 를 쓴다).
+
+### 잡 경로가 기본이 됐다
+
+`kb_pipeline_use_jobs` 기본값 `False` → **`True`**(사용자 결정). 취소·유량제어·상태가 이
+경로에 달려 있다. 롤백 레버는 `KB_PIPELINE_USE_JOBS=false` 하나.
+
+### 검증 7라운드에서 뒤집힌 것들
+
+plan(`docs/superpowers/specs/2026-08-06-ingest-cancel-plan.md`)이 v1→v7 로 가며 **내 설계가
+여섯 번 뒤집혔다**. 기록해 둘 만한 것:
+
+- **provider 구멍** — 취소 UI/API 가 provider 를 안 봐서 kb_pipeline 이 아닌 KB 에서
+  버튼이 뜨고 플래그만 세워진 채 잡은 `succeeded` 로 끝나는 **조용한 무동작**
+- **`delete_doc` 파괴적 호출**(위)
+- **running 취소가 전부 409** — 조건부 UPDATE 를 `WHERE status='queued'` 로만 걸었더니
+  running 은 항상 0행인데 플래그는 이미 커밋돼, "취소 불가" 를 본 잡이 몇 분 뒤 취소됨
+- **배치 아이템을 무조건 `canceled`** 로 만들면 claim 이 영영 안 되어(claim 은 `queued` 만
+  본다) 잡이 **영구 `running`** 으로 고착. kb 에는 잡을 회수·종결하는 코드가 없다
+- **`should_cancel` 이 적재를 죽임** — 잡 기록 삭제 API 가 running 잡도 지우는데
+  `_get` 이 `ValueError` 를 던진다. fail-open 이어야 한다
+- **문서가 `ingesting` 고착** — 진입 가드가 잡만 종결하고 문서를 방치
+
+### 구현 중 드러난 것 둘 (검증이 못 잡은 것)
+
+- `_should_cancel` 을 `if _staged:` 안에 정의 → **dify 경로에서 `UnboundLocalError`**
+  (호출은 분기 밖이다). 회귀 6건으로 드러났다.
+- **raw SQL 의 UUID 바인딩이 sqlite 에서 0행** — `Uuid` 컬럼이 postgres 는 native,
+  sqlite 는 dash 없는 32자 hex 로 저장되는데 dash 포함 문자열을 넘겼다. postgres 에서만
+  우연히 맞고 **dev 에서는 취소가 통째로 무동작**이었다. Core `update()` 로 교체.
+  → **테스트를 붙이자마자 첫 실행에서 드러났다.** plan 검증 7라운드가 못 잡은 종류다.
+
+### 상태 어휘 `canceled` — 11곳
+
+하나라도 빠지면 배지가 영문 원문으로 뜨거나 **폴링이 안 멈춘다**. 잡 8곳(모델·스키마·
+types·JobList known/label/TERMINAL·JobProgressInline TERMINAL·BatchStatusPanel) +
+문서 3곳(DocumentList·DetailModal·상세 page) + `.badge.canceled` CSS.
+`batch_repository.TERMINAL_STATUSES` 에도 넣어야 배치가 `completed` 로 간다.
+`DocumentList` 의 기본 필터 `HIDDEN` 에도 — 안 넣으면 취소 문서가 "적재된 문서" 목록에
+계속 남는다.
+
+**커밋**: kb `4bd434e`(파이프라인·워커) → `7163ed6`(API·배치·기본화) → `4a2f6b4`(프론트)
+→ `1d7b909`(UUID 수정) → `c01d7ec`(테스트 23건). 634 passed, 회귀 0건.
