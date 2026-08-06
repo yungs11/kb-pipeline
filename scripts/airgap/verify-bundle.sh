@@ -17,9 +17,11 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RED=$'\033[1;31m'; GRN=$'\033[1;32m'; YEL=$'\033[1;33m'; RST=$'\033[0m'
 rc=0
 
+# 전부 로컬 태그(kbp-*:airgap)다 — 인프라 이미지도 build-bundle.sh 가 digest pull 후
+# 로컬 태그를 붙여 save 하기 때문(그래야 podman load 후에도 이름이 살아남는다).
 IMAGES=(
   kbp-edgequake kbp-parse-svc kbp-facade kbp-adaptive_chunk kbp-doc_guard kbp-edgequake_webui
-  ghcr.io/raphaelmansuy/edgequake-postgres minio/minio
+  kbp-postgres kbp-minio
 )
 # .env 에서 반드시 채워야 하는 시크릿/엔드포인트 키
 REQUIRED_ENV=(

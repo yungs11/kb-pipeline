@@ -36,14 +36,22 @@ BUILDS=(
   "kbp-doc_guard:${TAG}|-|../99.projects/shinhan_trust/doc_guard"
   "kbp-edgequake_webui:${TAG}|edgequake/edgequake_webui/Dockerfile|edgequake"
 )
-# pull 대상(업스트림 태그 유지 — compose 가 이 이름으로 참조)
-# edgequake-postgres 는 digest 고정(docker-compose.airgap.yml 과 동일 digest 유지 필수 —
-# :latest 로 pull 하면 번들 재빌드 시점마다 업스트림이 바뀔 수 있고, compose 는 digest 참조라
-# 태그로만 저장하면 로드 후 참조가 안 맞아 오프라인에서 재-pull 시도로 실패한다).
+# pull 대상: "업스트림참조|로컬태그"
+#
+# **pull 은 digest 로(재현성), save/compose 는 로컬 태그로** 한다. 두 가지를 분리하는 이유:
+#  1) digest 로 pull 해야 번들 재빌드 시점마다 업스트림이 바뀌는 드리프트를 막는다
+#     (실측: edgequake-postgres :latest 가 pg16→pg18 로 바뀌며 볼륨 마운트 규약이 깨졌다).
+#  2) 그런데 **digest 참조를 compose 에 그대로 쓰면 podman 배포가 깨진다** — `docker save`
+#     한 digest-only 이미지는 `podman load` 시 RepoTags/RepoDigests 가 **둘 다 비어**
+#     `<none>:<none>` 로 들어오고, compose 의 `image: ...@sha256:...` 는
+#     `image not known` 으로 실패해 그 서비스가 아예 안 뜬다(실측 2026-08-07,
+#     Fedora/podman 5.8.2. docker 는 관대해서 넘어가므로 docker 테스트로는 절대 안 잡힌다).
+#  3) 덤으로 unqualified name(`minio/minio`) 도 없앤다 — podman 은 이런 이름을
+#     unqualified-search-registries 로 해석하려 들어 폐쇄망에서 재-pull 시도 위험이 있다.
+#     로컬 태그(`kbp-*:airgap`)면 레지스트리 해석 자체가 일어나지 않는다.
 PULLS=(
-  "ghcr.io/raphaelmansuy/edgequake-postgres@sha256:61c4de562ea925c9ba7130c4e0e9649515eae7da9c0729207af8d0f79ba0471a"
-  "minio/minio:latest"
-  
+  "ghcr.io/raphaelmansuy/edgequake-postgres@sha256:61c4de562ea925c9ba7130c4e0e9649515eae7da9c0729207af8d0f79ba0471a|kbp-postgres:${TAG}"
+  "docker.io/minio/minio:latest|kbp-minio:${TAG}"
 )
 
 log() { printf '\n\033[1;36m▶ %s\033[0m\n' "$*"; }
@@ -66,10 +74,13 @@ if [ "$NO_BUILD" -eq 0 ]; then
     fi
   done
 
-  log "base 이미지 pull ($PLATFORM) — 3개 인프라 이미지"
-  for img in "${PULLS[@]}"; do
-    log "pull $img"
-    docker pull --platform "$PLATFORM" "$img"
+  log "base 이미지 pull ($PLATFORM) — 인프라 이미지 (digest pull → 로컬 태그 부여)"
+  for spec in "${PULLS[@]}"; do
+    IFS='|' read -r upstream localtag <<<"$spec"
+    log "pull $upstream  →  $localtag"
+    docker pull --platform "$PLATFORM" "$upstream"
+    # 로컬 태그를 붙여야 podman load 후에도 이름이 살아남는다(위 PULLS 주석 참고).
+    docker tag "$upstream" "$localtag"
   done
 fi
 
@@ -77,7 +88,8 @@ fi
 log "arch 검증 ($ARCH_SHORT)"
 ALL_IMAGES=()
 for spec in "${BUILDS[@]}"; do ALL_IMAGES+=("${spec%%|*}"); done
-ALL_IMAGES+=("${PULLS[@]}")
+# 인프라는 **로컬 태그**를 검증/저장 대상으로 쓴다(digest 참조가 아니라).
+for spec in "${PULLS[@]}"; do ALL_IMAGES+=("${spec##*|}"); done
 for img in "${ALL_IMAGES[@]}"; do
   got="$(docker image inspect --format '{{.Architecture}}' "$img" 2>/dev/null || echo MISSING)"
   if [ "$got" != "$ARCH_SHORT" ]; then
@@ -116,7 +128,11 @@ if [ "$OUT_BYTES" -gt 2147483648 ]; then
   log "2GB 초과 → ${SPLIT_SIZE} 단위 분할"
   rm -f "${OUT}".part-* 2>/dev/null || true
   split -b "$SPLIT_SIZE" "$OUT" "${OUT}.part-"
-  shasum -a 256 "${OUT}".part-* > "${OUT}.parts.sha256"
+  # basename 으로 기록한다 — 절대경로로 남기면 폐쇄망 서버에서 `sha256sum -c` 가
+  # "No such file or directory" 로 100% 실패한다(빌드머신 경로를 찾으므로).
+  # 실측 2026-08-07: RHEL+podman 시뮬레이션에서 docs/airgap-deploy.md §2 의 검증
+  # 명령이 이 이유로 깨지는 것을 확인. 단일 파일 .sha256 은 이미 basename 이었다.
+  ( cd "$DIST" && shasum -a 256 "$(basename "$OUT")".part-* > "$(basename "$OUT").parts.sha256" )
   if [ "$(cat "${OUT}".part-* | shasum -a 256 | awk '{print $1}')" = "$SHA" ]; then
     SPLIT_MSG="분할 $(ls "${OUT}".part-* | wc -l | tr -d ' ')개 (재결합 해시 검증 ✓): $(ls "${OUT}".part-* | xargs -n1 basename | tr '\n' ' ')"
     [ "${KEEP_WHOLE:-0}" = "1" ] || rm -f "$OUT"

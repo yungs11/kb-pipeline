@@ -76,14 +76,17 @@ x-facade-env: &facade_env
   KBP_JOB_ORPHAN_GRACE_SECONDS: ${KBP_JOB_ORPHAN_GRACE_SECONDS:-21600}
 
 services:
-  # ── 인프라 티어 (pull 이미지 — 업스트림 태그 유지) ──────────────────────────
+  # ── 인프라 티어 (pull 이미지 — build-bundle.sh 가 로컬 태그를 부여해 save 한다) ──
   postgres:
-    # digest 고정(2026-08-07 실측 pg18.4) — :latest 만 쓰면 번들 재빌드 시점마다 업스트림이
-    # 바뀔 수 있다. 실제로 dev 스택(오래전 pull, pg16.14)과 이번 번들(오늘 pull, pg18.4)이
-    # 이미 벌어져 있었고, pg18 은 볼륨 마운트 규약이 바뀌어 아래 옛 경로로 기동이 아예
-    # 안 됐다(에러: "in 18+ ... store database data in a format ... pg_ctlcluster").
-    # 업스트림 이미지를 의도적으로 올리려면 이 digest 를 재확인해서 갱신한다.
-    image: ghcr.io/raphaelmansuy/edgequake-postgres@sha256:61c4de562ea925c9ba7130c4e0e9649515eae7da9c0729207af8d0f79ba0471a
+    # **로컬 태그로 참조한다**(업스트림 digest 참조 아님). build-bundle.sh 는 재현성을 위해
+    # digest 로 pull 한 뒤 이 태그를 붙여 save 한다(그쪽 PULLS 주석에 근거 전체).
+    #  - digest 로 pull 하는 이유: :latest 드리프트 방지(실측 pg16.14 → pg18.4 로 바뀌며
+    #    볼륨 마운트 규약이 깨져 postgres 가 아예 기동 불가였다).
+    #  - 그런데 compose 가 digest 를 참조하면 **podman 배포가 깨진다**: docker save 한
+    #    digest-only 이미지는 podman load 시 `<none>:<none>` 로 들어와 `image not known`
+    #    (실측 2026-08-07, podman 5.8.2). docker 는 넘어가므로 docker 테스트로는 안 잡힌다.
+    # 업스트림을 의도적으로 올릴 땐 build-bundle.sh 의 digest 를 갱신한다(여기 말고).
+    image: kbp-postgres:airgap
     restart: unless-stopped
     environment:
       POSTGRES_USER: edgequake
@@ -101,7 +104,10 @@ services:
     networks: [kbp]
 
   minio:
-    image: minio/minio
+    # 로컬 태그(위 postgres 주석과 같은 이유 + unqualified name 회피 — podman 은
+    # `minio/minio` 를 unqualified-search-registries 로 해석하려 들어 폐쇄망에서
+    # 재-pull 을 시도할 위험이 있다. 로컬 태그면 레지스트리 해석이 아예 없다).
+    image: kbp-minio:airgap
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:

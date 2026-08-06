@@ -18,8 +18,8 @@
 
 | 티어 | 서비스 | 이미지 태그 | 호스트 포트 | 출처 |
 |------|--------|-------------|-------------|------|
-| 인프라 | postgres | ghcr.io/raphaelmansuy/edgequake-postgres:latest | 5433 | pull |
-| 인프라 | minio | minio/minio | 3003(콘솔) | pull |
+| 인프라 | postgres | kbp-postgres:airgap | 5433 | pull(digest 고정) → 로컬 태그 |
+| 인프라 | minio | kbp-minio:airgap | 3003(콘솔) | pull → 로컬 태그 |
 | 엔진 | edgequake | kbp-edgequake:airgap | 3001 | 빌드 |
 | 문서 | doc_guard | kbp-doc_guard:airgap | (내부) | 빌드 |
 | 문서 | adaptive_chunk | kbp-adaptive_chunk:airgap | 18060 | 빌드 |
@@ -30,6 +30,14 @@
 
 > 포트는 **호스트 발행 포트**다(컨테이너 내부 포트가 아니다). 권위 출처는
 > `docker-compose.airgap.yml` 이고, `docs/architecture-ports.md` 에 전체 표가 있다.
+
+> **인프라 이미지도 `kbp-*:airgap` 로컬 태그로 참조한다.** build-bundle.sh 가 재현성을
+> 위해 digest 로 pull 한 뒤 로컬 태그를 붙여 save 하기 때문이다. compose 가 업스트림
+> digest(`...@sha256:...`)를 직접 참조하면 **podman 배포가 깨진다** — `docker save` 된
+> digest-only 이미지가 `podman load` 시 `<none>:<none>` 로 들어와 `image not known` 이
+> 되어 해당 서비스가 아예 안 뜬다(실측 2026-08-07, podman 5.8.2. docker 는 관대해서
+> 넘어가므로 docker 로만 테스트하면 절대 안 잡힌다). 업스트림 버전을 올릴 땐
+> `scripts/airgap/build-bundle.sh` 의 `PULLS` digest 를 갱신한다.
 
 기동 순서(의존성): postgres → edgequake / (minio) / doc_guard / adaptive_chunk
 → parse-svc → facade / edgequake_webui.
