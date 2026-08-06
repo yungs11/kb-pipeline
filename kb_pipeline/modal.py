@@ -537,6 +537,14 @@ def _assemble(
         elif blocks[i].get("type") == "text":
             text = blocks[i].get("text", "")
             if text:
+                # text_level 은 blockify 가 만들 때부터 "#" 없이 순수 텍스트로만 저장한다
+                # (heading_open/close 를 지나며 마크다운 기호는 버려지고 레벨만 메타로 남음).
+                # 여기서 재부착하지 않으면 enriched_content 평문에는 계층 구조가 전혀
+                # 드러나지 않는다(text_level 은 내부 제목경계 탐지에만 쓰이고 출력엔 미반영
+                # 이었음 — 2026-08-06 확인, RAG 적재 시 장/절 계층을 잃는 문제).
+                level = blocks[i].get("text_level")
+                if level:
+                    text = "#" * min(int(level), 6) + " " + text
                 segments.append(text)
                 seg_page_idx.append(int(blocks[i].get("page_idx", 0) or 0))
         # 알 수 없는 타입: 무시(기존과 동일).
