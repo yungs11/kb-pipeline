@@ -108,8 +108,15 @@ services:
     environment:
       DATABASE_URL: postgres://edgequake:${POSTGRES_PASSWORD:-edgequake_secret}@postgres:5432/edgequake
       EDGEQUAKE_CHUNKER: passthrough
-      EDGEQUAKE_LLM_PROVIDER: openrouter
+      # 기본은 openrouter(불변, 현재 dev 동작 그대로) — EDGEQUAKE_LLM_PROVIDER=openai 로
+      # .env 에서 덮어쓰면 EDGEQUAKE_CHAT_* 별칭(provider_setup.rs apply_chat_env_aliases)
+      # 을 통해 KBP_OPENAI_*(폐쇄망 온프렘 LLM)로 리다이렉트된다. 폐쇄망 실측(2026-08-07):
+      # openrouter provider 의 from_env() 는 base_url 오버라이드가 없어 인터넷 없는
+      # 환경에서 100% 실패한다(docker-compose.airgap.yml 은 기본값 자체를 openai 로 바꿔둠).
+      EDGEQUAKE_LLM_PROVIDER: ${EDGEQUAKE_LLM_PROVIDER:-openrouter}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      EDGEQUAKE_CHAT_BASE_URL: ${KBP_OPENAI_BASE_URL:-}
+      EDGEQUAKE_CHAT_API_KEY: ${KBP_OPENAI_API_KEY:-}
       # HOST/PORT (not EDGEQUAKE_HOST/EDGEQUAKE_PORT) — edgequake main.rs reads these
       HOST: 0.0.0.0
       PORT: "8081"
@@ -232,6 +239,8 @@ services:
       KBP_TRIAGE_LOG_TABLE: ${KBP_TRIAGE_LOG_TABLE:-1}
       # PAGE_HYBRID 순서도 조항 오버라이드(선택, 빈 문자열이면 코드 기본값 사용).
       KBP_PAGE_HYBRID_DIAGRAM_RULE: ${KBP_PAGE_HYBRID_DIAGRAM_RULE:-}
+      # VL 계층구조(헤딩#/병합셀/도형 상하위) 규칙 오버라이드(선택, 빈 값이면 코드 기본값).
+      KBP_PROMPT_HIERARCHY_RULE: ${KBP_PROMPT_HIERARCHY_RULE:-}
       GUIDED_JSON_MODE: response_format   # OpenRouter/OpenAI 호환 (vLLM extra_body 아님)
       KBP_VL_MAX_CONCURRENT: "3"
       # ── VL 모델·토큰 (Plan A). 값 없이 키만 넣으면 빈 문자열이 "설정됨"이 되어

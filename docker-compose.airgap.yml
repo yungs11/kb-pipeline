@@ -125,7 +125,21 @@ services:
     environment:
       DATABASE_URL: postgres://edgequake:${POSTGRES_PASSWORD:-edgequake_secret}@postgres:5432/edgequake
       EDGEQUAKE_CHUNKER: passthrough
-      EDGEQUAKE_LLM_PROVIDER: openrouter
+      # LLM provider — 폐쇄망 실측(2026-08-07): edgequake 의 openrouter provider 는
+      # from_env() 가 OPENROUTER_API_KEY/MODEL/SITE_* 만 읽고 base_url 오버라이드가
+      # 전혀 없다(하드코딩 https://openrouter.ai) — 인터넷 없는 폐쇄망에서 문서 적재의
+      # 엔티티추출 단계가 100% 실패한다(Network error, 3회 재시도 후 문서 failed).
+      # 기본값을 openai 로 바꾸고 EDGEQUAKE_CHAT_* 별칭(코드: provider_setup.rs
+      # apply_chat_env_aliases, OPENAI_BASE_URL/API_KEY/EDGEQUAKE_LLM_MODEL 로 매핑)으로
+      # facade·parse-svc 가 이미 쓰는 온프렘 LLM(KBP_OPENAI_*)을 그대로 재사용한다
+      # (임베딩 쪽 EDGEQUAKE_EMBEDDING_PROVIDER=openai 패턴과 동일). 인터넷이 되는
+      # 개발환경 등에서 openrouter 를 계속 쓰려면 EDGEQUAKE_LLM_PROVIDER=openrouter 로
+      # .env 에서 덮어쓴다.
+      EDGEQUAKE_LLM_PROVIDER: ${EDGEQUAKE_LLM_PROVIDER:-openai}
+      EDGEQUAKE_CHAT_BASE_URL: ${KBP_OPENAI_BASE_URL}
+      EDGEQUAKE_CHAT_API_KEY: ${KBP_OPENAI_API_KEY}
+      EDGEQUAKE_CHAT_MODEL: ${KBP_LLM_MODEL:-qwen/qwen3.5-122b-a10b}
+      # openrouter 로 되돌릴 때 대비 — 위 openai 경로에서는 미사용.
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
       HOST: 0.0.0.0
       PORT: "8081"
@@ -234,6 +248,8 @@ services:
       KBP_TRIAGE_LOG_TABLE: ${KBP_TRIAGE_LOG_TABLE:-1}
       # PAGE_HYBRID 순서도 조항 오버라이드(선택, 빈 문자열이면 코드 기본값 사용).
       KBP_PAGE_HYBRID_DIAGRAM_RULE: ${KBP_PAGE_HYBRID_DIAGRAM_RULE:-}
+      # VL 계층구조(헤딩#/병합셀/도형 상하위) 규칙 오버라이드(선택, 빈 값이면 코드 기본값).
+      KBP_PROMPT_HIERARCHY_RULE: ${KBP_PROMPT_HIERARCHY_RULE:-}
       GUIDED_JSON_MODE: response_format
       KBP_VL_MAX_CONCURRENT: "3"
       # ── VL 모델·토큰 (Plan A). 온프렘 서빙 모델명을 .env 에 넣는다.
