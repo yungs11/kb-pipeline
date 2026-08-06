@@ -52,7 +52,72 @@ PROMPT_CLASSIFICATION = """
 ### IF YOU SEE NON-TABLE CONTENT (text, headers, lists):
 - category: MUST BE "figure"
 - content.html: MUST BE "" (empty string)
-- content.markdown: MUST contain text WITHOUT pipes |"""
+- content.markdown: MUST contain text WITHOUT pipes |
+- content.markdown: MUST mark every heading with markdown # syntax (see HIERARCHY RULE below)"""
+
+# 계층구조(상위-하위) 규칙 — 2026-08-07 실측 대응.
+#
+# 사용자 정의: "상위-하위 개념"은 세 가지를 모두 포함한다 —
+#   ① 문서 헤딩 계층(장/절/조), ② 표 병합셀의 상하위(그룹 헤더가 하위 컬럼을 거느림),
+#   ③ 도형/다이어그램 안의 상하위·단계 구조(ABL 온톨로지 아키텍처도 같은 포함/단계 관계).
+# 세 경우 다 "읽어서 문맥구조를 이해할 수 있어야" RAG 적재 가치가 있다.
+#
+# 실측 근거(①): 업무문서 9건(내규/소장/결재) 33개 헤딩 포함 페이지 **전수**에서 VL 이
+# 마크다운 헤딩 마커(#)를 단 한 번도 내지 않았다(ODL·GW 는 "# 자금세탁방지 업무규정",
+# "## 제1장 총칙" 을 정상 보존). 원인: 결정트리가 category 를 table|figure 로만 강제해
+# blockify 의 title/heading 분기(elements_to_blocks: category ∈ {title,heading} 일 때만
+# text_level 부여)가 도달 불가 + figure.markdown 안에서 # 를 쓰라는 지시가 예시로만 있고
+# 규칙으로 명시되지 않았다. 결과적으로 VL 경로에서는 hybrid_to_blocks 가 text_level 을
+# 만들 수 없어 enriched_content 에 장·절 계층이 통째로 사라진다(RAG 청킹 시 문맥구조 손실).
+# 스키마(table|figure)는 그대로 두고 markdown/html 내부 표현만 강제한다 — 계약 불변.
+#
+# **env 로 통째 교체 가능**(`KBP_PROMPT_HIERARCHY_RULE`) — 소스 수정 없이 튜닝한다.
+_DEFAULT_PROMPT_HIERARCHY = """
+## ⚠️ CRITICAL: HIERARCHY MUST SURVIVE (headings, merged cells, diagram structure)
+
+A reader must be able to reconstruct WHAT CONTAINS WHAT from your output.
+Flattening hierarchy into a plain sequence is a VIOLATION.
+
+### 1. DOCUMENT HEADINGS → markdown # syntax (inside content.markdown)
+- Document title (문서 제목, e.g. "자금세탁방지 업무규정")   → `# `   (H1)
+- Chapter (장, e.g. "제1장 총칙")                          → `## `  (H2)
+- Section (절/관, e.g. "제2절 고객확인")                    → `### ` (H3)
+- Article (조, e.g. "제7조(보고책임자의 역할)")              → `####` (H4)
+- Slide titles / boxed section labels                       → match visual rank
+
+A line is a heading if visually distinct — larger, bold, centered, or numbered
+as 장/절/조. Do NOT mark ordinary list items (1. 2. 3. / ① ② ③ / 가. 나. 다.)
+that are part of running text. Keep heading text EXACTLY as printed; only add #.
+
+✅ "markdown": "# 자금세탁방지 업무규정\\n\\n## 제1장 총칙\\n\\n#### 제1조(목적) ..."
+❌ "markdown": "자금세탁방지 업무규정\\n\\n제1장 총칙\\n\\n제1조(목적) ..."   ← hierarchy LOST
+
+### 2. MERGED TABLE CELLS → rowspan / colspan (inside content.html)
+When a header cell spans several columns/rows, it is the PARENT of those cells.
+Express it with colspan/rowspan — never repeat the parent label in each child
+cell, and never drop it.
+
+✅ <tr><th rowspan="2">구분</th><th colspan="3">2025년 실적</th></tr>
+   <tr><th>1분기</th><th>2분기</th><th>3분기</th></tr>
+❌ flattening two header rows into one, or splitting one logical table into
+   several tables so the group header loses its children.
+
+### 3. DIAGRAM / FIGURE STRUCTURE → state containment and sequence explicitly
+For architecture diagrams, ontology maps, org charts, layered/stacked figures:
+describe WHICH BOX CONTAINS WHICH, and WHICH STEP LEADS TO WHICH — using the
+labels exactly as printed. Nested boxes are parent→child; arrows are sequence;
+columns/lanes are the actor performing each step.
+
+✅ "markdown": "## 데이터 계층\\n- 원천 데이터: (하위) 계약DB, 고객DB, 청구DB\\n
+   - 적재 계층: (하위) ETL, 정제\\n\\n흐름: 원천 데이터 → 적재 계층 → 서비스 계층"
+❌ listing every box label as a flat bullet list with no containment or arrows.
+
+Never invent structure that is not visible in the image."""
+
+
+def _prompt_hierarchy() -> str:
+    """계층구조 규칙 — env 로 소스 수정 없이 교체 가능(호출 시점에 읽는다)."""
+    return os.environ.get("KBP_PROMPT_HIERARCHY_RULE") or _DEFAULT_PROMPT_HIERARCHY
 
 # 원문자 처리 규칙
 PROMPT_CIRCLED_CHARS = """
@@ -138,17 +203,19 @@ PROMPT_CORRECT_EXAMPLES = """
 }
 ```
 
-### ✅ CORRECT EXAMPLE 2 - Text:
+### ✅ CORRECT EXAMPLE 2 - Text with heading hierarchy:
 ```json
 {
   "category": "figure",
   "content": {
     "html": "",
-    "markdown": "# 제목\\n\\n본문 내용입니다.\\n- 항목 1\\n- 항목 2",
+    "markdown": "# 위임전결규정\\n\\n## 제2장 전결권자\\n\\n#### 제5조(전결의 원칙) 본문 내용입니다.\\n- 항목 1\\n- 항목 2",
     "text": ""
   }
 }
-```"""
+```
+Note the # prefixes: 문서제목=#, 장=##, 절=###, 조=####. Headings without #
+are a VIOLATION (document hierarchy is lost)."""
 
 # 원문자 처리 규칙 (축약 버전 — 소형 모델용)
 PROMPT_CIRCLED_CHARS_COMPACT = """
@@ -164,6 +231,9 @@ PROMPT_CHECKLIST = """
 Before outputting, verify:
 □ If category="table" → html has <table>, markdown=""
 □ If category="figure" → html="", markdown has text
+□ EVERY heading in markdown starts with # (문서제목=#, 장=##, 절=###, 조=####)
+□ Merged header cells use colspan/rowspan (parent→child kept, not flattened)
+□ Diagrams state containment (which box holds which) and sequence (arrows)
 □ NO pipe symbols | in any markdown field
 □ NO duplicate content
 □ ONLY ONE JSON object"""
@@ -343,6 +413,7 @@ def build_system_prompt(include_modules: Optional[List[str]] = None) -> str:
         include_modules = [
             "output_format",
             "classification",
+            "hierarchy",        # 2026-08-07: 계층(헤딩#/병합셀/도형 상하위) 강제
             "circled_chars",
             "wrong_examples",
             "correct_examples",
@@ -353,6 +424,8 @@ def build_system_prompt(include_modules: Optional[List[str]] = None) -> str:
     module_map = {
         "output_format": PROMPT_OUTPUT_FORMAT,
         "classification": PROMPT_CLASSIFICATION,
+        # env(KBP_PROMPT_HIERARCHY_RULE) 로 교체 가능 — 호출 시점에 읽는다.
+        "hierarchy": _prompt_hierarchy(),
         "circled_chars": PROMPT_CIRCLED_CHARS,
         "circled_chars_compact": PROMPT_CIRCLED_CHARS_COMPACT,
         "wrong_examples": PROMPT_WRONG_EXAMPLES,
@@ -393,6 +466,7 @@ Is it a table (grid with rows/columns)?
 └─ NO: category="figure"
     ├─ content.html = "" ← MUST BE EMPTY
     └─ content.markdown = "text content" ← NO PIPES |
+        └─ headings MUST start with # ← 문서제목=#, 장=##, 절=###, 조=####
 ```"""
         base += decision_tree
 
@@ -411,9 +485,16 @@ Is it a table (grid with rows/columns)?
    "category": "table",
    "html": ""
 
+4. ❌ WRONG - Heading without # (document hierarchy is LOST):
+   "markdown": "제1장 총칙\\n\\n제1조(목적) ..."
+   ✅ RIGHT: "markdown": "## 제1장 총칙\\n\\n#### 제1조(목적) ..."
+
 ## CORRECT OUTPUT:
 - Tables → category="table" + HTML only
 - Text → category="figure" + Markdown only
+- Headings → ALWAYS prefixed with # (문서제목=#, 장=##, 절=###, 조=####)
+- Merged header cells → colspan/rowspan (parent→child preserved)
+- Diagrams → state containment (which box holds which) + sequence (arrows)
 - NEVER mix formats
 - NEVER duplicate content
 - NO pipe symbols | anywhere
@@ -624,9 +705,16 @@ def get_default_prompts() -> Dict[str, str]:
 # 첫 문장에 명시하고, 화살표 연결은 그 다음이라는 순서로 강제한다.
 _DEFAULT_PAGE_HYBRID_DIAGRAM_RULE = """1. **순서도·다이어그램·아키텍처도**: 박스·도형 안에 적힌 라벨(단계명·항목명)은
    **이미지에 보이는 글자 그대로** 옮긴다 — "첫 번째 단계"/"단계1"처럼 일반화하거나 순서
-   번호로 바꾸지 않는다. 그 라벨들을 화살표(→)로 연결해 **논리 흐름을 서술**한다. 조건
-   분기(예/아니오, True/False)는 어느 라벨에서 어느 라벨로 가는지 명시한다. 스윔레인
-   (수행 주체)이 있으면 각 단계의 주체를 함께 적는다."""
+   번호로 바꾸지 않는다.
+   그 다음 **구조를 드러낸다** — 둘 다 필요하다:
+   - **상하위(포함) 관계**: 박스 안에 박스가 있거나, 계층/레이어/그룹으로 묶여 있으면
+     무엇이 무엇을 포함하는지 명시한다(들여쓰기 목록 또는 "A: (하위) B, C" 형식).
+     아키텍처도·온톨로지맵·조직도·레이어드 구성도가 여기 해당한다.
+   - **흐름(순서) 관계**: 화살표(→)로 연결해 논리 흐름을 서술한다. 조건 분기(예/아니오,
+     True/False)는 어느 라벨에서 어느 라벨로 가는지 명시한다. 스윔레인(수행 주체)이
+     있으면 각 단계의 주체를 함께 적는다.
+   라벨만 평평하게 나열하는 것은 **금지** — 읽는 사람이 원본 도형의 계층·순서를 복원할 수
+   있어야 한다."""
 
 
 def _page_hybrid_diagram_rule() -> str:
