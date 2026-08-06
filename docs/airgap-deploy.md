@@ -4,8 +4,13 @@
 바로 구동하는 절차. 온라인 개발기에서 amd64 이미지를 만들어 단일 번들로 옮긴다.
 
 - 단일 진실 출처: `docker-compose.airgap.yml` + `.env`(← `.env.airgap.example`) + `images/*.tar.gz`
-- 스크립트: `scripts/airgap/{build-bundle,load-and-up,verify-bundle}.sh`
+- 스크립트: `scripts/airgap/{build-bundle,load-and-up,verify-bundle,deploy-both}.sh`
 - 일반(온라인) docker 구동은 `docs/kbp-docker-startup.md` 참고. 본 문서는 **폐쇄망 전용**.
+
+> **kb(웹앱) 스택도 같이 올릴 거면 `scripts/airgap/deploy-both.sh` 를 쓴다** — kbp→kb
+> 순서·두 `.env` 사이 필수 일치값(`KBP_NETWORK`/`KBP_FACADE_KEY`)을 자동으로 맞춘다.
+> 이 문서는 kbp 단독 기준이고, kb 쪽 세부사항은 `knowledge_base/docs/airgap-deploy.md`.
+> 사용법은 §7 참고.
 
 ---
 
@@ -89,6 +94,7 @@ vi .env      # 【A. 온프렘 재설정 필수】 블록만 사내 주소/키�
 | 그룹 | 바꿀 키 | 사내 예시 | 안 바꾸면 |
 |------|---------|-----------|-----------|
 | LLM | `KBP_OPENAI_BASE_URL`, `ADAPTIVE_CHUNK_OPENROUTER_BASE_URL`, `*_LLM_MODEL`, `*_API_KEY` | `http://llm.corp:8000/v1` | 그래프추출·합성·청킹 실패 |
+| LLM(edgequake provider) | `EDGEQUAKE_LLM_PROVIDER` — 기본값 `openai-compatible`(건드릴 필요 없음) | — | `openrouter`로 바꾸면 인터넷 필요(하드코딩 openrouter.ai). `openai`로 바꾸면 COMPAT-GUARD가 비-`gpt-*` 모델명(예: `qwen/...`)을 감지해 `gpt-4.1-nano`+`api.openai.com`으로 조용히 되돌린다(실측, §5). 반드시 `openai-compatible` 유지 |
 | VL-OCR | `MODEL_API_URL`, `MODEL_API_KEY` | `http://vl.corp:8000/v1/chat/completions` | 이미지/PPTX 파싱 빈 결과 |
 | 임베딩 | `LITELLM_EMBEDDING_BASE_URL`, `ADAPTIVE_CHUNK_SCORING_EMBEDDING_BASE_URL`, `*_API_KEY`, `*_MODEL` | `http://embed.corp:8000/v1` | 적재/검색 임베딩 실패 |
 | 리랭커 | `EDGEQUAKE_RERANK_BASE_URL`(→ `/v1/rerank`), `ADAPTIVE_CHUNK_RERANK_BASE_URL`(→ `/v1`), `*_API_KEY`, `*_MODEL` | `http://rerank.corp:8000/...` | BM25 폴백(품질 저하, 비치명) |
@@ -141,6 +147,7 @@ curl -fsS -H "X-Facade-Key: $KBP_FACADE_KEY" http://localhost:3000/jobs/workers
 | 서비스가 뜨자마자 재시작 반복 | podman-compose 가 `depends_on: service_healthy` 를 안 기다려 상위 미준비 상태에서 기동 | 정상 — `restart: unless-stopped` 로 자가치유. load-and-up.sh 의 health 폴링이 최종 확인. 계속 실패면 `podman-compose logs <svc>` |
 | `up` 후 health TIMEOUT | 상위 서비스 unhealthy 또는 온프렘 엔드포인트 불통 | `podman-compose -f docker-compose.airgap.yml logs edgequake` 부터. 임베딩/LLM 주소 도달성(`.env`) 확인 |
 | edgequake `OPENROUTER_API_KEY is empty` (exit 101) | `.env` 빈 값 | §3 대로 키 채우기 |
+| 문서 적재는 진행되는데 매번 insert 단계에서 실패, edgequake 로그에 `error sending request for url (https://openrouter.ai/...)` 또는 `(https://api.openai.com/...)` | `EDGEQUAKE_LLM_PROVIDER` 가 `openrouter`거나(base_url 오버라이드 불가, 하드코딩) `openai`인데 모델명이 `gpt-*`가 아님(COMPAT-GUARD가 `api.openai.com`으로 되돌림) — 실측(2026-08-07) | `.env`에서 `EDGEQUAKE_LLM_PROVIDER=openai-compatible`(기본값)로 되돌리고 `OPENAI_COMPATIBLE_BASE_URL/API_KEY/MODEL`(=`KBP_OPENAI_*`)가 채워졌는지 확인 |
 | 이미지/PPTX 파싱 빈 결과 | `MODEL_API_URL/KEY` 미설정 | §3 VL-OCR 채우기 |
 | docx/hwp/ppt/html 파싱 실패(`enriched_content` 비어있음) | `KBP_FILECONVERT_URL` 미설정 또는 온프렘 변환 서버 불통(A6) — pdf·xlsx·이미지·txt 는 이 경로를 안 탄다 | `podman exec <parse-svc> curl -fsS "$KBP_FILECONVERT_URL"` 로 도달성 확인. facade 응답의 `detail` 필드에 실제 원인이 실려 온다(2026-08-06 이전엔 카테고리명만 있었다) |
 
@@ -212,3 +219,28 @@ podman exec "$CTR" sh -c \
 > `load-and-up.sh` 와 같은 compose 라벨 기반이다(`grep -i minio` 는 다른 스택의 minio 를
 > 집을 수 있어 쓰지 않는다). 성공 여부는 `mc stat` 로 확인한다(`mc ls local/` 는 버킷 전체
 > 목록이라 특정 버킷의 존재를 보장하지 않는다).
+
+---
+
+## 7. 두 스택(kbp + kb) 한 번에 배포 — `deploy-both.sh`
+
+kb(웹앱)까지 같이 올리는 게 목적이면 각자 `load-and-up.sh`를 순서 맞춰 두 번 돌리는
+대신 이 스크립트 하나로 끝낸다. 두 번들을 각각 압축 해제(§2~3)해서 같은 서버에
+디렉터리 두 개(`kbp/`, `kb/`)로 둔 다음, 각 디렉터리에서 `.env`(§3 표)를 채운 뒤:
+
+```bash
+cd kbp
+./scripts/airgap/deploy-both.sh ../kb
+```
+
+내부 동작: ① kbp 자체 `load-and-up.sh` 실행 → ② kbp 가 만든 실제 podman 네트워크
+이름 조회(`*_kbp` 패턴, 추측하지 않고 `podman network ls` 로 확인) → ③ `kb/.env` 의
+`KBP_NETWORK`/`KBP_FACADE_KEY` 를 그 값·kbp 와 동일 값으로 자동 동기화(수동 배포에서
+가장 자주 놓치는 지점 — 두 값이 안 맞으면 kb 가 네트워크를 못 찾거나 적재/검색이
+401/403 으로 막힌다) → ④ kb 자체 `load-and-up.sh` 실행 → ⑤ 두 스택 헬스체크 요약 출력.
+
+kb 쪽 나머지 필수값(`JWT_SECRET`/`CREDENTIAL_ENCRYPTION_KEY`/`SEED_ADMIN_PASSWORD`
+등, `KBP_NETWORK`/`KBP_FACADE_KEY` 제외)은 이 스크립트가 대신 채워주지 않는다 —
+`kb/.env` 를 미리 §3(이 리포 표) + `knowledge_base/docs/airgap-deploy.md` §3 대로
+채워둬야 한다. 실패 시 어느 단계인지 로그에 그대로 나오고, 각 리포 `load-and-up.sh`
+는 멱등이라 원인만 고치고 `deploy-both.sh` 를 다시 돌리면 된다.
