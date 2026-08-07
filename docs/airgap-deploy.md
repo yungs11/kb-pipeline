@@ -137,6 +137,26 @@ dnf install -y aardvark-dns      # netavark 인 경우
 > 직접 확인할 것. `load-and-up.sh` 는 기동 **전에** 임시 네트워크로 실제 이름 해석을
 > 시도하고, 실패하면 백엔드에 맞는 설치 명령을 안내하며 즉시 중단한다.
 
+### ⚠️ 같은 서버에서 dev 스택과 함께 쓸 때 — 프로젝트명 충돌
+
+`docker-compose.yml`(dev)과 `docker-compose.airgap.yml` 은 **둘 다 `name: kbp`** 다.
+compose 는 프로젝트명으로 컨테이너·볼륨을 식별하므로, 같은 머신에서 두 파일을 그냥 쓰면
+**나중에 띄운 쪽이 먼저 뜬 쪽의 컨테이너와 볼륨을 인수한다.**
+
+실측(2026-08-07): 개발기에서 airgap compose 를 그대로 올렸더니 dev 스택의 postgres 가
+airgap 이미지(pg18)로 교체됐고, 기존 볼륨(pg16 데이터)과 레이아웃이 안 맞아 기동 불가가 됐다.
+**데이터는 남아 있었지만 dev 스택이 통째로 내려갔다.**
+
+폐쇄망 운영 서버에는 dev 스택이 없으므로 문제되지 않는다. 다만 **검증 서버·개발기에서
+두 스택을 함께 돌린다면 반드시 프로젝트명을 분리**한다:
+
+```bash
+podman-compose -p kbp-airgap -f docker-compose.airgap.yml --env-file .env up -d
+# 또는 compose 파일 최상단의 `name: kbp` 를 다른 값으로 바꾼다
+```
+
+호스트 포트도 함께 겹치므로(5433·3000·3003·18081 …) `ports:` **좌측 숫자**도 바꿔야 한다.
+
 ---
 
 ## 4. [Phase B] `.env` 채우기 (가장 중요)
@@ -214,6 +234,9 @@ kb 쪽 나머지 값은 `knowledge_base/docs/airgap-deploy.md` 참고
 ---
 
 ## 7. 파싱 배치 전용 — `parse-only-up.sh`
+
+> 설치부터 API 사용법·배치 튜닝·트러블슈팅까지 전용 문서가 있다 →
+> **[`parse-only-guide.md`](parse-only-guide.md)**. 아래는 요약이다.
 
 청킹·적재·검색 없이 **대량 파싱만** 할 때. 9개 대신 **5개**만 띄운다.
 
