@@ -120,6 +120,11 @@ done
 
 # save + 번들 스테이징
 log "docker save → $IMAGES_TAR (gzip)"
+# ⚠️ 스테이징 디렉터리를 **매번 비운다**. 안 그러면 이전 실행의 이미지 tar 가 남아
+# 다음 번들에 함께 들어간다 — 실측 2026-08-07: --parse-only 번들에 직전 전체 스택
+# 이미지(2.8GB)가 딸려 들어가 1.9GB 여야 할 번들이 4.7GB(3분할)가 됐다.
+# 받는 쪽은 필요도 없는 이미지를 로드하게 되고 용량·시간이 그만큼 낭비된다.
+rm -rf "$BUNDLE"
 mkdir -p "$BUNDLE/images" "$BUNDLE/scripts/airgap" "$BUNDLE/docs"
 docker save "${ALL_IMAGES[@]}" -o "$IMAGES_TAR"
 gzip -f "$IMAGES_TAR"
@@ -141,12 +146,13 @@ tar czf "$OUT" -C "$BUNDLE" .
 SHA="$(shasum -a 256 "$OUT" | awk '{print $1}')"
 echo "$SHA  $(basename "$OUT")" > "${OUT}.sha256"
 
-# 2GB 초과 시 2GB 단위 분할(SPLIT_SIZE 로 조정). 전송매체 파일크기 한도 대응.
-SPLIT_SIZE="${SPLIT_SIZE:-2g}"
+# 분할은 **기본으로 하지 않는다**(단일 파일이 다루기 쉽다).
+# 전송매체에 파일 크기 한도가 있을 때만 `SPLIT_SIZE=2g` 처럼 명시해서 켠다.
+SPLIT_SIZE="${SPLIT_SIZE:-}"
 OUT_BYTES=$(wc -c < "$OUT")
-SPLIT_MSG="(분할 안 함 — 2GB 이하)"
-if [ "$OUT_BYTES" -gt 2147483648 ]; then
-  log "2GB 초과 → ${SPLIT_SIZE} 단위 분할"
+SPLIT_MSG="(분할 안 함 — 단일 파일)"
+if [ -n "$SPLIT_SIZE" ]; then
+  log "${SPLIT_SIZE} 단위 분할 (SPLIT_SIZE 지정됨)"
   rm -f "${OUT}".part-* 2>/dev/null || true
   split -b "$SPLIT_SIZE" "$OUT" "${OUT}.part-"
   # basename 으로 기록한다 — 절대경로로 남기면 폐쇄망 서버에서 `sha256sum -c` 가
