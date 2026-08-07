@@ -89,6 +89,34 @@ sha256sum -c kbp-airgap-bundle-amd64.tar.gz.sha256
 
 ---
 
+## 2.5 [Phase B] 서버 전제조건 — 컨테이너 이름 DNS (RHEL 8 계열 주의)
+
+이 스택은 **전부 컨테이너 이름으로** 서로를 찾는다(`facade:19000`, `parse-svc:19001`,
+`postgres:5432`, kb→`facade`). 이름 해석이 안 되면 컨테이너는 다 뜨는데 서로 통신만
+안 되고, 증상이 서비스마다 제각각(타임아웃/커넥션거부)이라 원인 파악이 오래 걸린다.
+
+이름 해석의 주체는 **네트워크 백엔드**에 따라 다르다:
+
+| 백엔드 | 이름 해석 담당 | 없을 때 |
+|---|---|---|
+| `cni` | `podman-plugins` 의 dnsname 플러그인 | 이름 해석 전면 실패 |
+| `netavark` | `aardvark-dns` | 이름 해석 전면 실패 |
+
+```bash
+podman info --format '{{.Host.NetworkBackend}}'   # cni / netavark 확인
+dnf install -y podman-plugins    # cni 인 경우
+dnf install -y aardvark-dns      # netavark 인 경우
+```
+
+> **RHEL 8.x(예: 8.10 + podman 4.9)는 백엔드가 `cni` 인 경우가 있다** — 업스트림 podman
+> 컨테이너 이미지는 같은 4.9 라도 netavark 가 기본이라 개발기 테스트로는 이 차이가 드러나지
+> 않는다. 배포 대상에서 위 명령으로 **직접 확인**할 것.
+>
+> `load-and-up.sh` 는 기동 **전에** 임시 네트워크로 실제 이름 해석을 한 번 시도해보고,
+> 실패하면 백엔드에 맞는 설치 명령을 안내하며 즉시 중단한다(2026-08-07 추가).
+
+---
+
 ## 3. [Phase B] 폐쇄망 서버 — .env 채우기 (가장 중요)
 
 ```bash
@@ -171,6 +199,8 @@ curl -fsS -H "X-Facade-Key: $KBP_FACADE_KEY" http://localhost:3000/jobs/workers
 
 구 kordoc docx 폴백 레인은 제거됐다(장·조 계층 인식 실패, `parse_service/router.py` 주석
 참고). kordoc 은 **엑셀 파서의 별도 백엔드**로만 남아 있다(다른 관심사).
+| 컨테이너는 다 떴는데 서로 통신 불가(타임아웃/커넥션거부가 서비스마다 제각각) | 컨테이너 이름 DNS 미동작 — 백엔드가 cni 인데 dnsname 플러그인이 없거나, netavark 인데 aardvark-dns 가 없음. RHEL 8 계열에서 특히 주의(§2.5) | `podman info --format '{{.Host.NetworkBackend}}'` 확인 후 `dnf install -y podman-plugins`(cni) 또는 `aardvark-dns`(netavark). load-and-up.sh 가 기동 전에 이걸 검사해 미리 막는다 |
+| 적재가 간헐적으로 실패(`chunk 실패: RemoteProtocolError('Server disconnected...')` / `insert 실패: ReadError('Connection reset by peer')`) — 재시도하면 될 때도 있음 | 폴링 주기(3s) > 폴링 대상의 gunicorn keep-alive(2s) 경합. 잡 자체는 succeeded 인데 폴링 연결이 끊겨 적재가 실패 처리됐다(2026-08-07 수정 전) | 수정본에서는 폴링 클라이언트가 keep-alive 를 쓰지 않고 전송계층 재시도도 한다(`service/http_retry.py`). 그래도 나면 대상 서비스(adaptive_chunk/edgequake) 가 실제로 죽는 것이니 그쪽 로그 확인 |
 | 검색은 되나 순위 이상 | 리랭커 주소 불통 → BM25 폴백 | `EDGEQUAKE_RERANK_BASE_URL`/`ADAPTIVE_CHUNK_RERANK_BASE_URL` 확인 |
 | `Bind for 0.0.0.0:9000 failed` | 호스트 포트 점유 | `docker-compose.airgap.yml` 의 해당 `ports:` 좌측(호스트) 숫자만 변경 |
 | MinIO 버킷 미생성(`NoSuchBucket`) | 최초 1회 생성 필요 | load-and-up.sh 가 `mc stat` 로 존재를 실제 검증하며 자동 생성. 실패 시 `FAIL` 로 표시되고 6번 요약에 원인이 남는다. §부록 B 로 수동 생성(재실행은 스크립트를 다시 돌리는 게 우선) |
