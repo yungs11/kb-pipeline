@@ -111,6 +111,7 @@ cp .env.airgap.example                  "$BUNDLE/"
 cp scripts/airgap/load-and-up.sh        "$BUNDLE/scripts/airgap/"
 cp scripts/airgap/verify-bundle.sh      "$BUNDLE/scripts/airgap/"
 cp scripts/airgap/deploy-both.sh        "$BUNDLE/scripts/airgap/"
+cp scripts/airgap/parse-only-up.sh      "$BUNDLE/scripts/airgap/"
 cp docs/airgap-deploy.md                "$BUNDLE/docs/" 2>/dev/null || true
 chmod +x "$BUNDLE"/scripts/airgap/*.sh
 
