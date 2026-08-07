@@ -56,6 +56,41 @@ log ".env 필수키 검증"
 bash "$BUNDLE_ROOT/scripts/airgap/verify-bundle.sh" --env "$BUNDLE_ROOT/.env" \
   || die ".env 검증 실패 — 위 항목을 채우고 다시 실행하세요."
 
+# ── 2.5) 컨테이너 이름 DNS 사전 점검 ──────────────────────────────────────────
+# 이 스택은 **전부 컨테이너 이름으로** 서로를 찾는다(facade→parse-svc:19001,
+# edgequake→postgres:5432, kb→facade:19000 …). 이름 해석이 안 되면 모든 서비스가
+# "붙었는데 통신 불가" 상태가 되고, 증상이 서비스마다 제각각(타임아웃/커넥션거부)이라
+# 원인 파악이 매우 오래 걸린다. 그래서 **띄우기 전에** 실제로 한 번 해석해 본다.
+#
+# 특히 RHEL 8 계열은 네트워크 백엔드가 CNI 인 경우가 있고, CNI 에서 이름 해석은 별도
+# 패키지(`podman-plugins` 의 dnsname)에 의존한다 — 그게 없으면 여기서 잡힌다.
+# netavark(RHEL 9 계열 기본)면 aardvark-dns 가 담당한다.
+log "컨테이너 이름 DNS 사전 점검 (backend=$(podman info --format '{{.Host.NetworkBackend}}' 2>/dev/null || echo unknown))"
+DNSNET="kbp-dnscheck-$$"
+DNSPROBE_IMG="$(podman images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -m1 -E '^(localhost/)?kbp-facade:' || true)"
+if [ -z "$DNSPROBE_IMG" ]; then
+  warn "kbp-facade 이미지를 못 찾아 DNS 사전점검을 건너뜁니다(이미지 로드 확인 필요)."
+else
+  podman network create "$DNSNET" >/dev/null 2>&1 || true
+  podman rm -f kbp-dnsprobe-a >/dev/null 2>&1 || true
+  podman run -d --name kbp-dnsprobe-a --network "$DNSNET" \
+    --entrypoint sh "$DNSPROBE_IMG" -c 'sleep 60' >/dev/null 2>&1 || true
+  if podman run --rm --network "$DNSNET" --entrypoint sh "$DNSPROBE_IMG" \
+       -c 'getent hosts kbp-dnsprobe-a >/dev/null 2>&1 || python3 -c "import socket,sys; sys.exit(0 if socket.gethostbyname(\"kbp-dnsprobe-a\") else 1)"' \
+       >/dev/null 2>&1; then
+    echo "  ✓ 컨테이너 이름 DNS 정상"
+  else
+    podman rm -f kbp-dnsprobe-a >/dev/null 2>&1 || true
+    podman network rm "$DNSNET" >/dev/null 2>&1 || true
+    die "컨테이너 이름 DNS 해석 실패 — 이대로 기동하면 모든 서비스가 서로를 못 찾습니다.
+     백엔드가 CNI 면 dnsname 플러그인이 필요합니다:  dnf install -y podman-plugins  (설치 후 재시도)
+     netavark 면 aardvark-dns 를 확인하세요:        dnf install -y aardvark-dns
+     현재 백엔드: $(podman info --format '{{.Host.NetworkBackend}}' 2>/dev/null || echo unknown)"
+  fi
+  podman rm -f kbp-dnsprobe-a >/dev/null 2>&1 || true
+  podman network rm "$DNSNET" >/dev/null 2>&1 || true
+fi
+
 # ── 3) 기동 ───────────────────────────────────────────────────────────────────
 log "compose up -d  (${COMPOSE[*]})"
 "${COMPOSE[@]}" --env-file "$BUNDLE_ROOT/.env" up -d

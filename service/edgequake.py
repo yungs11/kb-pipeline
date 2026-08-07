@@ -30,6 +30,8 @@ import time
 
 import httpx
 
+from service.http_retry import get_with_retry, polling_client
+
 _TENANT_ID = "00000000-0000-0000-0000-000000000002"
 
 #: Passthrough chunk-boundary separator (U+001E RECORD SEPARATOR). The facade joins
@@ -49,7 +51,9 @@ def _strip_modal(s: str) -> str:
 class EdgequakeClient:
     def __init__(self, base_url: str, timeout: float = 600.0):
         self.base = base_url.rstrip("/")
-        self.http = httpx.Client(timeout=timeout)
+        # keep-alive 비활성(service/http_retry.polling_client) — 폴링 주기가 서버의
+        # keep-alive 보다 길어 죽은 연결을 재사용하면 ReadError 로 적재가 실패한다(실측).
+        self.http = polling_client(timeout)
 
     def _headers(self, workspace_id: str | None = None) -> dict:
         h = {"X-Tenant-ID": _TENANT_ID}
@@ -315,7 +319,11 @@ class EdgequakeClient:
         deadline = time.monotonic() + poll_timeout
         last_status = "pending"
         while True:
-            t = self.http.get(url, headers=headers)
+            # 전송 계층 재시도(service/http_retry.py) — poll_interval 이 edgequake 쪽
+            # keep-alive 보다 길어 풀링된 연결이 닫히는 순간 재사용하면 ReadError/
+            # RemoteProtocolError 가 난다. 실측: "insert 실패: ReadError(Connection reset
+            # by peer)" 로 적재가 통째로 실패했다(잡 자체는 진행 중이었다).
+            t = get_with_retry(self.http, url, headers=headers)
             if t.status_code == 404 or t.status_code >= 500:
                 # not visible yet / pool warming — retry until deadline.
                 if time.monotonic() >= deadline:

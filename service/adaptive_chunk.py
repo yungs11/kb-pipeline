@@ -29,6 +29,8 @@ import time
 
 import httpx
 
+from service.http_retry import get_with_retry, polling_client
+
 #: Modal markers (U+3008/U+3009) passed to adaptive_chunk as atomic regions. JSON
 #: cannot carry tuples, so each pair is a 2-element list ``[open, close]``.
 MODAL_ATOMIC_MARKERS = [["〈MODAL", "〈/MODAL〉"]]
@@ -42,7 +44,9 @@ class AdaptiveChunkClient:
     def __init__(self, base_url: str, timeout: float = 600.0,
                  poll_timeout: float = 3600.0, poll_interval: float = 3.0):
         self.base = base_url.rstrip("/")
-        self.http = httpx.Client(timeout=timeout)
+        # keep-alive 비활성(service/http_retry.polling_client) — 3초 폴링이 서버의
+        # 2초 keep-alive 보다 길어 죽은 연결을 재사용하다 적재가 통째로 실패했다(실측).
+        self.http = polling_client(timeout)
         self.poll_timeout = poll_timeout
         self.poll_interval = poll_interval
 
@@ -118,7 +122,10 @@ class AdaptiveChunkClient:
         # 2) poll until a terminal job state.
         deadline = time.monotonic() + self.poll_timeout
         while True:
-            t = self.http.get(f"{self.base}/chunk/jobs/{job_id}")
+            # 전송 계층 재시도 — poll_interval(3s) > gunicorn keep-alive(2s) 라
+            # 풀링된 연결이 서버에서 닫히는 순간과 재사용이 겹치면 RemoteProtocolError 가
+            # 난다. 재시도가 없으면 잡이 succeeded 인데도 적재가 실패한다(service/http_retry.py).
+            t = get_with_retry(self.http, f"{self.base}/chunk/jobs/{job_id}")
             t.raise_for_status()
             tj = t.json() or {}
             status = (tj.get("status") or "").lower()
