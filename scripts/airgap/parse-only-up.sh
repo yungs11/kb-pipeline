@@ -144,7 +144,13 @@ fi
 # ── 6) facade-worker 등록 확인 (가장 흔한 함정) ───────────────────────────────
 log "facade-worker 등록 확인"
 KEY="$(grep -E '^KBP_FACADE_KEY=' "$BUNDLE_ROOT/.env" | cut -d= -f2- | tr -d '[:space:]')" || true
-if out="$(curl -fsS -H "X-Facade-Key: ${KEY}" http://localhost:3000/jobs/workers 2>/dev/null)"; then
+# 호스트 포트를 하드코딩하지 않는다 — compose 의 ports 매핑을 실제로 조회해서 쓴다.
+# (실측 2026-08-07: 포트 충돌을 피하려 3000→25000 으로 바꿨더니 이 검사만 실패해
+#  worker 가 정상인데도 "조회 실패" 오탐이 났다. 실배포에서도 포트를 바꾸면 같은 일이 난다.)
+FPORT="$("$ENGINE" port "$("$ENGINE" ps --filter 'label=com.docker.compose.service=facade' --format '{{.Names}}' | head -1)" 19000 2>/dev/null | head -1 | sed 's/.*://')" || true
+FPORT="${FPORT:-3000}"
+echo "  facade 호스트 포트: $FPORT"
+if out="$(curl -fsS -H "X-Facade-Key: ${KEY}" "http://localhost:${FPORT}/jobs/workers" 2>/dev/null)"; then
   echo "  $out"
   case "$out" in
     *'"online":true'*|*'"online": true'*) echo "  ✓ worker 온라인" ;;
@@ -161,9 +167,9 @@ cat <<EOF
 
 파싱 배치 전용 구성(5개)으로 기동했습니다.
   잡 제출:   curl -sS -H "X-Facade-Key: \$KBP_FACADE_KEY" -F file=@문서.pdf -F filename=문서.pdf \\
-               http://localhost:3000/parse
+               http://localhost:${FPORT}/parse
   ※ 응답은 파싱 결과(동기 대기) 또는 잡 참조다 — facade 계약은 docs/facade-api.md 참고.
-  parse-svc 직접 호출(잡 큐 없이 동기 파싱)이 필요하면 http://localhost:18081/parse 도 열려 있다.
+  parse-svc 직접 호출(잡 큐 없이 동기 파싱)도 가능하다(compose 의 parse-svc ports 참고).
 
 빠진 서비스: edgequake / adaptive_chunk / doc_guard / edgequake_webui
   → 청킹(/chunk)·적재(/insert)·검색(/search)·엑셀게이트(/gate)는 이 구성에서 동작하지 않는다.
