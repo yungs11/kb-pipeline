@@ -31,7 +31,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$HERE/.." 2>/dev/null || cd "$HERE"
 BUNDLE_ROOT="$(pwd)"
 COMPOSE_FILE="$BUNDLE_ROOT/docker-compose.airgap.yml"
-IMAGES_GLOB="$BUNDLE_ROOT/images"/kbp-images-*.tar.gz
+#: 전용 번들(kbp-parse-images-*) 과 전체 번들(kbp-images-*) 둘 다 받는다.
+IMAGES_GLOB="$BUNDLE_ROOT/images"/kbp-*images-*.tar.gz
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-300}"
 
 #: 파싱 배치에 필요한 서비스만. 순서는 의존 순(--no-deps 라 우리가 직접 지킨다).
@@ -41,21 +42,51 @@ log()  { printf '\n\033[1;36m▶ %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m! %s\033[0m\n' "$*"; }
 die()  { printf '\033[1;31m✗ %s\033[0m\n' "$*"; exit 1; }
 
-command -v podman >/dev/null || die "podman 이 없습니다."
-if command -v podman-compose >/dev/null; then
-  COMPOSE=(podman-compose -f "$COMPOSE_FILE")
-elif podman compose version >/dev/null 2>&1; then
-  COMPOSE=(podman compose -f "$COMPOSE_FILE")
-else
-  die "podman-compose(또는 'podman compose') 가 없습니다: dnf install podman-compose"
+# ── 엔진 자동탐지 (docker / podman 양쪽 지원) ────────────────────────────────
+# 파싱 배치 배포는 폐쇄망 RHEL+podman 일 수도, Windows/Linux + Docker 일 수도 있다.
+# 엔진과 compose 프론트엔드를 따로 탐지한다(docker 는 `docker compose`, podman 은
+# `podman-compose` 또는 `podman compose`). ENGINE 을 직접 지정하려면 KBP_ENGINE=docker.
+ENGINE="${KBP_ENGINE:-}"
+if [ -z "$ENGINE" ]; then
+  command -v docker >/dev/null 2>&1 && ENGINE=docker
+  [ -z "$ENGINE" ] && command -v podman >/dev/null 2>&1 && ENGINE=podman
 fi
+[ -n "$ENGINE" ] || die "docker/podman 둘 다 없습니다."
+
+if [ "$ENGINE" = "docker" ]; then
+  if docker compose version >/dev/null 2>&1; then
+    COMPOSE=(docker compose -f "$COMPOSE_FILE")
+  elif command -v docker-compose >/dev/null 2>&1; then
+    COMPOSE=(docker-compose -f "$COMPOSE_FILE")
+  else
+    die "docker compose 가 없습니다(Docker Desktop 또는 docker-compose-plugin 필요)."
+  fi
+else
+  if command -v podman-compose >/dev/null 2>&1; then
+    COMPOSE=(podman-compose -f "$COMPOSE_FILE")
+  elif podman compose version >/dev/null 2>&1; then
+    COMPOSE=(podman compose -f "$COMPOSE_FILE")
+  else
+    die "podman-compose(또는 'podman compose') 가 없습니다: dnf install podman-compose"
+  fi
+fi
+echo "engine=$ENGINE  compose=${COMPOSE[0]} ${COMPOSE[1]:-}"
 
 # ── 1) 이미지 로드 ────────────────────────────────────────────────────────────
-log "podman load — 이미지 로드"
+log "$ENGINE load — 이미지 로드"
 shopt -s nullglob
 tars=( $IMAGES_GLOB )
-[ ${#tars[@]} -gt 0 ] || die "이미지 tar 를 찾지 못함: $IMAGES_GLOB"
-for t in "${tars[@]}"; do echo "  load $t"; podman load -i "$t"; done
+if [ ${#tars[@]} -eq 0 ]; then
+  # 인터넷이 되는 환경에서는 이미지를 이미 갖고 있을 수 있다(빌드/pull 済). 번들이 없다고
+  # 실패시키지 않고, 필요한 이미지가 실제로 있는지로 판정한다.
+  missing=0
+  for img in kbp-parse-svc kbp-facade kbp-postgres kbp-minio; do
+    "$ENGINE" image inspect "${img}:airgap" >/dev/null 2>&1 || { echo "  ✗ 없음: ${img}:airgap"; missing=1; }
+  done
+  [ "$missing" -eq 0 ] || die "이미지 tar 도 없고 필요한 이미지도 없습니다($IMAGES_GLOB)."
+  echo "  번들 tar 없음 — 로컬에 이미 있는 이미지를 사용합니다."
+fi
+for t in "${tars[@]}"; do echo "  load $t"; "$ENGINE" load -i "$t"; done
 
 # ── 2) .env 확인 ──────────────────────────────────────────────────────────────
 [ -f "$BUNDLE_ROOT/.env" ] || {
@@ -82,10 +113,10 @@ deadline=$(( $(date +%s) + HEALTH_TIMEOUT ))
 for svc in postgres minio parse-svc facade; do
   printf '  %-12s ' "$svc"
   while :; do
-    cid="$(podman ps -a --filter "label=com.docker.compose.service=${svc}" --format '{{.ID}}' | head -1)"
-    st="$(podman inspect "$cid" --format '{{.State.Health.Status}}' 2>/dev/null || echo unknown)"
+    cid="$("$ENGINE" ps -a --filter "label=com.docker.compose.service=${svc}" --format '{{.ID}}' | head -1)"
+    st="$("$ENGINE" inspect "$cid" --format '{{.State.Health.Status}}' 2>/dev/null || echo unknown)"
     [ "$st" = "healthy" ] && { echo "✓ healthy"; break; }
-    [ "$(date +%s)" -ge "$deadline" ] && { echo "✗ TIMEOUT(last=$st)"; die "기동 실패 — podman logs 로 확인"; }
+    [ "$(date +%s)" -ge "$deadline" ] && { echo "✗ TIMEOUT(last=$st)"; die "기동 실패 — $ENGINE logs 로 확인"; }
     sleep 3
   done
 done
@@ -94,16 +125,16 @@ done
 log "MinIO 버킷 생성/확인"
 BUCKET="$(grep -E '^MINIO_BUCKET=' "$BUNDLE_ROOT/.env" | cut -d= -f2 | tr -d '[:space:]')" || true
 BUCKET="${BUCKET:-document-parser}"
-MC_CTR="$(podman ps -a --filter 'label=com.docker.compose.service=minio' --format '{{.Names}}' | head -1)"
+MC_CTR="$("$ENGINE" ps -a --filter 'label=com.docker.compose.service=minio' --format '{{.Names}}' | head -1)"
 FAIL=0
 if [ -z "$MC_CTR" ]; then
   warn "minio 컨테이너를 찾지 못함 — 버킷 생성 생략"; FAIL=1
 else
-  podman exec "$MC_CTR" sh -c \
+  "$ENGINE" exec "$MC_CTR" sh -c \
     'mc alias set local http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null 2>&1' \
     || { warn "mc alias 설정 실패"; FAIL=1; }
-  podman exec "$MC_CTR" mc mb -p "local/$BUCKET" >/dev/null 2>&1 || true
-  if podman exec "$MC_CTR" mc stat "local/$BUCKET" >/dev/null 2>&1; then
+  "$ENGINE" exec "$MC_CTR" mc mb -p "local/$BUCKET" >/dev/null 2>&1 || true
+  if "$ENGINE" exec "$MC_CTR" mc stat "local/$BUCKET" >/dev/null 2>&1; then
     echo "  ✓ 버킷 '$BUCKET' 확인"
   else
     warn "버킷 '$BUCKET' 생성 실패 — 이 상태로는 /parse 접수가 NoSuchBucket 으로 500 이 된다."; FAIL=1
@@ -117,7 +148,7 @@ if out="$(curl -fsS -H "X-Facade-Key: ${KEY}" http://localhost:3000/jobs/workers
   echo "  $out"
   case "$out" in
     *'"online":true'*|*'"online": true'*) echo "  ✓ worker 온라인" ;;
-    *) warn "worker 가 온라인이 아니다 — /parse 접수가 503 으로 거절된다(podman logs facade-worker)"; FAIL=1 ;;
+    *) warn "worker 가 온라인이 아니다 — /parse 접수가 503 으로 거절된다($ENGINE logs facade-worker)"; FAIL=1 ;;
   esac
 else
   warn "/jobs/workers 조회 실패(KBP_FACADE_KEY 불일치 또는 facade 미기동)"; FAIL=1

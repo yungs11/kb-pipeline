@@ -57,7 +57,27 @@ PULLS=(
 log() { printf '\n\033[1;36m▶ %s\033[0m\n' "$*"; }
 
 NO_BUILD=0
-[ "${1:-}" = "--no-build" ] && NO_BUILD=1
+PARSE_ONLY=0
+for a in "$@"; do
+  case "$a" in
+    --no-build)  NO_BUILD=1 ;;
+    --parse-only) PARSE_ONLY=1 ;;
+  esac
+done
+
+# --parse-only: **파싱 배치 전용** 축소 번들(parse-only-up.sh 로 기동).
+# edgequake(Rust, 이미지 최대) / adaptive_chunk / doc_guard / webui 를 빼므로 번들이 크게
+# 작아지고 빌드도 빠르다. 청킹·적재·검색은 이 번들로 못 한다.
+if [ "$PARSE_ONLY" -eq 1 ]; then
+  BUILDS=(
+    "kbp-parse-svc:${TAG}|Dockerfile.parse-svc|."
+    "kbp-facade:${TAG}|Dockerfile.facade|."
+  )
+  IMAGES_TAR="$BUNDLE/images/kbp-parse-images-${ARCH_SHORT}.tar"
+  BUNDLE_NAME="kbp-parse-bundle-${ARCH_SHORT}.tar.gz"
+else
+  BUNDLE_NAME="kbp-airgap-bundle-${ARCH_SHORT}.tar.gz"
+fi
 
 command -v docker >/dev/null || { echo "docker 없음"; exit 1; }
 docker buildx version >/dev/null 2>&1 || { echo "docker buildx 없음 (Docker Desktop 필요)"; exit 1; }
@@ -116,7 +136,7 @@ cp docs/airgap-deploy.md                "$BUNDLE/docs/" 2>/dev/null || true
 chmod +x "$BUNDLE"/scripts/airgap/*.sh
 
 log "단일 번들 tar.gz 생성"
-OUT="$DIST/kbp-airgap-bundle-${ARCH_SHORT}.tar.gz"
+OUT="$DIST/$BUNDLE_NAME"
 tar czf "$OUT" -C "$BUNDLE" .
 SHA="$(shasum -a 256 "$OUT" | awk '{print $1}')"
 echo "$SHA  $(basename "$OUT")" > "${OUT}.sha256"
