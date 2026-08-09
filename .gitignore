@@ -31,6 +31,13 @@ test_doc/
 # host-specific port remaps (local only)
 docker-compose.override.yml
 
+# 실값이 채워진 배포용 env (실키 포함) — .example 템플릿만 추적한다.
+# 단일 파일명(.env.parse-only)으로 넣었더니 지워진 적이 있어(2026-08-09) 패턴으로 둔다.
+# 새 배포 프로파일(.env.<무엇>)이 생겨도 자동으로 보호된다.
+.env.*
+!.env.example
+!.env.*.example
+
 # secret-bearing env backups (never commit)
 scripts/*.env.bak-*
 *.env.bak-*

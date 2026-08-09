@@ -54,6 +54,15 @@ check_env() {
     echo "    폐쇄망에서는 도달 불가 — 사내 온프렘 주소로 바꾸세요.${RST}"
     inet=1
   fi
+  # paddle_gw 레인을 켜놓고 게이트웨이 주소를 비우면, 스캔 문서가 RuntimeError 후
+  # **조용히 ODL/VL 로 폴백**한다 — 파싱은 "성공"으로 보여 배포 후에도 드러나지 않는다.
+  # 켰으면 주소가 있어야 하고, 안 쓸 거면 레인을 vl 로 바꿔 명시적으로 끄게 한다.
+  if [ "$(val KBP_GATE_OCR_LANE "$envf")" = "paddle_gw" ] && [ -z "$(val KBP_PADDLE_OCR_GATEWAY_URL "$envf")" ]; then
+    echo "  ${RED}✗ KBP_GATE_OCR_LANE=paddle_gw 인데 KBP_PADDLE_OCR_GATEWAY_URL 이 비었다${RST}"
+    echo "    ${RED}  → 스캔 PDF 가 조용히 ODL/VL 로 폴백한다(에러가 안 보인다).${RST}"
+    echo "    ${RED}  → 주소를 채우거나, 안 쓸 거면 KBP_GATE_OCR_LANE=vl 로 명시적으로 끌 것.${RST}"
+    miss=1
+  fi
   if [ "$miss" -eq 0 ]; then echo "  ${GRN}✓ 필수키 모두 채워짐${RST}"; else return 1; fi
   return 0
 }
@@ -70,8 +79,8 @@ check_images() {
   for img in "${IMAGES[@]}"; do
     # 번들 태그(기본 airgap)를 우선 매칭 — 개발기에 같은 이름의 :latest/:local 등이
     # 같이 있으면 태그 무시 첫 매치가 엉뚱한(번들과 무관한) 이미지를 "확인됨"으로 오판정한다.
-    local ref; ref="$($ENGINE images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -m1 -E "^${img}:${EXPECT_TAG}\$" || true)"
-    [ -z "$ref" ] && ref="$($ENGINE images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -m1 -E "^${img}(:|$)" || true)"
+    local ref; ref="$($ENGINE images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -m1 -E "^(localhost/)?${img}:${EXPECT_TAG}\$" || true)"
+    [ -z "$ref" ] && ref="$($ENGINE images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -m1 -E "^(localhost/)?${img}(:|$)" || true)"
     if [ -z "$ref" ]; then echo "  ${RED}✗ 없음: $img${RST}"; bad=1; continue; fi
     local a; a="$($ENGINE image inspect --format '{{.Architecture}}' "$ref" 2>/dev/null || echo '?')"
     if [ "$a" = "$ARCH_EXPECT" ]; then echo "  ${GRN}✓ $ref ($a)${RST}"
@@ -86,7 +95,7 @@ check_imports() {
   command -v docker >/dev/null && ENGINE=docker
   command -v podman >/dev/null && ENGINE="${ENGINE:-podman}"
   [ -n "$ENGINE" ] || { echo "${RED}✗ docker/podman 둘 다 없음${RST}"; return 1; }
-  local ref; ref="$($ENGINE images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -m1 -E '^kbp-parse-svc(:|$)' || true)"
+  local ref; ref="$($ENGINE images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -m1 -E '^(localhost/)?kbp-parse-svc(:|$)' || true)"
   [ -z "$ref" ] && { echo "  ${RED}✗ kbp-parse-svc 이미지 없음 — --images 먼저 통과해야 함${RST}"; return 1; }
   # kordoc(docx 폴백 레인은 2026-08-06 제거됐지만 엑셀 파서 백엔드로는 여전히 쓴다,
   # A6·Dockerfile.parse-svc 참고). 이미지에 바이너리가 빠진 채로 healthy 가 뜨는

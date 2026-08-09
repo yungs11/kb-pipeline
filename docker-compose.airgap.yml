@@ -156,7 +156,9 @@ services:
       PORT: "8081"
       EDGEQUAKE_DEFAULT_LLM_MODEL: ${KBP_LLM_MODEL:-qwen/qwen3.5-122b-a10b}
       EDGEQUAKE_LLM_MODEL: ${KBP_LLM_MODEL:-qwen/qwen3.5-122b-a10b}
-      EDGEQUAKE_LLM_DISABLE_REASONING: "1"
+      # reasoning(thinking) 끄기. 켜져 있으면 thinking 토큰이 max_tokens 를 잠식해
+      # JSON 이 절단되고 추출이 조용히 무효화된다. 모델에 따라 달라 env 로 뺀다.
+      EDGEQUAKE_LLM_DISABLE_REASONING: ${EDGEQUAKE_LLM_DISABLE_REASONING:-1}
       EDGEQUAKE_EXTRACTION_LANGUAGE: Korean
       EDGEQUAKE_EMBEDDING_PROVIDER: openai
       # ↓ 온프렘 임베딩 엔드포인트 (.env: LITELLM_EMBEDDING_BASE_URL)
@@ -167,7 +169,10 @@ services:
       EDGEQUAKE_RERANK_BASE_URL: ${EDGEQUAKE_RERANK_BASE_URL}
       EDGEQUAKE_RERANK_MODEL: ${EDGEQUAKE_RERANK_MODEL}
       EDGEQUAKE_RERANK_API_KEY: ${EDGEQUAKE_RERANK_API_KEY}
-      EDGEQUAKE_MIN_RERANK_SCORE: "0.0"
+      # 리랭크 점수 하드컷. 0.0 = 재정렬만 하고 버리지 않음. **튜닝 노브라 리터럴로
+      # 박으면 안 된다** — 과거 0.1 하드필터가 정답을 잘라 "이사"→"거주지 이전시" 검색이
+      # 실패했다(그때 env 화한 값인데 airgap compose 에는 리터럴로 남아 있었다).
+      EDGEQUAKE_MIN_RERANK_SCORE: ${EDGEQUAKE_MIN_RERANK_SCORE:-0.0}
       EDGEQUAKE_EMBEDDING_DIMENSION: "1024"
       RUST_LOG: ${EQ_RUST_LOG:-info}
       PDFIUM_AUTO_CACHE_DIR: /tmp/eqkbp-pdfium
@@ -255,14 +260,31 @@ services:
       KBP_GATE_VL_RATIO: ${KBP_GATE_VL_RATIO:-0.5}
       KBP_GATE_VL_LANE: ${KBP_GATE_VL_LANE:-vl}
       KBP_GATE_OCR_LANE: ${KBP_GATE_OCR_LANE:-paddle_gw}
+      # ── 스캔 PDF OCR 게이트웨이(paddle_gw 레인) ────────────────────────────
+      # ⚠️ 위 KBP_GATE_OCR_LANE 이 paddle_gw 인데 이 URL 이 비어 있으면, 스캔 문서가
+      # paddle_gw 로 보내진 뒤 "KBP_PADDLE_OCR_GATEWAY_URL 미설정" RuntimeError 로
+      # 실패하고 **조용히 ODL/VL 로 폴백**한다(비치명 처리라 에러가 겉으로 안 보인다).
+      # 파싱은 되지만 의도한 스캔 레인은 한 번도 동작하지 않는다 — 폐쇄망에서는
+      # 사내 PaddleOCR-VL 게이트웨이 주소를 반드시 넣어야 한다.
+      # 게이트웨이를 안 쓸 거면 KBP_GATE_OCR_LANE 을 odl 또는 vl 로 바꾼다.
+      KBP_PADDLE_OCR_GATEWAY_URL: ${KBP_PADDLE_OCR_GATEWAY_URL:-}
+      KBP_PADDLE_GW_LANG: ${KBP_PADDLE_GW_LANG:-korean}
+      KBP_PADDLE_GW_DPI: ${KBP_PADDLE_GW_DPI:-150}
+      KBP_PADDLE_GW_TIMEOUT: ${KBP_PADDLE_GW_TIMEOUT:-600}
+      KBP_PADDLE_GW_HTTP_TIMEOUT: ${KBP_PADDLE_GW_HTTP_TIMEOUT:-60}
+      KBP_PADDLE_GW_POLL_INTERVAL: ${KBP_PADDLE_GW_POLL_INTERVAL:-5}
       KBP_GATE_DEFAULT_LANE: ${KBP_GATE_DEFAULT_LANE:-odl}
       KBP_TRIAGE_LOG_TABLE: ${KBP_TRIAGE_LOG_TABLE:-1}
       # PAGE_HYBRID 순서도 조항 오버라이드(선택, 빈 문자열이면 코드 기본값 사용).
       KBP_PAGE_HYBRID_DIAGRAM_RULE: ${KBP_PAGE_HYBRID_DIAGRAM_RULE:-}
       # VL 계층구조(헤딩#/병합셀/도형 상하위) 규칙 오버라이드(선택, 빈 값이면 코드 기본값).
       KBP_PROMPT_HIERARCHY_RULE: ${KBP_PROMPT_HIERARCHY_RULE:-}
-      GUIDED_JSON_MODE: response_format
-      KBP_VL_MAX_CONCURRENT: "3"
+      # 구조화출력 방식. 사내 서빙 스택(vLLM/TGI/litellm)마다 지원 형태가 달라
+      # response_format 을 못 받는 게이트웨이가 있다. 리터럴이면 교체 수단이 없다.
+      GUIDED_JSON_MODE: ${GUIDED_JSON_MODE:-response_format}
+      # VL/paddle_gw 공용 페이지 동시성(paddle_gw.py:143 이 이 값을 읽는다).
+      # 리터럴로 박아두면 .env 에 적어도 무시된다 — 실제로 그런 상태였다(2026-08-09).
+      KBP_VL_MAX_CONCURRENT: ${KBP_VL_MAX_CONCURRENT:-3}
       # ── VL 모델·토큰 (Plan A). 온프렘 서빙 모델명을 .env 에 넣는다.
       MODEL_NAME: ${MODEL_NAME:?온프렘 서빙 모델명을 .env 에 지정하세요}
       VL_MAX_TOKENS: ${VL_MAX_TOKENS:-8000}

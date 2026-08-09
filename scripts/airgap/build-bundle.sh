@@ -138,7 +138,23 @@ cp scripts/airgap/verify-bundle.sh      "$BUNDLE/scripts/airgap/"
 cp scripts/airgap/deploy-both.sh        "$BUNDLE/scripts/airgap/"
 cp scripts/airgap/parse-only-up.sh      "$BUNDLE/scripts/airgap/"
 cp docs/airgap-deploy.md                "$BUNDLE/docs/" 2>/dev/null || true
+# --parse-only 번들은 전체 스택 문서/템플릿만 들어 있으면 받는 쪽이 쓰지도 않는 키
+# (edgequake·adaptive_chunk·임베딩·리랭커)를 채우려다 헤맨다. 파서 전용 세트를 같이 넣는다.
+if [ "$PARSE_ONLY" -eq 1 ]; then
+  cp .env.parse-only.example            "$BUNDLE/" 2>/dev/null || \
+    { echo "✗ .env.parse-only.example 없음 — 파서 전용 번들에 필수"; exit 1; }
+  cp docs/parse-only-guide.md           "$BUNDLE/docs/" 2>/dev/null || \
+    { echo "✗ docs/parse-only-guide.md 없음 — 파서 전용 번들에 필수"; exit 1; }
+fi
 chmod +x "$BUNDLE"/scripts/airgap/*.sh
+
+if [ "$PARSE_ONLY" -eq 1 ]; then
+  NEXT_ENV='cp .env.parse-only.example .env && vi .env   # 파서 전용 키만 (docs/parse-only-guide.md)'
+  NEXT_UP='./scripts/airgap/parse-only-up.sh'
+else
+  NEXT_ENV='cp .env.airgap.example .env && vi .env   # 【A. 온프렘 재설정 필수】 블록 채우기'
+  NEXT_UP='./scripts/airgap/load-and-up.sh'
+fi
 
 log "단일 번들 tar.gz 생성"
 OUT="$DIST/$BUNDLE_NAME"
@@ -176,8 +192,8 @@ cat <<EOF
    분할:      $SPLIT_MSG
    이미지tar: $IMAGES_TAR ($(du -h "$IMAGES_TAR" | cut -f1))
 
-다음 단계 (폐쇄망 RHEL 서버에서):
-  1) $OUT 를 서버로 전송 후 풀기:   mkdir kbp && tar xzf kbp-airgap-bundle-${ARCH_SHORT}.tar.gz -C kbp && cd kbp
-  2) cp .env.airgap.example .env && vi .env   # 【A. 온프렘 재설정 필수】 블록 채우기
-  3) ./scripts/airgap/load-and-up.sh
+다음 단계:
+  1) $OUT 를 서버로 전송 후 풀기:   mkdir kbp && tar xzf $(basename "$OUT") -C kbp && cd kbp
+  2) $NEXT_ENV
+  3) $NEXT_UP
 EOF
