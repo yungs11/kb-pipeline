@@ -208,16 +208,41 @@ def main() -> int:
     print(f"특정 주제 질문 — {source}")
     print("  겹침 0 이면 조사·어미로 토큰이 전부 빗나갔다는 뜻 = 무관한 리포트로 답한다")
     print("═" * 72)
-    blind, misplaced = [], []
+    blind, misplaced, tied = [], [], []
+    spec_sets: dict[tuple[int, ...], list[str]] = {}
     for q, expect in specific:
         sel = _rank_reports(reports, q, a.top_k)
         scores = show("특정", q, sel, flag="   ")
+        key = tuple(r["community_id"] for r in sel)
+        spec_sets.setdefault(key, []).append(q)
+
         if not scores or max(scores) == 0:
             blind.append(q)
             print("       ↑ ⚠️ 겹침 0 — 질문을 보지 않고 rank 순서로 골랐다")
+        elif len(set(scores)) == 1:
+            # ★ 겹침 0 만 세면 이걸 놓친다 — 겹침이 전부 같으면 **정렬은 rank 가 한다.**
+            #   실측 예: "장모님 팔순…" / "처제 결혼…" / "이사하는데 휴가 나오나?" 가
+            #   모두 겹침 1(그 1 은 전부 "휴가" 한 단어)로 **같은 리포트 3개**를 골랐다.
+            #   변별력 없는 흔한 단어 하나만 걸린 것이라 겹침 0 과 실질이 같다.
+            hits = sorted(t for t in _terms(q)
+                          if all(t in ((r.get("title", "") + " " + (r.get("summary") or "")).lower())
+                                 for r in sel))
+            tied.append(q)
+            print(f"       ↑ ⚠️ 겹침 동점({scores[0]}) — 순서를 rank 가 정했다."
+                  f" 공통 히트: {hits or '없음'}")
         if expect is not None and sel and sel[0]["community_id"] != expect:
             misplaced.append((q, expect, sel[0]["community_id"]))
             print(f"       ↑ ⚠️ 기대 #{expect} 가 1위가 아니다(1위 #{sel[0]['community_id']})")
+        print()
+
+    dup = {k: v for k, v in spec_sets.items() if len(v) > 1}
+    if dup:
+        print("─" * 72)
+        print("⚠️ 서로 다른 질문이 **같은 리포트 집합**을 골랐다 — 선정이 질문을 구분하지 못한다")
+        for k, qs in dup.items():
+            print(f"   {list(k)} ← {len(qs)}개 질문")
+            for q in qs:
+                print(f"       · {q}")
         print()
 
     # ── 판정 ────────────────────────────────────────────────────────────────
@@ -225,10 +250,13 @@ def main() -> int:
     print(f"넓은 질문 선정 집합 종류: {len(broad_sets)}/{len(BROAD_QUESTIONS)}"
           "  (1 = 항상 같은 상위 rank — 전체 요약 용도로는 의도된 동작일 수 있다)")
     print(f"특정 주제 질문 중 겹침 0: {len(blind)}/{len(specific)}")
+    print(f"           겹침 동점(rank 가 정렬): {len(tied)}/{len(specific)}"
+          "  — 겹침 0 과 실질이 같다")
+    print(f"        서로 다른 선정 집합: {len(spec_sets)}/{len(specific)}")
     if misplaced:
         print(f"기대 리포트가 1위가 아닌 경우: {len(misplaced)}건")
 
-    if blind or misplaced:
+    if blind or tied or misplaced:
         print("\n❌ 배포 보류 — 특정 주제 질문에서 선정이 질문을 반영하지 못한다.")
         print("   답변은 그럴듯하게 나오므로 이 신호는 답변만 봐서는 드러나지 않는다.")
         print("   완화책: 사용자에게 global 은 '넓은 질문' 용도임을 UI 에 명시하고,")
