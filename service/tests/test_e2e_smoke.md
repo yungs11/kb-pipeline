@@ -4,7 +4,7 @@ Run date: 2026-06-19. Branch: `feat/kb-pipeline-provider`.
 
 ## Prerequisites (live services)
 
-- Dedicated adaptive edgequake `:8081` (PG `:5433` container `eq-pg-kbp`) — `service/scripts/start_dedicated_edgequake.sh`
+- Dedicated adaptive edgequake `:3001` (PG `:5433` container `eq-pg-kbp`) — `service/scripts/start_dedicated_edgequake.sh`
 - bge-m3 `:7997` (200), adaptive_chunk `:18060` (listening), OCR/VLM `:18050` (200)
 - **Java runtime required for PDF parsing** (OpenDataLoader CLI jar). This host had no `java` on PATH;
   `openjdk@17` was installed via brew at `/usr/local/opt/openjdk@17`. The uvicorn process MUST be
@@ -17,8 +17,8 @@ Run date: 2026-06-19. Branch: `feat/kb-pipeline-provider`.
 cd /Users/xxx/workspace/8.kb-pipeline
 export PATH="/usr/local/opt/openjdk@17/bin:$PATH"   # REQUIRED for PDF (OpenDataLoader/Java)
 export KBP_OPENAI_API_KEY=$(grep -E "^OPENAI_API_KEY=" /Users/xxx/workspace/99.projects/rag-edgequake-benchmark/docker/.env | cut -d= -f2-)
-export KBP_PG_DSN="postgres://edgequake:edgequake_secret@localhost:5433/edgequake" KBP_EDGEQUAKE_URL=http://localhost:8081
-nohup .venv-kb/bin/uvicorn service.app:app --port 19000 >/tmp/kbp_svc.log 2>&1 & disown
+export KBP_PG_DSN="postgres://edgequake:edgequake_secret@localhost:5433/edgequake" KBP_EDGEQUAKE_URL=http://localhost:3001
+nohup .venv-kb/bin/uvicorn service.app:app --port 3000 >/tmp/kbp_svc.log 2>&1 & disown
 ```
 
 ## PRIMARY — proven LIVE
@@ -43,7 +43,7 @@ nohup .venv-kb/bin/uvicorn service.app:app --port 19000 >/tmp/kbp_svc.log 2>&1 &
 
 ## KNOWN GAP — edgequake workspace binding (BLOCKS chunk read in real provider flow)
 
-The edgequake fork on :8081 **ignores the `X-Workspace-ID` string header on write** and pins every
+The edgequake fork on :3001 **ignores the `X-Workspace-ID` string header on write** and pins every
 document to a fixed internal workspace UUID `00000000-0000-0000-0000-000000000003`
 (tenant `00000000-0000-0000-0000-000000000002`). Verified twice:
 
@@ -81,7 +81,7 @@ which is exactly the path the edgequake-workspace gap above would break in a liv
 
 ### Full-UI e2e runbook (deferred)
 
-1. Start backend `:8001` with `kb_pipeline_base_url=http://localhost:19000` (config.py default already
+1. Start backend `:8001` with `kb_pipeline_base_url=http://localhost:3000` (config.py default already
    that) + arq worker + docker deps (postgres/qdrant/redis/minio) + frontend.
 2. `POST /kb {provider:"kb_pipeline"}` -> create KB.
 3. Upload the same test_doc; doc_guard + dedup run; ingest_document routes to `_ingest_kb_pipeline_tail`.

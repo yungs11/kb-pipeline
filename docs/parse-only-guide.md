@@ -79,7 +79,7 @@ vi .env
 스크립트가 자동으로 확인하지만 수동으로는:
 
 ```bash
-curl -fsS http://localhost:18081/healthz                      # parse-svc
+curl -fsS http://localhost:19001/healthz                      # parse-svc
 curl -fsS http://localhost:3000/healthz                       # facade
 curl -fsS -H "X-Facade-Key: $KBP_FACADE_KEY" \
      http://localhost:3000/jobs/workers                       # ★ 가장 중요

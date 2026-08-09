@@ -12,21 +12,21 @@ Docker Compose로 kb-pipeline 엔진 스택 전체를 빌드·기동하는 절�
 | 티어 | 서비스 | 이미지 | 컨테이너 포트 | 호스트 포트(기본) |
 |------|--------|--------|----------------|-------------------|
 | 인프라 | postgres | ghcr.io/raphaelmansuy/edgequake-postgres | 5432 | **5433** |
-| 인프라 | minio | minio/minio | 9000/9001 | 19010/19011* |
-| 인프라 | | 엔진 | **edgequake** | **kbp-edgequake (docker/edgequake.Dockerfile)** | 8081 | **8081** |
+| 인프라 | minio | minio/minio | 9000/9001 | 9000/3003* |
+| 인프라 | | 엔진 | **edgequake** | **kbp-edgequake (docker/edgequake.Dockerfile)** | 3001 | **3001** |
 | 문서처리 | doc_guard | kbp-doc_guard (sibling repo) | 8000 | 8001 |
 | 문서처리 | adaptive_chunk | kbp-adaptive_chunk (sibling repo) | 18060 | (내부) |
 | 앱 | parse-svc | kbp-parse-svc (Dockerfile.parse-svc) | 19001 | 19001 |
-| 앱 | facade | kbp-facade (Dockerfile.facade) | 19000 | **19000** |
+| 앱 | facade | kbp-facade (Dockerfile.facade) | 3000 | **3000** |
 | 확인용 | **edgequake_webui** | kbp-edgequake_webui (edgequake/edgequake_webui/Dockerfile) | 3000 | 3000\*\* |
 
 > **Phase 2e**: 외부 파서 서비스 `document-parser(:18050)`·`excel-parser(:18055)`·`redis` 는 제거됐다. 모든 문서 파싱(PDF/Excel/DOCX/PPTX/이미지/스캔)은 parse-svc(:19001)가 in-process 로 수행한다(이미지에 java21 + node/kordoc + PyMuPDF 내장). office/hwp→PDF 변환은 **원격 변환 API**(`KBP_FILECONVERT_URL`, 한컴 도큐먼트툴즈)가 맡는다.
 
-> **edgequake_webui(그래프 적재 확인용, 선택 서비스)**: edgequake 에 적재된 지식그래프·워크스페이스·문서를 브라우저로 조회·시각화·질의하는 확인용 UI(`http://localhost:3000`, 이 머신은 리맵 후 **13000**). **운영 적재 경로가 아니다** — 문서 적재는 facade `/ingest`(parse-svc 파싱 + adaptive 청킹 + 모달원자성)로 하고, 이 UI 로 직접 업로드하면 kb-pipeline 경로를 우회하므로 "적재 결과(그래프) 확인/디버깅" 용도로만 쓴다. `EDGEQUAKE_API_URL` 은 **브라우저가** API 에 닿는 호스트 URL(기본 `http://localhost:8081`)이며 컨테이너 DNS 가 아니다.
+> **edgequake_webui(그래프 적재 확인용, 선택 서비스)**: edgequake 에 적재된 지식그래프·워크스페이스·문서를 브라우저로 조회·시각화·질의하는 확인용 UI(`http://localhost:3000`, 이 머신은 리맵 후 **3002**). **운영 적재 경로가 아니다** — 문서 적재는 facade `/ingest`(parse-svc 파싱 + adaptive 청킹 + 모달원자성)로 하고, 이 UI 로 직접 업로드하면 kb-pipeline 경로를 우회하므로 "적재 결과(그래프) 확인/디버깅" 용도로만 쓴다. `EDGEQUAKE_API_URL` 은 **브라우저가** API 에 닿는 호스트 URL(기본 `http://localhost:3001`)이며 컨테이너 DNS 가 아니다.
 
 \* `docker-compose.override.yml`가 다른 무관한 스택과의 호스트 포트 충돌을 피하려고
 minio를 **19020/19021**로 재매핑한다(아래 5절 참고). (document-parser 재매핑은 서비스 제거로 삭제됨.)
-\*\* 이 머신은 호스트 3000 이 점유되어 override 가 webui 를 **13000**으로 리맵한다(5절).
+\*\* 이 머신은 호스트 3000 이 점유되어 override 가 webui 를 **3002**으로 리맵한다(5절).
 
 기동 순서(의존성): postgres → edgequake / (minio) / doc_guard /
 adaptive_chunk → parse-svc(depends_on minio) → facade / edgequake_webui(depends_on edgequake).
@@ -45,7 +45,7 @@ adaptive_chunk → parse-svc(depends_on minio) → facade / edgequake_webui(depe
   타임에 curl로 prebuilt pdfium 바이너리를 내려받는다. curl 없으면 빌드가
   `pdfium-auto[bundled]: curl unavailable`로 실패.
 - **HOST/PORT 를 읽는다** (EDGEQUAKE_HOST/EDGEQUAKE_PORT 아님). `ENV HOST=0.0.0.0
-  PORT=8081`. 잘못 주면 8080에 바인드→healthcheck(8081) 실패→depends_on 체인 데드락.
+  PORT=3001`. 잘못 주면 8080에 바인드→healthcheck(3001) 실패→depends_on 체인 데드락.
 - **`EDGEQUAKE_CHUNKER=passthrough` 불변식.** 전용 edgequake는 재청킹하지 않는다(adaptive로
   띄우면 HTTP 422 적재 실패).
 - 마이그레이션은 `sqlx::migrate!()`로 바이너리에 임베드 → 런타임 복사 불필요.
@@ -58,9 +58,9 @@ adaptive_chunk → parse-svc(depends_on minio) → facade / edgequake_webui(depe
 docker run -d --name eq-verify --network kbp_kbp \
   -e DATABASE_URL="postgres://edgequake:edgequake_secret@postgres:5432/edgequake" \
   -e EDGEQUAKE_CHUNKER=passthrough -e EDGEQUAKE_LLM_PROVIDER=openrouter \
-  -e OPENROUTER_API_KEY=<유효키> -e HOST=0.0.0.0 -e PORT=8081 \
+  -e OPENROUTER_API_KEY=<유효키> -e HOST=0.0.0.0 -e PORT=3001 \
   kbp-edgequake:latest
-docker exec eq-verify curl -fsS http://localhost:8081/health   # -> {"status":"healthy",...}
+docker exec eq-verify curl -fsS http://localhost:3001/health   # -> {"status":"healthy",...}
 docker rm -f eq-verify
 ```
 정상 응답: `storage_mode:"postgresql"`, `components` kv/vector/graph/llm_provider 모두
@@ -100,7 +100,7 @@ true, `llm_provider_name:"openrouter"`, 스키마 v38.
 cd /Users/xxx/workspace/8.kb-pipeline
 
 # (a) 런처로 띄운 로컬 개발 프로세스 종료 (facade/parse-svc/edgequake)
-for p in 19000 19001 8081; do
+for p in 3000 19001 3001; do
   pid=$(lsof -tiTCP:$p -sTCP:LISTEN -P -n 2>/dev/null | head -1)
   [ -n "$pid" ] && kill "$pid"
 done
@@ -150,12 +150,12 @@ docker exec kbp-minio-1 sh -c \
 
 ### 4-6. 스모크 테스트
 ```bash
-docker exec kbp-edgequake-1  curl -fsS http://localhost:8081/health
-curl -fsS http://localhost:19000/healthz     # facade
+docker exec kbp-edgequake-1  curl -fsS http://localhost:3001/health
+curl -fsS http://localhost:3000/healthz     # facade
 curl -fsS http://localhost:19001/healthz     # parse-svc
-curl -fsS http://localhost:13000             # edgequake_webui (그래프 적재 확인용, override 리맵 13000)
+curl -fsS http://localhost:3002             # edgequake_webui (그래프 적재 확인용, override 리맵 3002)
 ```
-그래프 적재 확인: 브라우저로 **http://localhost:13000** 접속 → 워크스페이스 선택 →
+그래프 적재 확인: 브라우저로 **http://localhost:3002** 접속 → 워크스페이스 선택 →
 문서/그래프(엔티티·관계) 조회. (적재 자체는 facade `/ingest` 로 하고, 이 UI 는 결과 확인용.)
 
 ---
@@ -167,11 +167,11 @@ curl -fsS http://localhost:13000             # edgequake_webui (그래프 적재
 
 | 서비스 | 기본 | 재매핑 | 점유 중인 무관 컨테이너 |
 |--------|------|--------|--------------------------|
-| minio | 19010/19011 | **19020/19021** | docker-minio-1 |
-| edgequake_webui | 3000 | **13000** | 다른 스택이 3000 점유 |
+| minio | 9000/3003 | **19020/19021** | docker-minio-1 |
+| edgequake_webui | 3000 | **3002** | 다른 스택이 3000 점유 |
 
 > (Phase 2e: document-parser 서비스 제거로 그 18050→18051 재매핑도 삭제됨.)
-> webui 리맵은 호스트 포트만 바꾼다 — `EDGEQUAKE_API_URL` 은 여전히 API 호스트포트 `:8081` 을 가리키므로 webui 호스트포트(13000)와 무관하다.
+> webui 리맵은 호스트 포트만 바꾼다 — `EDGEQUAKE_API_URL` 은 여전히 API 호스트포트 `:3001` 을 가리키므로 webui 호스트포트(3002)와 무관하다.
 
 컨테이너 내부 포트와 서비스 DNS(예: `http://minio:9000`)는
 그대로라 스택 내부 통신엔 영향 없다. YAML `!override` 태그로 base의 ports 리스트를
@@ -205,7 +205,7 @@ parse-svc 는 페이지 이미지를 MinIO 에 올린다. compose 내장 `minio`
 
 | 증상 | 원인 | 조치 |
 |------|------|------|
-| `Bind for 0.0.0.0:19010 failed: port is already allocated` | 무관 스택이 포트 점유 | 5절 override 사용(이미 적용됨) 또는 점유 컨테이너 확인 `docker ps` |
+| `Bind for 0.0.0.0:9000 failed: port is already allocated` | 무관 스택이 포트 점유 | 5절 override 사용(이미 적용됨) 또는 점유 컨테이너 확인 `docker ps` |
 | edgequake `OPENROUTER_API_KEY is empty` exit 101 | `.env` 빈 값 | 3절대로 키 채우기 |
 | edgequake `GLIBC_2.39 not found` | 런타임 베이스가 빌드와 glibc 불일치 | Dockerfile trixie 고정(이미 수정됨). 옛 이미지면 `docker compose build edgequake` |
 | edgequake 빌드가 `pdfium-auto[bundled]: curl unavailable` | 빌드 스테이지에 curl 없음 | Dockerfile 빌드 스테이지 curl 포함(이미 반영). 옛 캐시면 `--no-cache` |
@@ -213,8 +213,8 @@ parse-svc 는 페이지 이미지를 MinIO 에 올린다. compose 내장 `minio`
 | parse-svc `kordoc: not found` / docx·폴백 파싱 실패 | 이미지에 node/kordoc 미빌드 | `docker compose build parse-svc`(Dockerfile.parse-svc 가 `npm install -g kordoc`) |
 | depends_on 체인이 안 뜸 | 상위 서비스가 unhealthy | `docker compose ps`로 최초 unhealthy 서비스부터 로그 확인 |
 | `:5433` 충돌 | 런처가 띄운 `eq-pg-kbp` 잔존 | `docker rm -f eq-pg-kbp` |
-| edgequake_webui `Bind for 0.0.0.0:3000 failed` | 호스트 3000 점유 | 5절 override 리맵(이미 13000 적용) 또는 base `ports` 조정 |
-| webui 는 뜨는데 API 호출 실패(빈 그래프/네트워크 오류) | `EDGEQUAKE_API_URL` 이 브라우저가 못 닿는 값(`http://edgequake:8081` 같은 컨테이너 DNS) | 브라우저 도달 가능한 호스트 URL(`http://localhost:8081`)로. 원격 접속은 `EDGEQUAKE_WEBUI_API_URL=http://<호스트IP>:8081` |
+| edgequake_webui `Bind for 0.0.0.0:3000 failed` | 호스트 3000 점유 | 5절 override 리맵(이미 3002 적용) 또는 base `ports` 조정 |
+| webui 는 뜨는데 API 호출 실패(빈 그래프/네트워크 오류) | `EDGEQUAKE_API_URL` 이 브라우저가 못 닿는 값(`http://edgequake:3001` 같은 컨테이너 DNS) | 브라우저 도달 가능한 호스트 URL(`http://localhost:3001`)로. 원격 접속은 `EDGEQUAKE_WEBUI_API_URL=http://<호스트IP>:3001` |
 
 ---
 
@@ -237,8 +237,8 @@ docker compose down -v         # 볼륨까지 삭제 (postgres/minio 데이터 �
   파싱 정상 확인. 이미지에 kordoc 3.8.3 + java21 + PyMuPDF(fitz) 내장 확인.
 - **MinIO 버킷:** `document-parser` 생성 완료(4-5절). 페이지 이미지 업로드 경로 정상.
 - **edgequake_webui(그래프 적재 확인용):** compose 서비스로 배선됨(build context
-  `edgequake/`, dockerfile `edgequake_webui/Dockerfile`, host 3000→override 13000,
-  `EDGEQUAKE_API_URL=http://localhost:8081`). 선택 서비스.
+  `edgequake/`, dockerfile `edgequake_webui/Dockerfile`, host 3000→override 3002,
+  `EDGEQUAKE_API_URL=http://localhost:3001`). 선택 서비스.
 - **참고(baseline):** `.venv-kb` 전체 테스트 208 passed / 5 failed 는 기존 baseline
   (minio bucket auto-create 정책변경 1건 + 모달 4건은 `KBP_MODAL_ENRICH=1` 필요, 기본 off).
   Phase 2 로 인한 신규 실패 0.

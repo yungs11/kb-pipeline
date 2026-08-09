@@ -26,12 +26,12 @@
                               [ 사용자 브라우저 / 외부 클라이언트 ]
                                           │
         ┌──────────────┬───────────────┬──┴────────────┬──────────────┐
-      :18080          :3000          :3002/:3001       :3003        :18081
+      :18080          :3000          :3002/:3001       :3003        :19001
      kb front        facade         webui/eq-API      minio 콘솔   parse-svc(OCR)
         │              │
         │(내부프록시)   │
         ▼              ▼
-   kb api(8080) ──► facade(19000) ──► parse-svc(19001) / adaptive_chunk(18060) / edgequake(8081)
+   kb api(8080) ──► facade(3000) ──► parse-svc(19001) / adaptive_chunk(18060) / edgequake(3001)
         │                    │                                         │
         │                    └──► doc_guard(8000) [/gate/*]            │
         │                    └──► minio(9000)     [/objects/*]         ▼
@@ -50,7 +50,7 @@ graph TD
   U -->|:3002| WUI[edgequake_webui]
   U -->|:3001| EQAPI[edgequake API]
   U -->|:3003| MC[minio 콘솔]
-  U -->|:18081| PS[parse-svc / OCR]
+  U -->|:19001| PS[parse-svc / OCR]
   FE -->|내부 프록시| API[kb api :8080]
   API -->|facade:19000| FAC
   FAC -->|parse-svc:19001| PS
@@ -74,13 +74,13 @@ graph TD
 ### kbp 스택
 | 호스트 | →컨테이너 | 서비스 | 용도 | 외부노출 | 방화벽 |
 |:------:|:--------:|--------|------|:-------:|:-----:|
-| **3000** | 19000 | facade | `/parse` `/chunk` `/search` `/insert` … 파이프라인 관문 | ✅ | 열기 |
-| **3001** | 8081 | edgequake API | 그래프/벡터 엔진 REST (webui 가 브라우저에서 호출) | ✅ | 열기 |
+| **3000** | 3000 | facade | `/parse` `/chunk` `/search` `/insert` … 파이프라인 관문 | ✅ | 열기 |
+| **3001** | 3001 | edgequake API | 그래프/벡터 엔진 REST (webui 가 브라우저에서 호출) | ✅ | 열기 |
 | **3002** | 3000 | edgequake_webui | 그래프 확인 UI | ✅ | 열기 |
 | **3003** | 9001 | minio 콘솔 | 버킷관리 웹 UI | ✅ | 열기 |
 | ~~3004~~ | 8000 | doc_guard | **외부노출 없음** — facade `/gate/*` 가 은닉한다 | ❌ | 닫기 |
-| **19001** | 19001 | parse-svc | OCR/파싱 엔진 (pdf·xlsx·docx·이미지 VL). **내부=외부**(P1 2026-08-10, 이전 18081) | ✅ | 열기 |
-| **18081** | — | **외부 OCR Gateway (kbp 미소유)** | PaddleOCR-VL 을 프론트하는 사내 게이트웨이. `KBP_PADDLE_OCR_GATEWAY_URL` 이 이 포트를 쓴다 — **kbp 가 점유하면 안 된다**(parse-svc 를 19001 로 비킨 이유) | — | 열기 |
+| **19001** | 19001 | parse-svc | OCR/파싱 엔진 (pdf·xlsx·docx·이미지 VL). **내부=외부**(P1 2026-08-10, 이전 19001) | ✅ | 열기 |
+| **19001** | — | **외부 OCR Gateway (kbp 미소유)** | PaddleOCR-VL 을 프론트하는 사내 게이트웨이. `KBP_PADDLE_OCR_GATEWAY_URL` 이 이 포트를 쓴다 — **kbp 가 점유하면 안 된다**(parse-svc 를 19001 로 비킨 이유) | — | 열기 |
 | 18060 | 18060 | adaptive_chunk | 청킹 허브 | 내부 | 닫기 |
 | 5433 | 5432 | postgres | edgequake 그래프 DB(pgvector+AGE) | 디버그 | **닫기** |
 | — | 9000 | minio S3 API | 객체 저장(내부 DNS `minio:9000`) | 내부 | 닫기 |
@@ -103,8 +103,8 @@ graph TD
 
 ### 방화벽 요약
 ```bash
-# 열 포트: kbp(3000 3001 3002 3003 19001) + 외부 OCR GW(18081) + kb(18080)
-for p in 3000 3001 3002 3003 19001 18081 18080; do firewall-cmd --permanent --add-port=$p/tcp; done
+# 열 포트: kbp(3000 3001 3002 3003 19001) + 외부 OCR GW(19001) + kb(18080)
+for p in 3000 3001 3002 3003 19001 19001 18080; do firewall-cmd --permanent --add-port=$p/tcp; done
 firewall-cmd --reload
 ```
 **DB(5433·5434)·adaptive(18060)·api(8080)·minio S3(9000) 는 열지 않는다**(내부/디버그 전용).
@@ -144,7 +144,7 @@ frontend→minio)은
 ### (a) 웹앱 경유 적재/검색
 ```
 브라우저 → kb frontend(:18080) → (내부프록시) kb api(:8080)
-  → facade(:19000) → parse-svc / adaptive_chunk / edgequake → kbp postgres·minio
+  → facade(:3000) → parse-svc / adaptive_chunk / edgequake → kbp postgres·minio
 ```
 
 ### (b) facade 직접 호출 (웹앱 없이 파이프라인만)

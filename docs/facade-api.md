@@ -1,4 +1,4 @@
-# kb-pipeline facade (:19000) — API · 운영 매뉴얼
+# kb-pipeline facade (:3000) — API · 운영 매뉴얼
 
 > **근거**: 이 문서의 모든 계약·수치는 코드에서 직접 대조했다. 문서(`_workspace/`)와 코드가 어긋나면 코드가 권위다.
 > 주 출처: `service/app.py`, `service/parse_client.py`, `service/adaptive_chunk.py`, `service/edgequake.py`,
@@ -32,14 +32,14 @@ facade 가 실제로 더하는 값(단순 프록시가 아닌 이유):
                         └───────────────┬──────────────────────────┘
                                         │ HTTP  (+X-Facade-Key)
                         ┌───────────────▼──────────────────────────┐
-                        │  facade  :19000   service/app.py         │
+                        │  facade  :3000   service/app.py         │
                         │  /parse /chunk /insert /search /ingest   │
                         │  /chunks /doc /communities/build         │
                         └──┬─────────────┬──────────────┬──────────┘
        KBP_PARSE_SVC_URL   │             │              │  KBP_EDGEQUAKE_URL
                            │  KBP_ADAPTIVE_CHUNK_URL    │
         ┌──────────────────▼──┐  ┌───────▼──────────┐  ┌▼───────────────────────┐
-        │ parse-svc  :19001   │  │ adaptive_chunk   │  │ edgequake  :8081       │
+        │ parse-svc  :19001   │  │ adaptive_chunk   │  │ edgequake  :3001       │
         │ parse+blockify+     │  │ :18060           │  │ 추출·임베딩·AGE그래프  │
         │ modal enrich        │  │ 4방법 경쟁 청킹  │  │ ·검색  (passthrough)   │
         └──┬──────────────┬───┘  └──────────────────┘  └───────────┬────────────┘
@@ -107,15 +107,15 @@ facade 가 **직접 DB 를 만지는 유일한 경로**는 `/communities/build` 
 
 ```bash
 # 제출 → 202
-JOB=$(curl -s -X POST http://localhost:19000/jobs/parse \
+JOB=$(curl -s -X POST http://localhost:3000/jobs/parse \
         -H "X-Facade-Key: $KEY" -F "file=@doc.pdf" -F "batch_key=b1" | jq -r .job_id)
 
 # 상태 폴링
-curl -s -H "X-Facade-Key: $KEY" http://localhost:19000/jobs/$JOB
+curl -s -H "X-Facade-Key: $KEY" http://localhost:3000/jobs/$JOB
 # {"status":"running","stage":"parsing","attempt_count":1,"ahead_in_partition":null,...}
 
 # 결과 — 기존 동기 응답과 **같은 본문**
-curl -s -H "X-Facade-Key: $KEY" http://localhost:19000/jobs/$JOB/result
+curl -s -H "X-Facade-Key: $KEY" http://localhost:3000/jobs/$JOB/result
 ```
 
 단계 연결은 `job_id` 참조로 한다(수 MB 왕복 제거):
@@ -150,7 +150,7 @@ curl -s -H "X-Facade-Key: $KEY" http://localhost:19000/jobs/$JOB/result
 
 ## 3. API 레퍼런스
 
-Base URL: `http://localhost:19000` (런처가 `--host 127.0.0.1` 로 바인드 — **루프백 전용**, 외부 노출 아님).
+Base URL: `http://localhost:3000` (런처가 `--host 127.0.0.1` 로 바인드 — **루프백 전용**, 외부 노출 아님).
 
 ### 요약
 
@@ -183,7 +183,7 @@ Base URL: `http://localhost:19000` (런처가 `--host 127.0.0.1` 로 바인드 �
 프로세스 부팅 여부만 증명한다. 다운스트림 상태는 보지 않는다.
 
 ```bash
-curl -s http://localhost:19000/healthz
+curl -s http://localhost:3000/healthz
 # {"status":"ok"}
 ```
 
@@ -254,7 +254,7 @@ parse-svc 가 LLM 없이 parse+chunk 를 함께 끝내 native 청크를 돌려�
 curl -s -m 1800 \
   -F "file=@sample.pdf;type=application/pdf" \
   -F "docs_id=$(shasum -a 256 sample.pdf | cut -c1-16)" \
-  http://localhost:19000/parse | jq '{status, n_blocks, len: (.enriched_content|length), pages: .page_count}'
+  http://localhost:3000/parse | jq '{status, n_blocks, len: (.enriched_content|length), pages: .page_count}'
 ```
 
 ---
@@ -496,7 +496,7 @@ query `workspace_id`, `doc_id`. 성공 시 **204 No Content**(본문 없음).
 |---|---|---|
 | `KBP_PARSE_SVC_URL` | `http://localhost:19001` | parse-svc |
 | `KBP_ADAPTIVE_CHUNK_URL` | `http://localhost:18060` | 청킹 허브 |
-| `KBP_EDGEQUAKE_URL` | `http://localhost:8081` | edgequake |
+| `KBP_EDGEQUAKE_URL` | `http://localhost:3001` | edgequake |
 | `KBP_PG_DSN` | **필수(런처 검증)** | `/communities/build` 전용 DB 접속 |
 | `KBP_OPENAI_API_KEY` | **필수(런처 검증)** | 커뮤니티 리포트 LLM |
 | `KBP_OPENAI_BASE_URL` | — | 현재 OpenRouter |
@@ -517,11 +517,11 @@ cd /Users/xxx/workspace/8.kb-pipeline
 
 # 1) 백킹 서비스 (postgres/minio/edgequake/adaptive_chunk/doc_guard)
 docker compose up -d --no-build postgres minio edgequake adaptive_chunk
-docker compose up -d --no-build edgequake_webui        # 그래프 보기 UI (호스트 :13000)
+docker compose up -d --no-build edgequake_webui        # 그래프 보기 UI (호스트 :3002)
 
 # 2) 애플리케이션 (호스트 — 라이브 소스 반영)
 bash scripts/run-parse-svc.sh    # :19001  — 반드시 facade 보다 먼저
-bash scripts/run-facade.sh       # :19000
+bash scripts/run-facade.sh       # :3000
 ```
 
 **의존 순서**: postgres → edgequake / adaptive_chunk / minio → parse-svc → facade.
@@ -545,7 +545,7 @@ pkill -f "uvicorn service.app:app"
 pkill -f "parse_service.app:app"
 
 # 확실하게 (포트 기준 — 권장. 모듈 패턴 kill 은 다른 서비스를 오폭할 수 있다)
-kill "$(lsof -nP -iTCP:19000 -sTCP:LISTEN -t)"
+kill "$(lsof -nP -iTCP:3000 -sTCP:LISTEN -t)"
 kill "$(lsof -nP -iTCP:19001 -sTCP:LISTEN -t)"
 
 # 백킹 서비스 (볼륨 보존 — postgres/minio 데이터 유지)
@@ -561,13 +561,13 @@ docker compose down
 
 ```bash
 # facade
-curl -fsS http://localhost:19000/healthz          # {"status":"ok"}
+curl -fsS http://localhost:3000/healthz          # {"status":"ok"}
 # parse-svc  (deps.vl_ocr = 실 OCR origin)
 curl -fsS http://localhost:19001/healthz          # {"status":"ok","deps":{"vl_ocr":"https://openrouter.ai/..."}}
 # 다운스트림
-curl -fsS http://localhost:8081/health            # edgequake
+curl -fsS http://localhost:3001/health            # edgequake
 curl -fsS http://localhost:18060/healthz          # adaptive_chunk
-curl -fsS http://localhost:13000/popup/graph      # edgequake webui (그래프 보기)
+curl -fsS http://localhost:3002/popup/graph      # edgequake webui (그래프 보기)
 docker compose ps                                  # 컨테이너 healthy 여부
 ```
 
@@ -575,17 +575,17 @@ docker compose ps                                  # 컨테이너 healthy 여부
 
 ```bash
 # ① parse 왕복 — java(OpenDataLoader) + 모달 경로까지 증명
-curl -s -m 1800 -F "file=@sample.pdf;type=application/pdf" http://localhost:19000/parse \
+curl -s -m 1800 -F "file=@sample.pdf;type=application/pdf" http://localhost:3000/parse \
   | jq '{status, n_blocks, enriched_len: (.enriched_content|length), page_count}'
 # 기대: status 키 없음(=성공) + n_blocks > 0 + enriched_len > 0
 # enriched_len == 0 이면 → java 미탑재 의심 ("Unable to locate a Java Runtime")
 
 # ② e2e 적재 — chunk_count > 0 & status "indexed"
 curl -s -m 3600 -F "file=@sample.pdf" -F "workspace_id=smoke-kb" -F "doc_id=smoke-1" \
-  http://localhost:19000/ingest | jq '{status, chunk_count, method: .chunking_selection.method_selected}'
+  http://localhost:3000/ingest | jq '{status, chunk_count, method: .chunking_selection.method_selected}'
 
 # ③ 검색 왕복
-curl -s -X POST http://localhost:19000/search -H 'Content-Type: application/json' \
+curl -s -X POST http://localhost:3000/search -H 'Content-Type: application/json' \
   -d '{"workspace_id":"smoke-kb","query":"핵심 내용 요약","top_k":5}' | jq '{answer, n: (.results|length)}'
 ```
 
@@ -628,7 +628,7 @@ docker compose up -d --build facade      # 단일 서비스 재빌드
 | 적재는 됐는데 그래프가 빔 | `extract_graph:false` 또는 edgequake LLM 실패 | `entity_count`/`relationship_count` 확인 |
 | **HTTP 422 적재 실패** | edgequake 가 `EDGEQUAKE_CHUNKER=adaptive` 로 떠서 이중청킹 | **반드시 `passthrough`** (불변식) |
 | 배치가 `queued` 에 머묾 | kb-backend batch worker 미기동 | `bash scripts/run-kb-backend.sh`, `kill -0 $(cat /tmp/kb_batch_worker.pid)` |
-| "그래프 보기" 실패 | `edgequake_webui` 미기동 | `docker compose up -d --no-build edgequake_webui` → `:13000` 검증 |
+| "그래프 보기" 실패 | `edgequake_webui` 미기동 | `docker compose up -d --no-build edgequake_webui` → `:3002` 검증 |
 | 검색 결과 0건인데 에러 없음 | RLS 세션 미설정(`app.current_tenant_id`) 또는 workspace 불일치 | `edgequake_workspace_id` 가 KB 에 제대로 영속됐는지 확인 |
 
 ---

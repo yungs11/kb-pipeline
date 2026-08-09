@@ -18,7 +18,7 @@
 본 정의서는 kb-pipeline 문서 적재 파이프라인의 오케스트레이션 원칙과 단계별 책임을 확정한다. 하나의 업로드 문서를 Parse → Blockify → Modal Enrich → Chunking → Insert → Community → Search 의 단계로 흘려 단일 Postgres(pgvector+AGE)에 적재·검색 가능 상태로 만드는 과정을 기술한다. 단계 경계·소유권·데이터 계약을 명문화하여 이중처리(이중청킹/이중그래프생성)를 제거하고, 단계별 추적·격리·정합성을 보장하는 것이 목적이다.
 
 ### 1.2 적용 범위
-- facade(:19000)가 외부 소비자(knowledge_base 백엔드)에게 노출하는 capability(`/parse`, `/chunk`, `/insert`(+`/insert/status`), `/search`, `/ingest`, `/communities/build`)와 그 뒤의 다운스트림 서비스 오케스트레이션 전 구간. (Phase 2d 로 facade 파싱 로직 및 `/ingest/submit`·`/ingest/status` 제거 — 파싱은 전부 parse-svc 소유.)
+- facade(:3000)가 외부 소비자(knowledge_base 백엔드)에게 노출하는 capability(`/parse`, `/chunk`, `/insert`(+`/insert/status`), `/search`, `/ingest`, `/communities/build`)와 그 뒤의 다운스트림 서비스 오케스트레이션 전 구간. (Phase 2d 로 facade 파싱 로직 및 `/ingest/submit`·`/ingest/status` 제거 — 파싱은 전부 parse-svc 소유.)
 - 비범위: 청킹 4방법 경쟁의 완화/최적화(사용자 결정으로 현상 유지), edgequake Rust 엔진 내부 알고리즘 변경, 벡터/그래프 store 분리(단일 Postgres 원칙 위배).
 
 ### 1.3 기본 원칙
@@ -35,15 +35,15 @@
 
 | 구성요소 | 포트 | 한 줄 정의 |
 |----------|------|-----------|
-| facade (kb-pipeline) | 19000 | 오케스트레이터. parse→chunk→insert→search capability 를 노출하고 청킹·모달원자성을 소유하며 다운스트림을 숨긴다(`service/app.py`). |
+| facade (kb-pipeline) | 3000 | 오케스트레이터. parse→chunk→insert→search capability 를 노출하고 청킹·모달원자성을 소유하며 다운스트림을 숨긴다(`service/app.py`). |
 | parse-svc | 19001 | **모든 문서 파싱을 in-process 로 수행**(PDF=OpenDataLoader / Excel=vendored excel_parser_rag / 이미지=in-process VL OCR / hwp·doc·docx·ppt·pptx·html=**원격 변환 API→PDF**)하고 표/그림을 modal LLM 으로 서술해 enriched_content + 모달 마커를 반환한다. 이미지에 java21 + node/kordoc + PyMuPDF 내장(Phase 2). |
 | adaptive_chunk | 18060 | 청킹 허브. atomic_markers 를 받아 모달 스팬을 원자 보존하고, 텍스트 갭만 4방법 경쟁으로 청킹해 선택 근거(method_selected/scores)를 반환한다. |
-| edgequake | 8081 | 베이스 엔진. passthrough 로 facade 청크를 받아 엔티티/관계 추출 → 임베딩 → AGE 그래프 → 단일 Postgres 적재(RLS)와 검색을 수행한다. |
+| edgequake | 3001 | 베이스 엔진. passthrough 로 facade 청크를 받아 엔티티/관계 추출 → 임베딩 → AGE 그래프 → 단일 Postgres 적재(RLS)와 검색을 수행한다. |
 | postgres (eq-pg-kbp) | 5433 | 단일 저장소. pgvector + Apache AGE 를 한 DB에. docker, POSTGRES_PASSWORD=edgequake_secret. |
 | 임베딩(bge-m3) | — | OpenAI-호환 임베딩 엔드포인트. 현행 운영 배선은 원격 litellm(`https://litellm.ax-demo.com/v1`, model `bge-m3`, 1024d). 환경별 가변(로컬 OpenAI-호환 서버 `:7997` 도 대체 구성으로 가능).¹ |
 | ~~ocr (18050)~~ | — | **Phase 2c/2e 제거**. 이미지/스캔 PDF VLM/OCR 은 parse-svc `parsers/ocr` 로 in-process 흡수(구 document-parser :18050 HTTP 미경유). |
 | ~~excel-parser (18055)~~ | — | **Phase 2b/2e 제거**. Excel parse+chunk 는 parse-svc 가 vendored excel_parser_rag 로 in-process 수행(native chunks, chunk_strategy=excel_rag_parser). |
-| kb-backend (knowledge_base) | 8088 | 소비자/집계자. facade(:19000)를 호출하고 IngestionJob stage 를 추적·영속한다(kb_pipeline_base_url=http://localhost:19000). |
+| kb-backend (knowledge_base) | 8088 | 소비자/집계자. facade(:3000)를 호출하고 IngestionJob stage 를 추적·영속한다(kb_pipeline_base_url=http://localhost:3000). |
 
 > ¹ 현행 기동 런처(`service/scripts/start_dedicated_edgequake.sh`)는 임베딩을 원격 litellm 으로 라우팅한다(`EDGEQUAKE_EMBEDDING_PROVIDER=openai`, `EDGEQUAKE_EMBEDDING_BASE_URL=https://litellm.ax-demo.com/v1`, `EDGEQUAKE_EMBEDDING_MODEL=bge-m3`, `EDGEQUAKE_EMBEDDING_DIMENSION=1024`). 로컬 `:7997` 은 과거 스모크 기록(`service/tests/test_e2e_smoke.md`)에만 등장하는 대체/과거 구성이며 운영 배선에는 없다. 채팅/추출 LLM(OpenRouter qwen)과 임베딩 BASE_URL 은 분리되어 있다. (SoT.md §3.5/§5.4 의 `:7997` 표기는 현행 런처보다 오래된 드리프트로, 함께 갱신 권고.)
 
@@ -59,8 +59,8 @@ Parse → Blockify → Modal Enrich → Chunking → Insert → Community → Se
 
 ### 3.2 흐름 설명
 - **Parse / Blockify / Modal Enrich** 는 parse-svc(:19001)가 한 번의 `POST /parse` 안에서 연속 수행하는 FRONT 단계다. 문서를 "markdown + inline HTML"로 파싱하고(Parse), 구조 단위로 블록화한 뒤(Blockify), 표/그림/수식을 검색 가능한 의미로 보강하고 모달 원자 마커로 봉인(Modal Enrich)하여 enriched_content + 모달 스팬 + 페이지 스팬을 산출한다. Excel(xlsx/xlsm/xls)은 parse-svc 가 vendored excel_parser_rag 로 in-process parse+chunk 를 LLM 없이 수행해 `chunk_needed=False` native chunks 를 반환한다(Blockify/Modal 스킵).
-- **Chunking** 은 facade `/chunk`(:19000)가 소유한다. facade 가 청킹 허브(:18060)에 모달 마커를 넘겨 모달 스팬을 단일 원자 청크로 강제하고, 텍스트 갭만 4방법 경쟁으로 청킹한 뒤 선택 근거를 노출한다.
-- **Insert** 는 facade 가 청크 텍스트를 단일 passthrough 문서로 묶어 edgequake(:8081)에 제출하면, edgequake 가 엔티티/관계 추출 → 임베딩 → 그래프 적재를 수행해 단일 Postgres 에 upsert 한다.
+- **Chunking** 은 facade `/chunk`(:3000)가 소유한다. facade 가 청킹 허브(:18060)에 모달 마커를 넘겨 모달 스팬을 단일 원자 청크로 강제하고, 텍스트 갭만 4방법 경쟁으로 청킹한 뒤 선택 근거를 노출한다.
+- **Insert** 는 facade 가 청크 텍스트를 단일 passthrough 문서로 묶어 edgequake(:3001)에 제출하면, edgequake 가 엔티티/관계 추출 → 임베딩 → 그래프 적재를 수행해 단일 Postgres 에 upsert 한다.
 - **Community** 는 검색과 분리된 오프라인 배치다. AGE 그래프를 Louvain 으로 커뮤니티로 나누고 커뮤니티별 GraphRAG 리포트를 생성·저장한다. 온디맨드 트리거(`POST /communities/build`)와 검색 시 build-if-missing 두 경로로 기동된다.
 - **Search** 는 두 갈래로 구분된다. (1) **실노출 경로**: facade `POST /search` 는 edgequake 의 hybrid 질의(`POST /api/v1/query`)를 직접 호출하고 결과를 정규화해 `{answer, results}` 로 반환한다(현재 외부에 노출된 실제 검색 능력). (2) **라이브러리 경로(미배선)**: `kb_pipeline/search.py` 의 `unified_search` local/global 라우터는 모듈로만 존재하며 facade `/search` 에 연결되어 있지 않다(현재 미배선/계획 메커니즘).
 
@@ -138,7 +138,7 @@ VL OCR 계약(in-process, `parsers/ocr/vl_api.py`): OpenAI-호환 chat/completio
 
 | 항목 | 내용 |
 |------|------|
-| 수행 주체 | facade `/chunk`(:19000)가 청킹을 **소유**하고, 실제 분할 연산은 청킹 허브(:18060)에 위임한다. edgequake 는 청킹에 관여하지 않는다. |
+| 수행 주체 | facade `/chunk`(:3000)가 청킹을 **소유**하고, 실제 분할 연산은 청킹 허브(:18060)에 위임한다. edgequake 는 청킹에 관여하지 않는다. |
 | 입력 | Modal Enrich 가 생성한 enriched_content(모달 마커 인라인), 문서명, 선택적 페이지 스팬·페이지 본문. |
 | 처리 | facade 가 모달 마커를 청킹 잡에 넘겨 각 모달을 단일 원자 청크로 강제하고, 나머지 텍스트만 4방법 경쟁으로 청킹한다. 대형 입력·느린 방법 대응으로 비동기 잡을 제출해 완료까지 폴링한다. 허브가 여러 방법을 비교·채점해 최적 방법을 고르면 facade 가 응답을 외부 계약으로 정규화한다. |
 | 산출물 | 정규화된 청크 리스트와 선택 근거(어떤 방법이 왜 선택됐는지). |
@@ -258,7 +258,13 @@ VL OCR 계약(in-process, `parsers/ocr/vl_api.py`): OpenAI-호환 chat/completio
 - **Search 라우터 배선**: 현재 facade `/search` 는 bare edgequake hybrid 만 노출하고 `unified_search` local/global 라우터는 미배선(app.py 미import). global(커뮤니티 map-reduce) 능력을 외부에 노출할지·언제 라우터를 facade 에 연결할지 확정 필요.
 - **커뮤니티 트리거/가드**: `POST /communities/build`(202 + 백그라운드, 예외 swallow) 온디맨드 경로와 global 검색의 build-if-missing 경로가 공존. KB 규모별 admission 임계(대형 그래프 리소스 가드)가 운영 가능한 형태인지 확정 필요.
 - **DSN 포트 정합**: 코드 기본 DSN 은 `port=5432`(community.py `DEFAULT_DSN`)이고 운영 전제는 `:5433` — 환경별 명시 필요.
-- **edgequake base URL 정합**: search.py 기본 `:8080` vs 전용 edgequake 기동 `:8081` — 배선 일원화 필요.
+- ~~**edgequake base URL 정합**~~ → **정리됨(P1 2026-08-10)**: dev edgequake 는 compose 가 발행하는
+  **호스트 `:3001`**(컨테이너 내부 8081)이고, `service/app.py` 의 `KBP_EDGEQUAKE_URL` 코드 기본값도
+  `:3001` 이다. dedicated 런처(`start_dedicated_edgequake.sh`)로 띄우면 8081 이므로 그때만
+  `KBP_EDGEQUAKE_URL` 을 명시한다.
+  ⚠️ 옛 진술의 `:8080` 은 **kb 쪽 별건**이었다 — `knowledge_base` 의 `edgequake_base_url` 기본값이고
+  그건 kbp edgequake 가 아니라 **별도 벤치마크 스택**(rag-edgequake-benchmark)의 API 다.
+  같은 값으로 '일원화' 하면 provider=edgequake 비교 코호트가 kbp 라이브 데이터를 오염시킨다.
 
 ### 6.6 모니터링 / 인덱스
 - **타이밍 모니터링 미구현**: 통일 타이밍 트리는 plan(v2 READY) 단계. facade `/chunk`·`/insert` passthrough 훅은 코드에 존재하나, parse-svc 파서 단계 타이머(P2), edgequake phase 도출(P3), kb-backend 집계·영속·프론트 카드(P5/P6)는 미구현. parse-svc 내부 실행 지점 확정이 하드 게이트.

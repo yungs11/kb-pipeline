@@ -52,7 +52,7 @@ LLM·임베딩·리랭커·VL은 스키마 호환 목업으로 대체(응답 품
 | 엔진 | edgequake | `kbp-edgequake:airgap` | 3001 | 빌드 |
 | 문서 | doc_guard | `kbp-doc_guard:airgap` | (내부) | 빌드 |
 | 문서 | adaptive_chunk | `kbp-adaptive_chunk:airgap` | 18060 | 빌드 |
-| 앱 | parse-svc | `kbp-parse-svc:airgap` | 18081 | 빌드 |
+| 앱 | parse-svc | `kbp-parse-svc:airgap` | 19001 | 빌드 |
 | 앱 | facade | `kbp-facade:airgap` | **3000** | 빌드 |
 | 앱 | facade-worker | `kbp-facade:airgap`(명령만 다름) | (내부) | 재사용 |
 | 확인용 | edgequake_webui | `kbp-edgequake_webui:airgap` | **3002** | 빌드 |
@@ -155,7 +155,7 @@ podman-compose -p kbp-airgap -f docker-compose.airgap.yml --env-file .env up -d
 # 또는 compose 파일 최상단의 `name: kbp` 를 다른 값으로 바꾼다
 ```
 
-호스트 포트도 함께 겹치므로(5433·3000·3003·18081 …) `ports:` **좌측 숫자**도 바꿔야 한다.
+호스트 포트도 함께 겹치므로(5433·3000·3003·19001 …) `ports:` **좌측 숫자**도 바꿔야 한다.
 
 ---
 
@@ -201,7 +201,7 @@ vi .env      # 【A. 온프렘 재설정 필수】 블록
 ```bash
 curl -fsS http://localhost:3000/healthz      # facade
 curl -fsS http://localhost:3001/health       # edgequake
-curl -fsS http://localhost:18081/healthz     # parse-svc
+curl -fsS http://localhost:19001/healthz     # parse-svc
 
 # ★ facade-worker 등록 — 0 이면 healthz 는 다 통과해도 /parse·/ingest 가 503
 curl -fsS -H "X-Facade-Key: $KBP_FACADE_KEY" http://localhost:3000/jobs/workers
@@ -269,7 +269,7 @@ curl -sS -H "X-Facade-Key: $KBP_FACADE_KEY" -F "file=@문서.pdf" http://localho
 동시 대기자 — 초과 요청은 거절), `KBP_JOB_MAX_UPLOAD_BYTES`(기본 50MB),
 `KBP_JOB_LEGACY_WAIT_SECONDS`(기본 3300s).
 
-잡 큐 없이 더 가볍게: `parse-svc` 직접 호출(`:18081/parse`) — 컨테이너 1개면 되지만
+잡 큐 없이 더 가볍게: `parse-svc` 직접 호출(`:19001/parse`) — 컨테이너 1개면 되지만
 동시성 제어·재시도는 직접 해야 한다.
 
 ---

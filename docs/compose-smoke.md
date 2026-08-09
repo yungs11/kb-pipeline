@@ -58,5 +58,5 @@ answer: 생성됨
 
 ## 5. 운영 메모
 
-- 호스트 포트 충돌(다른 스택: trust-backend :18050, docker-minio :19010/11)은 `docker-compose.override.yml`(로컬 전용, gitignore)로 minio→19020/21, document-parser→18051 재매핑해 공존.
+- 호스트 포트 충돌(다른 스택: trust-backend :18050, docker-minio :9000/11)은 `docker-compose.override.yml`(로컬 전용, gitignore)로 minio→19020/21, document-parser→18051 재매핑해 공존.
 - 기동: `git submodule update --init --recursive edgequake` → `.env`(실 시크릿) → `docker compose up -d --wait`. 상세는 `docs/kbp-docker-startup.md`.

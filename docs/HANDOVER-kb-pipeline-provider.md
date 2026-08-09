@@ -15,9 +15,9 @@
 [브라우저] → frontend(:4000) ──BACKEND_ORIGIN──▶ kb-backend(:8088, knowledge_base 오케스트레이터)
                                                   │  provider == "kb_pipeline" 2단계 흐름
   Phase1 parse_preview ─┬─ (xlsx면) 엑셀 게이트: excel-parser(:18055) → doc_guard(:8000, /v1/check-excel)
-                        └─ facade(:19000) /parse ─ parse-svc(:19001) [비엑셀+모달LLM] · OCR(:18050) · excel-parser(:18055)
-  Phase2 ingest ─ facade(:19000) /chunk ─ adaptive_chunk(:18060)
-                  facade(:19000) /insert ─ edgequake(:8081, passthrough) ─ postgres eq-pg-kbp(:5433, pgvector+AGE) + 임베딩 bge-m3(원격 litellm)
+                        └─ facade(:3000) /parse ─ parse-svc(:19001) [비엑셀+모달LLM] · OCR(:18050) · excel-parser(:18055)
+  Phase2 ingest ─ facade(:3000) /chunk ─ adaptive_chunk(:18060)
+                  facade(:3000) /insert ─ edgequake(:3001, passthrough) ─ postgres eq-pg-kbp(:5433, pgvector+AGE) + 임베딩 bge-m3(원격 litellm)
                   (적재 성공 후) facade /communities/build ─ edgequake (OpenRouter qwen)
   검색 ─ kb-backend → facade /search ─ edgequake
 ```
@@ -33,14 +33,14 @@ dify/raganything 등 다른 provider 용). 청킹·모달원자성은 **facade `
 | # | 서비스 | 포트 | 레포 / 위치 | 브랜치 | 용도 | 기동 |
 |---|---|---|---|---|---|---|
 | A | **postgres (eq-pg-kbp)** | 5433 | docker `ghcr.io/raphaelmansuy/edgequake-postgres` | — | kb_pipeline 단일 저장소(pgvector+AGE). named volume `eq_pg_data`(데이터 보존) | compose `kbp` 스택 또는 edgequake 런처 |
-| B | **edgequake (전용)** | 8081 | `8.kb-pipeline/edgequake` (submodule) | feat/kb-pipeline-provider | 베이스 엔진: passthrough 적재 + 추출/임베딩/AGE 그래프/커뮤니티/검색 + per-KB RLS | compose `kbp` 스택 (첫 빌드 ~9-10분, Rust 캐시 후 빠름) |
+| B | **edgequake (전용)** | 3001 | `8.kb-pipeline/edgequake` (submodule) | feat/kb-pipeline-provider | 베이스 엔진: passthrough 적재 + 추출/임베딩/AGE 그래프/커뮤니티/검색 + per-KB RLS | compose `kbp` 스택 (첫 빌드 ~9-10분, Rust 캐시 후 빠름) |
 | C | **OCR / document-parser** | 18050 | `8.kb-pipeline` 내 `Dockerfile.aws` 참조 | — | 이미지·스캔 PDF VLM/OCR | compose `kbp` 스택 (`document-parser` 서비스) |
 | D | **임베딩 bge-m3** | (원격) | 원격 litellm `https://litellm.ax-demo.com/v1` | — | 1024d 임베딩(청킹 채점·적재·검색 공통) | 원격 — 키만 필요 |
 | E | **adaptive_chunk** | 18060 | `99.projects/adaptive_chunk` | feat/adaptive-chunk-metric-weighting | 청킹 허브(atomic_markers 보존, 텍스트 갭 4방법 경쟁) | compose `kbp` 스택 또는 repo `./restart.sh` |
 | F | **excel-parser** | 18055 | `7.excel-parser` | feat/excel-gate | 엑셀 파싱(LLM無) + **게이트 요약 `stats.gate_summary`** 산출 | compose `kbp` 스택 또는 `scripts/run-excel-parser.sh` |
 | G | **doc_guard** | 8000 (호스트: 8001) | `99.projects/shinhan_trust/doc_guard` | feat/excel-gate | 엑셀 게이트 판정·한국어 메시지(`POST /v1/check-excel`) | compose `kbp` 스택 또는 `scripts/run-doc-guard.sh` |
 | H | **parse-svc** | 19001 | `8.kb-pipeline/parse_service` | feat/kb-pipeline-provider | 비엑셀 파싱 + 모달 LLM 서술 → enriched_content + 모달마커 | compose `kbp` 스택 또는 `scripts/run-parse-svc.sh` |
-| I | **facade (kb-pipeline)** | 19000 | `8.kb-pipeline/service` | feat/kb-pipeline-provider | 오케스트레이터: `/parse`·`/chunk`·`/insert`·`/search`·`/communities/build` | compose `kbp` 스택 또는 `scripts/run-facade.sh` |
+| I | **facade (kb-pipeline)** | 3000 | `8.kb-pipeline/service` | feat/kb-pipeline-provider | 오케스트레이터: `/parse`·`/chunk`·`/insert`·`/search`·`/communities/build` | compose `kbp` 스택 또는 `scripts/run-facade.sh` |
 | J | **kb-backend (knowledge_base)** | 8088 | `99.projects/shinhan_trust/knowledge_base/backend` | feat/kb-pipeline-provider | 소비자/집계자: 업로드·잡추적·provider 분기(kb_pipeline tail)·게이트 | `8.kb-pipeline/scripts/run-kb-backend.sh` (**compose 범위 외**) |
 | K | **frontend (knowledge_base)** | 4000(prod)/4001(dev) | `99.projects/shinhan_trust/knowledge_base/frontend` | feat/kb-pipeline-provider | UI(업로드·프로세스 단계·게이트 팝업·문서상세) | `next dev`/`next build && start` (**compose 범위 외**) |
 
@@ -91,27 +91,27 @@ docker compose ps
 
 | 서비스 | 호스트 포트 | 비고 |
 |---|---|---|
-| facade | **19000** | `kb_pipeline_base_url` / `KBP_EDGEQUAKE_URL` 의 기준 포트 |
+| facade | **3000** | `kb_pipeline_base_url` / `KBP_EDGEQUAKE_URL` 의 기준 포트 |
 | parse-svc | 19001 | |
-| edgequake | 8081 | |
+| edgequake | 3001 | |
 | excel-parser | 18055 | |
 | doc_guard | **8001** → 컨테이너 8000 | kb-backend 설정에서 `DOCGUARD_BASE_URL=http://localhost:8001` |
 | adaptive_chunk | (내부 전용, 18060) | compose 내부 DNS만 사용(facade → http://adaptive_chunk:18060) |
 | document-parser (OCR) | 18050 → 컨테이너 8000 | |
 | postgres (eq-pg-kbp) | 5433 → 컨테이너 5432 | named volume `eq_pg_data` |
-| minio API | 19010 → 컨테이너 9000 | |
-| minio Console | 19011 → 컨테이너 9001 | |
+| minio API | 9000 → 컨테이너 9000 | |
+| minio Console | 3003 → 컨테이너 9001 | |
 
 > **컨테이너 간 DNS**: 서비스명이 곧 호스트명이다(예: facade→parse-svc는 `http://parse-svc:19001`). `localhost`가 아님에 주의.
 
 **frontend / kb-backend 연결 확인**
 
-compose facade 는 호스트 `:19000` 으로 노출된다. 아래 두 곳이 이 포트를 가리키는지 확인한다.
+compose facade 는 호스트 `:3000` 으로 노출된다. 아래 두 곳이 이 포트를 가리키는지 확인한다.
 
 ```bash
 # knowledge_base backend .env
 grep kb_pipeline_base_url 99.projects/shinhan_trust/knowledge_base/backend/.env
-# → kb_pipeline_base_url=http://localhost:19000
+# → kb_pipeline_base_url=http://localhost:3000
 
 # knowledge_base frontend .env.local
 grep BACKEND_ORIGIN 99.projects/shinhan_trust/knowledge_base/frontend/.env.local
@@ -120,10 +120,10 @@ grep BACKEND_ORIGIN 99.projects/shinhan_trust/knowledge_base/frontend/.env.local
 
 **주의: 포트 충돌**
 
-compose 스택이 올리는 포트(특히 18050·18060·19010) 는 다른 프로젝트 스택이 이미 사용 중일 수 있다. 기동 전 점유 여부 확인:
+compose 스택이 올리는 포트(특히 18050·18060·9000) 는 다른 프로젝트 스택이 이미 사용 중일 수 있다. 기동 전 점유 여부 확인:
 
 ```bash
-for p in 5433 8081 8001 18050 18055 18060 19000 19001 19010 19011; do
+for p in 5433 3001 8001 18050 18055 18060 3000 19001 9000 3003; do
   printf ":%s " $p; lsof -ti:$p >/dev/null 2>&1 && echo BUSY || echo free
 done
 ```
@@ -162,7 +162,7 @@ bash /Users/xxx/workspace/8.kb-pipeline/scripts/run-doc-guard.sh         # doc_g
 bash /Users/xxx/workspace/8.kb-pipeline/scripts/run-parse-svc.sh         # parse-svc :19001 (openjdk@17 필요)
 
 # 3) facade  ── compose 미사용 시에만
-bash /Users/xxx/workspace/8.kb-pipeline/scripts/run-facade.sh            # facade :19000
+bash /Users/xxx/workspace/8.kb-pipeline/scripts/run-facade.sh            # facade :3000
 
 # 4) kb-backend (항상 호스트 — compose 범위 외)
 bash /Users/xxx/workspace/8.kb-pipeline/scripts/run-kb-backend.sh        # kb-backend :8088
@@ -182,17 +182,17 @@ npm run dev    # 개발(:4001)  또는  npm run build && npm run start  # prod(:
 ## 3. 헬스 체크 (전부 한 번에)
 
 ```bash
-echo "edgequake   :8081  $(curl -s -m3 localhost:8081/health 2>/dev/null | head -c40)"
+echo "edgequake   :3001  $(curl -s -m3 localhost:3001/health 2>/dev/null | head -c40)"
 echo "adaptive    :18060 $(docker compose exec adaptive_chunk curl -fsS http://localhost:18060/healthz 2>/dev/null)"
 echo "excel-parser:18055 $(curl -s -m3 localhost:18055/healthz 2>/dev/null)"
 echo "doc_guard   :8000  $(curl -s -m3 localhost:8000/healthz 2>/dev/null)"
 echo "parse-svc   :19001 $(curl -s -m3 localhost:19001/healthz 2>/dev/null)"
-echo "facade      :19000 $(curl -s -m3 localhost:19000/healthz 2>/dev/null | head -c60)"
+echo "facade      :3000 $(curl -s -m3 localhost:3000/healthz 2>/dev/null | head -c60)"
 echo "kb-backend  :8088  $(curl -s -m3 -o /dev/null -w '%{http_code}' localhost:8088/openapi.json)"
 echo "OCR         :18050 $(curl -s -m3 -o /dev/null -w '%{http_code}' localhost:18050/health 2>/dev/null)"
 # postgres(:5433): docker ps | grep eq-pg-kbp
 ```
-포트 점유만 빠르게: `for p in 5433 8081 18060 18055 8000 19001 19000 8088 18050; do printf ":%s " $p; lsof -ti:$p >/dev/null 2>&1 && echo UP || echo DOWN; done`
+포트 점유만 빠르게: `for p in 5433 3001 18060 18055 8000 19001 3000 8088 18050; do printf ":%s " $p; lsof -ti:$p >/dev/null 2>&1 && echo UP || echo DOWN; done`
 
 ---
 
@@ -267,7 +267,7 @@ echo "OCR         :18050 $(curl -s -m3 -o /dev/null -w '%{http_code}' localhost:
 3. kb-backend/redis/Qdrant 인프라(compose 범위 외) 기동.
 4. **`docker compose up -d --build`** (8.kb-pipeline/) — 9개 서비스 일괄 기동. 첫 빌드는 Rust 컴파일로 ~9-10분.
 5. kb-backend/frontend 는 호스트에서 기동(§2-B 4~5번).
-6. `knowledge_base/backend/.env` 의 `kb_pipeline_base_url=http://localhost:19000` 확인. `DOCGUARD_BASE_URL=http://localhost:8001` 확인.
+6. `knowledge_base/backend/.env` 의 `kb_pipeline_base_url=http://localhost:3000` 확인. `DOCGUARD_BASE_URL=http://localhost:8001` 확인.
 7. **§3 헬스 체크** 전부 통과 확인.
 8. UI(:4000)에서 KB 생성 시 **provider=`kb_pipeline`** 선택 → 문서 업로드 → 파싱→게이트검증→청킹→적재 확인.
 9. 막히면 **§5 표**로 진단(대개 "옛 프로세스", "포트 충돌", 또는 "의존 서비스 down").

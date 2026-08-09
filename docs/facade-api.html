@@ -1,4 +1,4 @@
-<title>kb-pipeline facade :19000 — API · 운영 매뉴얼</title>
+<title>kb-pipeline facade :3000 — API · 운영 매뉴얼</title>
 
 <style>
   :root {
@@ -504,7 +504,7 @@
 
   <header class="masthead">
     <p class="eyebrow">kb-pipeline · 내부 서비스 계약</p>
-    <h1>facade <span class="port">:19000</span><br />API · 운영 매뉴얼</h1>
+    <h1>facade <span class="port">:3000</span><br />API · 운영 매뉴얼</h1>
     <p class="standfirst">
       업로드 문서 1건을 parse → chunk → insert 로 흘려보내는 오케스트레이터의 전체 계약,
       실제 동시 처리 한계, 그리고 기동·중지 절차.
@@ -588,14 +588,14 @@
                     └───────────────┬──────────────────────────┘
                                     │ HTTP  (+X-Facade-Key)
                     ┌───────────────▼──────────────────────────┐
-                    │  facade  :19000   service/app.py         │
+                    │  facade  :3000   service/app.py         │
                     │  /parse /chunk /insert /search /ingest   │
                     │  /chunks /doc /communities/build         │
                     └──┬─────────────┬──────────────┬──────────┘
    KBP_PARSE_SVC_URL   │             │              │  KBP_EDGEQUAKE_URL
                        │  KBP_ADAPTIVE_CHUNK_URL    │
     ┌──────────────────▼──┐  ┌───────▼──────────┐  ┌▼───────────────────────┐
-    │ parse-svc  :19001   │  │ adaptive_chunk   │  │ edgequake  :8081       │
+    │ parse-svc  :19001   │  │ adaptive_chunk   │  │ edgequake  :3001       │
     │ parse + blockify +  │  │ :18060           │  │ 추출·임베딩·AGE 그래프 │
     │ modal enrich        │  │ 4방법 경쟁 청킹  │  │ ·검색  (passthrough)   │
     └──┬──────────────┬───┘  └──────────────────┘  └───────────┬────────────┘
@@ -660,7 +660,7 @@
         <h2><span class="h2-num">03</span>API 레퍼런스</h2>
 
         <p class="lede">
-          Base URL <code>http://localhost:19000</code>. 런처가 <code>--host 127.0.0.1</code> 로 바인드한다
+          Base URL <code>http://localhost:3000</code>. 런처가 <code>--host 127.0.0.1</code> 로 바인드한다
           — <strong>루프백 전용</strong>이며 외부에 노출되지 않는다.
         </p>
 
@@ -707,7 +707,7 @@
             <span class="ep-tag">무인증</span>
           </div>
           <p class="ep-sub">프로세스 부팅 여부만 증명한다. 다운스트림 상태는 보지 않는다.</p>
-<pre>curl -s http://localhost:19000/healthz
+<pre>curl -s http://localhost:3000/healthz
 <span class="cm"># {"status":"ok"}</span></pre>
         </div>
 
@@ -790,7 +790,7 @@
 <pre>curl -s -m 1800 \
   -F "file=@sample.pdf;type=application/pdf" \
   -F "docs_id=$(shasum -a 256 sample.pdf | cut -c1-16)" \
-  http://localhost:19000/parse \
+  http://localhost:3000/parse \
   | jq '{status, n_blocks, len: (.enriched_content|length), pages: .page_count}'</pre>
         </div>
 
@@ -1277,7 +1277,7 @@
             <tbody>
               <tr><td><code>KBP_PARSE_SVC_URL</code></td><td><code>localhost:19001</code></td><td>parse-svc</td></tr>
               <tr><td><code>KBP_ADAPTIVE_CHUNK_URL</code></td><td><code>localhost:18060</code></td><td>청킹 허브</td></tr>
-              <tr><td><code>KBP_EDGEQUAKE_URL</code></td><td><code>localhost:8081</code></td><td>edgequake</td></tr>
+              <tr><td><code>KBP_EDGEQUAKE_URL</code></td><td><code>localhost:3001</code></td><td>edgequake</td></tr>
               <tr><td><code>KBP_PG_DSN</code></td><td><strong>필수</strong></td><td><code>/communities/build</code> 전용 DB 접속 (런처가 검증)</td></tr>
               <tr><td><code>KBP_OPENAI_API_KEY</code></td><td><strong>필수</strong></td><td>커뮤니티 리포트 LLM (런처가 검증)</td></tr>
               <tr><td><code>KBP_OPENAI_BASE_URL</code></td><td>—</td><td>현재 OpenRouter</td></tr>
@@ -1322,11 +1322,11 @@
 
 <span class="cm"># 1) 백킹 서비스</span>
 docker compose up -d --no-build postgres minio edgequake adaptive_chunk gotenberg
-docker compose up -d --no-build edgequake_webui        <span class="cm"># 그래프 보기 UI (호스트 :13000)</span>
+docker compose up -d --no-build edgequake_webui        <span class="cm"># 그래프 보기 UI (호스트 :3002)</span>
 
 <span class="cm"># 2) 애플리케이션 (호스트)</span>
 bash scripts/run-parse-svc.sh    <span class="cm"># :19001 — 반드시 facade 보다 먼저</span>
-bash scripts/run-facade.sh       <span class="cm"># :19000</span></pre>
+bash scripts/run-facade.sh       <span class="cm"># :3000</span></pre>
 
         <p>
           <strong>의존 순서</strong>: postgres → edgequake / adaptive_chunk / gotenberg / minio → parse-svc → facade.
@@ -1355,7 +1355,7 @@ bash scripts/run-facade.sh       <span class="cm"># :19000</span></pre>
         <p>전용 stop 스크립트는 없다. 재기동은 런처가 알아서 죽이고 다시 띄우므로 <strong>완전 중지</strong>만 아래처럼 한다.</p>
 
 <pre><span class="cm"># 포트 기준 — 권장. 모듈 패턴 kill 은 다른 서비스를 오폭할 수 있다.</span>
-kill "$(lsof -nP -iTCP:19000 -sTCP:LISTEN -t)"   <span class="cm"># facade</span>
+kill "$(lsof -nP -iTCP:3000 -sTCP:LISTEN -t)"   <span class="cm"># facade</span>
 kill "$(lsof -nP -iTCP:19001 -sTCP:LISTEN -t)"   <span class="cm"># parse-svc</span>
 
 <span class="cm"># 패턴 기준 (참고)</span>
@@ -1380,29 +1380,29 @@ docker compose down     <span class="cm"># 컨테이너 제거, 볼륨은 유지
 
         <h3>헬스체크</h3>
 
-<pre>curl -fsS http://localhost:19000/healthz       <span class="cm"># facade    {"status":"ok"}</span>
+<pre>curl -fsS http://localhost:3000/healthz       <span class="cm"># facade    {"status":"ok"}</span>
 curl -fsS http://localhost:19001/healthz       <span class="cm"># parse-svc  deps.vl_ocr = 실 OCR origin</span>
-curl -fsS http://localhost:8081/health         <span class="cm"># edgequake</span>
+curl -fsS http://localhost:3001/health         <span class="cm"># edgequake</span>
 curl -fsS http://localhost:18060/healthz       <span class="cm"># adaptive_chunk</span>
-curl -fsS http://localhost:13000/popup/graph   <span class="cm"># edgequake webui (그래프 보기)</span>
+curl -fsS http://localhost:3002/popup/graph   <span class="cm"># edgequake webui (그래프 보기)</span>
 docker compose ps                              <span class="cm"># 컨테이너 healthy 여부</span></pre>
 
         <p><strong>healthz 는 "프로세스가 떴다"만 증명한다.</strong> 파이프라인이 실제로 도는지는 스모크로 확인한다.</p>
 
 <pre><span class="cm"># ① parse 왕복 — java(OpenDataLoader) + 모달 경로까지 증명</span>
 curl -s -m 1800 -F "file=@sample.pdf;type=application/pdf" \
-  http://localhost:19000/parse \
+  http://localhost:3000/parse \
   | jq '{status, n_blocks, enriched_len: (.enriched_content|length), page_count}'
 <span class="cm"># 기대: status 키 없음(=성공) + n_blocks &gt; 0 + enriched_len &gt; 0</span>
 <span class="cm"># enriched_len == 0 이면 java 미탑재 의심 ("Unable to locate a Java Runtime")</span>
 
 <span class="cm"># ② e2e 적재 — chunk_count &gt; 0 &amp; status "indexed"</span>
 curl -s -m 3600 -F "file=@sample.pdf" -F "workspace_id=smoke-kb" -F "doc_id=smoke-1" \
-  http://localhost:19000/ingest \
+  http://localhost:3000/ingest \
   | jq '{status, chunk_count, method: .chunking_selection.method_selected}'
 
 <span class="cm"># ③ 검색 왕복</span>
-curl -s -X POST http://localhost:19000/search -H 'Content-Type: application/json' \
+curl -s -X POST http://localhost:3000/search -H 'Content-Type: application/json' \
   -d '{"workspace_id":"smoke-kb","query":"핵심 내용 요약","top_k":5}' \
   | jq '{answer, n: (.results|length)}'</pre>
 
@@ -1501,7 +1501,7 @@ docker compose up -d --build facade      <span class="cm"># 단일 서비스 재
               <tr>
                 <td>"그래프 보기" 실패</td>
                 <td><code>edgequake_webui</code> 미기동</td>
-                <td><code>docker compose up -d --no-build edgequake_webui</code> → <code>:13000</code> 검증</td>
+                <td><code>docker compose up -d --no-build edgequake_webui</code> → <code>:3002</code> 검증</td>
               </tr>
               <tr>
                 <td>검색 결과 0건인데 에러 없음</td>

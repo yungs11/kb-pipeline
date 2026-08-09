@@ -30,7 +30,7 @@
 
 ---
 
-## 2. facade (kb-pipeline, :19000) — 오케스트레이터
+## 2. facade (kb-pipeline, :3000) — 오케스트레이터
 
 `service/app.py`. 외부 소비자(knowledge_base 백엔드)에게 capability 를 노출하고 다운스트림을 숨긴다. **청킹과 모달 원자성을 소유**한다.
 
@@ -130,7 +130,7 @@
 
 ---
 
-## 5. edgequake (:8081) — 베이스 엔진 (차용)
+## 5. edgequake (:3001) — 베이스 엔진 (차용)
 
 Rust, `crates/edgequake-pipeline`. passthrough 로 facade 청크를 받아 추출·임베딩·그래프 적재·검색 수행.
 
