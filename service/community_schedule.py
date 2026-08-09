@@ -16,8 +16,14 @@ enqueue 했다. 빌드 1건은 Louvain + 커뮤니티마다 LLM 리포트라 수
   * GC 가 TTL(기본 72h) 경과 잡을 지우므로, 야간이 3일 넘게 멈추면 적재 **증거째**
     사라져 영구 미빌드가 된다. `graph_touch` 는 GC 대상이 아니다.
 
-시각은 **로컬존**으로 다룬다. 이 레포의 다른 코드는 `datetime.now(timezone.utc)` 관례인데
-그걸 그대로 쓰면 `BUILD_AT=03:00` 창이 KST 12:00 에 열려 목적이 정반대가 된다.
+시각은 **스케줄 존**(`KBP_COMMUNITY_TZ`, 기본 `Asia/Seoul`)으로 다룬다. 이 레포의 다른
+코드는 `datetime.now(timezone.utc)` 관례인데 그걸 그대로 쓰면 `BUILD_AT=03:00` 창이
+KST 12:00 에 열려 목적이 정반대가 된다.
+
+그 존을 **컨테이너 `TZ` 와 분리**한 이유는 `zone()` 주석에 있다(D33) — 한 변수가
+"창 판정"과 "로그 시각 표기"를 겸하면 한쪽을 고칠 때 다른 쪽이 조용히 깨진다.
+이 모듈의 모든 시각 계산은 `datetime.now(zone())` 로 **명시 tz** 를 쓴다. naive
+`datetime.now()` 는 한 곳도 없으므로 **프로세스 TZ 가 무엇이든 판정은 같다.**
 """
 from __future__ import annotations
 
@@ -53,15 +59,24 @@ def _enabled() -> bool:
 def zone() -> Any:
     """스케줄 판정용 타임존.
 
-    2단 폴백을 둔다 — TZ 오타(`KST-9` 같은 POSIX 표기 포함)에서 한 번, **tzdata 자체가
+    **컨테이너의 `TZ` 를 읽지 않는다**(D33). `TZ` 를 쓰면 두 가지가 한 변수에 묶인다 —
+    (a) 야간 창을 어느 시간대로 판정하는가, (b) 그 컨테이너의 **로그 시각 표기**.
+    앵커에 `TZ=Asia/Seoul` 을 넣으면 facade API 로그까지 KST 가 되어 parse-svc(UTC)와
+    시각축이 섞이고, 반대로 로그를 UTC 로 맞추려 `TZ=UTC` 로 두면 **야간 창이 조용히
+    KST 정오로 이동**한다. 한쪽을 고치면 다른 쪽이 깨지는 구조였다.
+
+    그래서 스케줄 시간대는 전용 `KBP_COMMUNITY_TZ` 로 분리하고, 컨테이너는 UTC 로 둔다
+    (로그 시각축 통일). 미설정 기본값이 `Asia/Seoul` 이라 **아무것도 안 줘도 정확하다.**
+
+    2단 폴백을 둔다 — 오타(`KST-9` 같은 POSIX 표기 포함)에서 한 번, **tzdata 자체가
     없는 이미지**에서 또 한 번. 폴백이 같은 예외를 던지면 스레드 기동이 막히고, 그게
     워커 본체 기동 지점이라 live worker 0 → facade 의 모든 제출이 503 이 된다.
     """
-    name = os.environ.get("TZ") or "Asia/Seoul"
+    name = os.environ.get("KBP_COMMUNITY_TZ") or "Asia/Seoul"
     try:
         return ZoneInfo(name)
     except Exception:  # noqa: BLE001
-        log.warning("TZ=%r 사용 불가 — Asia/Seoul 폴백", name)
+        log.warning("KBP_COMMUNITY_TZ=%r 사용 불가 — Asia/Seoul 폴백", name)
     try:
         return ZoneInfo("Asia/Seoul")
     except Exception:  # noqa: BLE001 - tzdata 미포함 이미지

@@ -36,7 +36,7 @@ class SpyRunner:
 
 
 def _env(monkeypatch, **kw):
-    monkeypatch.setenv("TZ", "Asia/Seoul")
+    monkeypatch.setenv("KBP_COMMUNITY_TZ", "Asia/Seoul")
     monkeypatch.setenv("KBP_COMMUNITY_BUILD_AT", "03:00")
     monkeypatch.setenv("KBP_COMMUNITY_WINDOW_MINUTES", "120")
     monkeypatch.setenv("KBP_COMMUNITY_DEADLINE_MINUTES", "420")
@@ -266,8 +266,41 @@ def test_finish_run_failure_does_not_propagate(monkeypatch):
 
 
 def test_bad_tz_falls_back_without_raising(monkeypatch):
-    monkeypatch.setenv("TZ", "KST-9")        # POSIX 표기 — ZoneInfo 가 못 읽는다
+    monkeypatch.setenv("KBP_COMMUNITY_TZ", "KST-9")   # POSIX 표기 — ZoneInfo 가 못 읽는다
     assert cs.zone() is not None
+
+
+# ── D33: 스케줄 존과 컨테이너 TZ 의 분리 ───────────────────────────────────
+
+def test_schedule_zone_defaults_to_kst_without_any_env(monkeypatch):
+    """★ 아무 것도 안 줘도 KST 로 판정해야 한다.
+
+    이게 깨지면 배포에 `KBP_COMMUNITY_TZ` 를 **반드시** 줘야 하는 셈이고, 안 준 배포는
+    창이 조용히 UTC 03:00(=KST 정오)으로 이동한다 — 실패가 아니라 **잘못된 시각에 성공**
+    이라 로그로 드러나지 않는다.
+    """
+    monkeypatch.delenv("KBP_COMMUNITY_TZ", raising=False)
+    monkeypatch.delenv("TZ", raising=False)
+    assert cs.zone().utcoffset(datetime(2026, 8, 9)) == timedelta(hours=9)
+
+
+def test_container_tz_does_not_move_the_window(monkeypatch):
+    """★ D33 의 불변식 — 컨테이너 `TZ` 는 스케줄 판정에 영향이 없어야 한다.
+
+    한 변수가 "창 판정"과 "로그 시각 표기"를 겸하면, 로그를 UTC 로 통일하려 `TZ=UTC` 로
+    두는 순간 야간 창이 KST 정오로 이동한다. `zone()` 이 `TZ` 를 읽으면 이 테스트가
+    빨강이 된다.
+    """
+    monkeypatch.delenv("KBP_COMMUNITY_TZ", raising=False)
+    for tz in ("UTC", "America/New_York", "KST-9", ""):
+        monkeypatch.setenv("TZ", tz)
+        off = cs.zone().utcoffset(datetime(2026, 8, 9))
+        assert off == timedelta(hours=9), f"TZ={tz!r} 가 스케줄 존을 {off} 로 바꿨다"
+
+
+def test_schedule_zone_is_overridable_by_its_own_env(monkeypatch):
+    monkeypatch.setenv("KBP_COMMUNITY_TZ", "UTC")
+    assert cs.zone().utcoffset(datetime(2026, 8, 9)) == timedelta(0)
 
 
 def test_bad_build_at_falls_back(monkeypatch):

@@ -695,11 +695,30 @@ grep 이 `set -e` 아래서 스크립트를 죽임). 최종적으로 v4 는 READ
 
 **언제 필요해지나**: 수년 누적되거나 batch_runs 를 다른 배치와 공유할 때
 
-### D33. TZ 를 facade_env 공유 앵커에 넣으면 facade API 컨테이너 로그 시각도 KST 가 되어 parse-svc(UTC)와 시각축이 섞인다
+### D33. TZ 공유 앵커가 facade 로그 시각축을 KST 로 바꾼다 — ✅ **해소 (2026-08-10)**
 
-**왜 범위 밖**: service/·kb_pipeline/ 에 naive datetime 사용처가 없어 데이터 정합성 영향이 확인되지 않았고 로그 관측 표준은 배포 정책
+**원인은 "한 변수가 두 일을 겸한 것"이었다.** `TZ` 하나가 (a) 야간 창을 어느 시간대로
+판정하는가 (b) 그 컨테이너의 **로그 시각 표기** 를 동시에 정했다. 그래서 한쪽을 고치면
+다른 쪽이 깨졌다 — 로그를 UTC 로 통일하려 `TZ=UTC` 로 두면 **야간 창이 조용히 KST
+정오로 이동**하고, 창을 지키려 `TZ=Asia/Seoul` 로 두면 facade 로그가 parse-svc(UTC)와
+섞였다.
 
-**언제 필요해지나**: 전 서비스 TZ 통일/UTC 고정 같은 인시던트 로그 상관분석 표준을 정할 때
+**분리로 해소**: 스케줄 존을 전용 `KBP_COMMUNITY_TZ`(기본 `Asia/Seoul`)로 옮기고
+컨테이너 `TZ` 는 걷어냈다 → 전 서비스 로그 UTC 통일.
+
+원래 "범위 밖" 근거였던 *naive datetime 사용처가 없다* 는 사실이 오히려 해법이었다 —
+`community_schedule.py` 는 전부 `datetime.now(zone())` 로 **명시 tz** 를 쓰므로 프로세스
+TZ 와 무관하고, 그래서 컨테이너 `TZ` 를 안전하게 뺄 수 있었다.
+
+불변식을 테스트로 고정했다(`test_community_schedule.py`):
+- `test_container_tz_does_not_move_the_window` — `TZ` 를 UTC/뉴욕/오타/빈값으로 흔들어도
+  창 판정이 KST 로 유지된다. `zone()` 이 `TZ` 를 읽으면 빨강(실증).
+- `test_schedule_zone_defaults_to_kst_without_any_env` — **아무 env 없이도** KST.
+  이게 깨지면 안 준 배포가 조용히 UTC 창으로 돌아간다.
+
+**부수 정정** — 이 과정에서 `verify-bundle.sh` 에 넣었던 "배치 켜짐 + TZ 빔 → 차단"
+가드가 **잘못된 전제**였음이 드러났다. 빈 값도 기본값 `Asia/Seoul` 로 정확하므로 차단하면
+정상 배포를 막는다. 경고로 바꿨다(`TZ` 가 설정돼 있으면 로그 시각축 혼합 경고).
 
 ### D34. DELETE /doc 이 잡 행을 안 남겨 부분 삭제 workspace 가 다음 적재까지 낡은 리포트를 쓴다
 
@@ -707,7 +726,11 @@ grep 이 `set -e` 아래서 스크립트를 죽임). 최종적으로 v4 는 READ
 
 **언제 필요해지나**: 문서 삭제가 검색 품질 사고로 이어진 사례가 나올 때
 
-### D35. .env.example 에 신규 KBP_COMMUNITY_*/TZ 키 추가
+### D35. .env.example 에 신규 KBP_COMMUNITY_* 키 추가 — ✅ **해소 (2026-08-10, A1+B 머지)**
+
+env 템플릿 3종(`.env.example`·`.env.airgap.example`·`.env.parse-only.example`)에 모두
+들어갔다. `TZ` 는 D33 해소로 **키 자체가 없어졌다**(대신 `KBP_COMMUNITY_TZ`).
+`scripts/parse-svc.env.example` 은 파서 전용 템플릿이라(facade 키 전무) 제외가 맞다.
 
 **왜 범위 밖**: .env.example 은 KBP_JOB_* 계열을 하나도 담지 않는 현행 관례이고 compose 가 전부 ${VAR:-기본} 이라 dev 동작에 영향 없음
 

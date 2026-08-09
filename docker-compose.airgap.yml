@@ -86,8 +86,11 @@ x-facade-env: &facade_env
   # ── 야간 커뮤니티 배치(A1) ────────────────────────────────────────────────
   # 커뮤니티 빌드를 적재 경로에서 떼어내 **밤 1회**로 모은다(주간 LLM 부하 회피 +
   # 진입점 단일화). 대가는 "커뮤니티가 최대 하루 뒤 반영"이다.
-  # ⚠️ TZ 를 안 주면 컨테이너는 UTC 라 03:00 이 **KST 12:00** 에 열려 목적이 뒤집힌다.
-  TZ: ${TZ:-Asia/Seoul}
+  # 야간 창을 판정할 시간대. **컨테이너 TZ 와 분리했다**(D33) — 한 변수가 "창 판정"과
+  # "로그 시각 표기"를 겸하면, 로그를 UTC 로 맞추려 TZ=UTC 로 둘 때 창이 조용히 KST
+  # 정오로 이동한다. 컨테이너는 UTC 로 두어 parse-svc 와 로그 시각축을 통일하고,
+  # 창 판정만 이 값으로 한다. 미설정 기본값이 Asia/Seoul 이라 안 줘도 정확하다.
+  KBP_COMMUNITY_TZ: ${KBP_COMMUNITY_TZ:-Asia/Seoul}
   # false 면 스레드를 아예 안 띄운다(파서 전용 배포·비상 정지).
   KBP_COMMUNITY_BUILD_ENABLED: ${KBP_COMMUNITY_BUILD_ENABLED:-true}
   KBP_COMMUNITY_BUILD_AT: ${KBP_COMMUNITY_BUILD_AT:-03:00}

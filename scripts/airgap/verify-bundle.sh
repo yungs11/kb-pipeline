@@ -81,14 +81,18 @@ check_env() {
   # 실패가 아니라 **잘못된 시각에 성공**하므로 로그만 봐서는 드러나지 않는다.
   local cbe; cbe="$(val KBP_COMMUNITY_BUILD_ENABLED "$envf")"
   if [ "$cbe" != "false" ]; then      # 미설정(=기본 true) 또는 true
-    local tz; tz="$(val TZ "$envf")"
-    if [ -z "$tz" ]; then
-      echo "  ${RED}✗ 야간 커뮤니티 배치가 켜져 있는데 TZ 가 비었다${RST}"
-      echo "    ${RED}  → 컨테이너 기본 UTC 라 BUILD_AT=03:00 이 KST 12:00 에 열린다(업무시간).${RST}"
-      echo "    ${RED}  → TZ=Asia/Seoul 을 채우거나, 안 쓸 거면 KBP_COMMUNITY_BUILD_ENABLED=false.${RST}"
-      miss=1
-    elif [ "$tz" != "Asia/Seoul" ]; then
-      echo "  ${YEL}! TZ=$tz — 야간 창이 KST 기준이 아니다. 의도한 것인지 확인.${RST}"
+    # 스케줄 존은 KBP_COMMUNITY_TZ 다(컨테이너 TZ 아님 — D33). **비어도 정확하다**:
+    # zone() 기본값이 Asia/Seoul 이고 이 모듈은 naive datetime 을 쓰지 않는다.
+    # 그래서 빈 값을 차단하지 않는다 — 차단하면 정상 배포를 막는다.
+    local ctz; ctz="$(val KBP_COMMUNITY_TZ "$envf")"
+    if [ -n "$ctz" ] && [ "$ctz" != "Asia/Seoul" ]; then
+      echo "  ${YEL}! KBP_COMMUNITY_TZ=$ctz — 야간 창이 KST 기준이 아니다. 의도한 것인지 확인.${RST}"
+    fi
+    # 컨테이너 TZ 를 세우면 facade 로그가 KST 가 되어 parse-svc(UTC)와 시각축이 섞인다.
+    # 스케줄에는 **아무 영향이 없다**(zone() 이 TZ 를 읽지 않는다) — 로그 관측 문제다.
+    if [ -n "$(val TZ "$envf")" ]; then
+      echo "  ${YEL}! TZ 가 설정돼 있다 — facade 로그가 UTC 가 아니게 되어 parse-svc 와"
+      echo "    시각축이 섞인다(스케줄에는 영향 없음). 로그 상관분석을 하려면 지우세요.${RST}"
     fi
     # 마감이 창보다 짧으면 창 안에 제출된 잡이 그 밤에 곧바로 취소된다(제출 0건과 같다).
     local win dl; win="$(val KBP_COMMUNITY_WINDOW_MINUTES "$envf")"; dl="$(val KBP_COMMUNITY_DEADLINE_MINUTES "$envf")"

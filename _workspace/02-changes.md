@@ -803,3 +803,38 @@ verbatim 질문과 사규 6종에서 만든 리포트 10건. 기본값 `top_k=5`
 - **실 PG 테스트만 잡은 버그**: `_acquire_global_slot` 이 `cur.fetchone()["count"]` 로
   읽었는데 bare `psycopg.connect` 는 `row_factory=dict_row` 가 없어 `TypeError`.
   JobRepo 에는 있어서 착각한 것 — DSN 을 직접 여는 코드에는 없다.
+
+---
+
+## D33 해소 — 스케줄 시간대와 컨테이너 로그 TZ 분리 (2026-08-10)
+
+A1 은 야간 창을 판정하려 compose 공유 앵커에 `TZ=Asia/Seoul` 을 넣었다. 그 결과 facade
+API 컨테이너의 **로그 시각까지** KST 가 되어 parse-svc(UTC)와 시각축이 섞였다(D33).
+
+**원인은 한 변수가 두 일을 겸한 것**이다 — `TZ` 가 (a) 창 판정 시간대와 (b) 로그 시각
+표기를 동시에 정했다. 그래서 한쪽을 고치면 다른 쪽이 깨진다:
+
+| 고치려는 것 | 결과 |
+|---|---|
+| 로그를 UTC 로 통일 → `TZ=UTC` | **야간 창이 KST 정오로 이동**(목적 정반대) |
+| 창을 지킴 → `TZ=Asia/Seoul` | facade 로그가 parse-svc 와 시각축 불일치 |
+
+**해법: 분리.** 스케줄 존을 전용 `KBP_COMMUNITY_TZ`(기본 `Asia/Seoul`)로 옮기고 컨테이너
+`TZ` 는 걷어냈다 → 전 서비스 로그 UTC 통일. env 템플릿 3종·compose 2종에서 `TZ` 키가
+사라지고 `KBP_COMMUNITY_TZ` 로 대체됐다.
+
+D33 이 원래 "범위 밖" 근거로 든 *naive datetime 사용처가 없다* 는 사실이 **오히려 해법**
+이었다 — `community_schedule.py` 는 전부 `datetime.now(zone())` 로 명시 tz 를 쓰므로
+프로세스 TZ 와 무관하다. 그래서 컨테이너 `TZ` 를 안전하게 뺄 수 있었다.
+
+**기본값이 정확하다는 것이 핵심이다.** `KBP_COMMUNITY_TZ` 를 안 줘도 `Asia/Seoul` 로
+판정한다. 이게 깨지면 값을 안 준 배포가 조용히 UTC 창(=KST 정오)으로 돌아가는데, 그건
+실패가 아니라 **잘못된 시각에 성공**이라 로그로 드러나지 않는다. 테스트로 고정했다.
+
+**부수 정정** — A1+B 머지 때 `verify-bundle.sh` 에 넣은 "배치 켜짐 + TZ 빔 → 차단" 가드가
+**잘못된 전제**였다. 빈 값도 정확하므로 차단하면 정상 배포를 막는다. 경고로 바꿨고,
+대신 `TZ` 가 설정돼 있으면 로그 시각축 혼합을 경고한다(스케줄에는 영향 없음을 명시).
+
+**검증**: kbp 741 passed(실 PG 포함, 신규 3건). 되돌리기 실증 — `zone()` 이 `TZ` 를 읽게
+바꾸면 `test_container_tz_does_not_move_the_window` 와 override 테스트가 빨강.
+가드 5경로 실행 확인(무설정 통과 / KST 통과 / UTC 경고 / TZ 경고 / 마감<=창 차단).
