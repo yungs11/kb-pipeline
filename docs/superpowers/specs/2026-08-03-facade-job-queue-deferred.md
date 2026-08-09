@@ -559,7 +559,7 @@ D10 의 claim-clear 설계(트리거마다 새 잡 + 상한 1 직렬화)와 겹�
 `community:{workspace}` 로 쪼개고 상한을 per-workspace 로 재정의한다. 그때
 `KBP_JOB_LIMIT_COMMUNITY` 의 의미가 "전역"에서 "workspace 당" 으로 바뀌는 것을 문서에 명시.
 
-### D22. 커뮤니티 빌드의 **두 번째 진입점** — 검색의 build-if-missing
+### D22. 커뮤니티 빌드의 **두 번째 진입점** — 검색의 build-if-missing — ✅ **해소 (2026-08-10, B)**
 
 `kb_pipeline/search.py:169-176` 이 global 검색에서 커뮤니티 리포트가 없으면
 `build_workspace_communities` 를 **직접** 호출한다(`build_if_missing` 기본값 `True`).
@@ -569,6 +569,22 @@ D10 의 claim-clear 설계(트리거마다 새 잡 + 상한 1 직렬화)와 겹�
 - 유량제어 밖 — 큐의 `community` 잡과 검색 트리거 빌드가 **동시에** 돌 수 있어, D10 이
   기대는 "버킷 상한 1 직렬화" 가 깨진다
 - 웹 프로세스 점유 — D10 이 `/communities/build` 에서 없앤 문제가 이 경로엔 남는다
+
+**해소**: B 가 `service/app.py:_search_global` 에서 `global_search(..., build_if_missing=False)`
+로 호출한다. 리포트가 없으면 빌드하지 않고 `community_reports_ready: false` 를 돌려주고,
+프론트가 "리포트가 아직 준비되지 않았습니다 — 매일 밤 자동 생성" 안내를 띄운다.
+사용자를 6분 동기 빌드로 끌고 들어가지 않는다.
+
+A1(적재 트리거 제거)과 합쳐 **커뮤니티 빌드 진입점이 셋 → 하나**가 됐다.
+
+| 진입점 | 상태 |
+|---|---|
+| 적재 성공 시 자동 트리거 | A1 이 제거 |
+| 검색의 `build_if_missing` | **B 가 False 로 차단(이 항목)** |
+| 야간 배치 + 수동 `POST /communities/build` | 유일하게 남음 |
+
+라이브러리 기본값(`build_if_missing=True`)은 그대로 둔다 — 스크립트·수동 호출자의
+편의이고, 유량제어가 필요한 경로(facade)에서만 끄는 것이 맞다.
 
 **왜 범위 밖**: D10 은 `/communities/build` 엔드포인트를 큐로 옮기는 것이다. 검색 경로는
 동기 응답 안에서 "없으면 지금 만든다" 는 다른 계약이고(잡으로 바꾸면 검색이 빌드 완료까지
