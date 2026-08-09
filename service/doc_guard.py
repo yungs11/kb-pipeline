@@ -17,6 +17,7 @@ import os
 from typing import Any
 
 import httpx
+from service.http_retry import check
 
 
 class DocGuardClient:
@@ -35,13 +36,13 @@ class DocGuardClient:
             f"{self.base}/v1/check-excel",
             json={"filename": filename, "gate_summary": gate_summary},
         )
-        r.raise_for_status()
+        check(r, what="doc_guard /v1/check-excel")
         return r.json() or {}
 
     def list_rules(self) -> Any:
         """룰 카탈로그 패스스루 — 소비자 UI 의 체크박스 구성용."""
         r = self.http.get(f"{self.base}/v1/rules")
-        r.raise_for_status()
+        check(r, what="doc_guard /v1/rules")
         return r.json()
 
 

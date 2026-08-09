@@ -8,6 +8,7 @@ behind the facade contract. parse-svc's ``POST /parse`` returns
 from __future__ import annotations
 
 import httpx
+from service.http_retry import check
 
 
 class ParseSvcClient:
@@ -38,7 +39,7 @@ class ParseSvcClient:
                             content_type or "application/octet-stream")},
             data=data,
         )
-        r.raise_for_status()
+        check(r, what="parse-svc /parse")
         return r.json() or {}
 
     def unwrap_drm(self, *, file_bytes: bytes, filename: str) -> bytes:
@@ -49,5 +50,5 @@ class ParseSvcClient:
             files={"file": (filename, file_bytes, "application/octet-stream")},
             data={"filename": filename},
         )
-        r.raise_for_status()
+        check(r, what="parse-svc /drm/unwrap")
         return r.content

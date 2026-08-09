@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 
 import httpx
+from service.http_retry import check
 
 
 def get_text_llm():
@@ -30,7 +31,7 @@ def get_text_llm():
             },
             timeout=timeout,
         )
-        r.raise_for_status()
+        check(r, what="LLM 호출")
         return r.json()["choices"][0]["message"]["content"]
 
     return call

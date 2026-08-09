@@ -97,3 +97,66 @@ def test_clients_use_polling_client():
     for cli in (AdaptiveChunkClient("http://a:1"), EdgequakeClient("http://b:2")):
         assert _max_keepalive(cli.http) == 0
         cli.http.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# check() — 실패 응답의 **본문**을 로그에 남긴다.
+#
+# 왜 필요한가(실측 2026-08-07): 클라이언트들이 전부 `raise_for_status()` 만 써서
+# 예외 메시지에 상태코드·URL 밖에 없었다. 정작 실패 이유는 응답 본문에 있는데
+# facade 로그 어디에도 안 남아, 장애 때 다운스트림 컨테이너 로그를 따로 뒤져야 했다.
+# 아래 테스트는 "실패하면 본문이 로그에 남는다 + 동작(예외)은 그대로"를 고정한다.
+# ─────────────────────────────────────────────────────────────────────────────
+import logging
+
+from service.http_retry import BODY_LOG_LIMIT, check
+
+
+def _resp(status: int, body: str = "", url: str = "http://eq:8081/api/v1/query"):
+    return httpx.Response(status, text=body, request=httpx.Request("POST", url))
+
+
+def test_check_2xx_는_그대로_통과하고_로그를_남기지_않는다(caplog):
+    r = _resp(200, "ok")
+    with caplog.at_level(logging.DEBUG, logger="kb_pipeline.service.http_retry"):
+        assert check(r, what="검색") is r
+    assert caplog.records == []
+
+
+def test_check_실패시_상태_URL_본문을_모두_로그에_남긴다(caplog):
+    r = _resp(502, '{"detail":"upstream refused"}')
+    with caplog.at_level(logging.ERROR, logger="kb_pipeline.service.http_retry"):
+        with pytest.raises(httpx.HTTPStatusError):   # 동작은 기존과 동일
+            check(r, what="edgequake 검색")
+    msg = caplog.text
+    assert "edgequake 검색" in msg          # 어느 호출인지
+    assert "502" in msg                      # 상태
+    assert "/api/v1/query" in msg            # URL
+    assert "upstream refused" in msg         # ← 기존에 없던 것: 본문
+
+
+def test_check_는_거대한_본문을_잘라_로그를_뒤덮지_않는다(caplog):
+    r = _resp(500, "x" * (BODY_LOG_LIMIT * 5))
+    with caplog.at_level(logging.ERROR, logger="kb_pipeline.service.http_retry"):
+        with pytest.raises(httpx.HTTPStatusError):
+            check(r, what="대용량")
+    assert caplog.text.count("x") <= BODY_LOG_LIMIT
+
+
+def test_check_는_얇은_페이크_응답에도_안전하다(caplog):
+    """테스트용 가짜 응답(status_code 만 있는 객체)에서 AttributeError 로 죽지 않는다."""
+    class _Thin:
+        status_code = 503
+        text = "boom"
+
+    with caplog.at_level(logging.ERROR, logger="kb_pipeline.service.http_retry"):
+        check(_Thin(), what="얇은페이크")     # raise_for_status 가 없으면 예외 없이 통과
+    assert "boom" in caplog.text
+
+
+def test_재시도가_일어나면_경고로_흔적이_남는다(caplog):
+    """재시도는 성공하면 흔적이 없어, 경합이 늘고 있는지 알 수 없었다."""
+    c = _FlakyClient(fail_times=1)
+    with caplog.at_level(logging.WARNING, logger="kb_pipeline.service.http_retry"):
+        get_with_retry(c, "http://ac:18060/chunk/jobs/1", backoff=0)
+    assert "재시도" in caplog.text

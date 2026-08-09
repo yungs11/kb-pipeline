@@ -29,7 +29,7 @@ import time
 
 import httpx
 
-from service.http_retry import get_with_retry, polling_client
+from service.http_retry import check, get_with_retry, polling_client
 
 #: Modal markers (U+3008/U+3009) passed to adaptive_chunk as atomic regions. JSON
 #: cannot carry tuples, so each pair is a 2-element list ``[open, close]``.
@@ -114,7 +114,7 @@ class AdaptiveChunkClient:
             f"{self.base}/chunk/jobs",
             json=body,
         )
-        r.raise_for_status()
+        check(r, what="adaptive_chunk POST /chunk/jobs")
         job_id = (r.json() or {}).get("job_id")
         if not job_id:
             raise RuntimeError("adaptive_chunk POST /chunk/jobs returned no job_id")
@@ -126,7 +126,7 @@ class AdaptiveChunkClient:
             # 풀링된 연결이 서버에서 닫히는 순간과 재사용이 겹치면 RemoteProtocolError 가
             # 난다. 재시도가 없으면 잡이 succeeded 인데도 적재가 실패한다(service/http_retry.py).
             t = get_with_retry(self.http, f"{self.base}/chunk/jobs/{job_id}")
-            t.raise_for_status()
+            check(t, what="adaptive_chunk 잡 상태 폴링")
             tj = t.json() or {}
             status = (tj.get("status") or "").lower()
             if status == _OK:

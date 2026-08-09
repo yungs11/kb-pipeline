@@ -30,7 +30,7 @@ import time
 
 import httpx
 
-from service.http_retry import get_with_retry, polling_client
+from service.http_retry import check, get_with_retry, polling_client
 
 _TENANT_ID = "00000000-0000-0000-0000-000000000002"
 
@@ -90,7 +90,7 @@ class EdgequakeClient:
             r = self.http.post(url, headers={"X-Tenant-ID": tenant_id}, json=body)
         if 400 <= r.status_code < 500:
             return self._find_workspace_by_slug(tenant_id, slug)
-        r.raise_for_status()
+        check(r, what="edgequake 워크스페이스 생성")
         data = r.json() or {}
         ws_id = data.get("id") or data.get("workspace_id")
         if not ws_id:
@@ -102,7 +102,7 @@ class EdgequakeClient:
     def _find_workspace_by_slug(self, tenant_id: str, slug: str) -> str:
         url = f"{self.base}/api/v1/tenants/{tenant_id}/workspaces"
         r = self.http.get(url, headers={"X-Tenant-ID": tenant_id})
-        r.raise_for_status()
+        check(r, what="edgequake 워크스페이스 조회")
         body = r.json()
         # Live shape is `{"items":[...]}` (paginated); defend list/workspaces/data too.
         if isinstance(body, dict):
@@ -153,7 +153,7 @@ class EdgequakeClient:
             headers=hdr,
             json={"content": content, "title": filename, "async_processing": True},
         )
-        r.raise_for_status()
+        check(r, what="edgequake 문서 업로드")
         j = r.json() or {}
         document_id = j.get("document_id") or j.get("id")
         # Prefer task_id (the queue's task.track_id) for polling; fall back to the
@@ -256,7 +256,7 @@ class EdgequakeClient:
             headers=hdr,
             json=body,
         )
-        r.raise_for_status()
+        check(r, what="edgequake 문서 업로드(재시도 경로)")
         j = r.json() or {}
         document_id = j.get("document_id") or j.get("id")
         track_id = j.get("task_id") or j.get("track_id") or document_id
@@ -281,7 +281,7 @@ class EdgequakeClient:
             f"{self.base}/api/v1/documents/{document_id}",
             headers=self._headers(workspace_id),
         )
-        d.raise_for_status()
+        check(d, what="edgequake 문서 상태 조회")
         dj = d.json() or {}
         raw_status = (dj.get("status") or "").lower()
         current_stage = (dj.get("current_stage") or "").lower() or None
@@ -330,7 +330,7 @@ class EdgequakeClient:
                     return last_status, None, None
                 time.sleep(poll_interval)
                 continue
-            t.raise_for_status()
+            check(t, what="edgequake 잡 상태 폴링")
             tj = t.json() or {}
             last_status = (tj.get("status") or "").lower()
             if last_status == self._POLL_OK or last_status in self._POLL_FAIL:
@@ -360,7 +360,7 @@ class EdgequakeClient:
         d = self.http.get(
             f"{self.base}/api/v1/documents/{document_id}", headers=headers
         )
-        d.raise_for_status()
+        check(d, what="edgequake 문서 상태 조회")
         dj = d.json() or {}
         return {
             "document_id": dj.get("id") or document_id,
@@ -487,7 +487,7 @@ class EdgequakeClient:
             f"{self.base}/api/v1/documents/{doc_id}",
             headers=self._headers(workspace_id),
         )
-        d.raise_for_status()
+        check(d, what="edgequake 문서 청크 조회")
         doc = d.json() or {}
         chunk_count = int(doc.get("chunk_count") or 0)
         doc_title = doc.get("title") or doc.get("file_name") or ""
@@ -502,7 +502,7 @@ class EdgequakeClient:
             )
             if c.status_code == 404:
                 continue
-            c.raise_for_status()
+            check(c, what="edgequake 청크 상세 조회")
             cj = c.json() or {}
             rows.append({
                 "chunk_id": cj.get("chunk_id") or chunk_id,
@@ -525,7 +525,7 @@ class EdgequakeClient:
             headers=self._headers(workspace_id),
             json={"query": query, "max_results": top_k},
         )
-        r.raise_for_status()
+        check(r, what="edgequake 검색 /api/v1/query")
         return r.json() or {}
 
     def delete_doc(self, workspace_id, doc_id):
