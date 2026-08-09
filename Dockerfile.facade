@@ -17,4 +17,21 @@ EXPOSE 19000
 # 동시성이 2 이므로 4 로 충분하다.
 # --timeout 4200: KBP_JOB_LEGACY_WAIT_SECONDS(3300) 보다 커야 마스터가 대기 중인
 # 워커를 죽이지 않는다.
-CMD ["gunicorn","-k","uvicorn.workers.UvicornWorker","-w","4","-b","0.0.0.0:19000","--timeout","4200","service.app:app"]
+#
+# --keep-alive 75: **기본값 2초가 클라이언트 폴링 간격과 정확히 같아** 적재가 간헐 실패했다
+#   (실측 2026-08-07 폐쇄망: kb 배치가 RemoteProtocolError('Server disconnected without
+#   sending a response.') 로 청크 단계에서 죽음).
+#     gunicorn keep-alive       = 2.0초
+#     kb → facade 잡 폴링 간격  = 2.0초  (kb_pipeline_client.py: job_poll_interval_seconds)
+#   서버가 유휴 커넥션을 닫는 시점과 클라이언트가 그 커넥션을 재사용하는 시점이 겹쳐,
+#   매 폴링이 동전던지기가 된다. 클라이언트를 고치는 것이 정공법이지만(풀링 비활성 +
+#   전송오류 재시도 — facade→adaptive_chunk 는 service/http_retry.py 로 그렇게 했다),
+#   **서버에서 창을 넓히면 모든 클라이언트가 한 번에 안전해진다.**
+#   75 는 어떤 폴링 간격(2~5초)보다 충분히 크고, 유휴 커넥션을 오래 붙들 만큼 크지도 않다.
+#
+# --access-logfile -: 기본은 접근로그 **끔**이라 어떤 요청이 언제 들어와 무슨 코드로
+#   끝났는지 기록이 남지 않는다. 실측 2026-08-07: 적재 실패를 조사할 때 facade 로그에
+#   기동 메시지 외에 아무것도 없어 원인 추적이 막혔다. stdout 으로 내보내 podman/docker
+#   logs 에 남긴다.
+CMD ["gunicorn","-k","uvicorn.workers.UvicornWorker","-w","4","-b","0.0.0.0:19000", \
+     "--timeout","4200","--keep-alive","75","--access-logfile","-","service.app:app"]

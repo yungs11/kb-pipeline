@@ -24,4 +24,9 @@ COPY parse_service ./parse_service
 # parse_service/app.py 가 runtime에 `from service.llm import get_text_llm` 을 lazy import함
 COPY service ./service
 EXPOSE 19001
-CMD ["gunicorn","-k","uvicorn.workers.UvicornWorker","-w","4","-b","0.0.0.0:19001","--timeout","3600","parse_service.app:app"]
+# --keep-alive 75 / --access-logfile - : facade 쪽과 같은 이유(Dockerfile.facade 주석 참고).
+#   facade 는 parse_client 로 커넥션을 재사용하는데, 문서 사이 간격이 gunicorn 기본
+#   keep-alive(2초)를 넘으면 죽은 커넥션을 재사용해 RemoteProtocolError 가 난다.
+#   폴링 루프가 아니라 빈도는 낮지만 원인과 처방이 동일하다.
+CMD ["gunicorn","-k","uvicorn.workers.UvicornWorker","-w","4","-b","0.0.0.0:19001", \
+     "--timeout","3600","--keep-alive","75","--access-logfile","-","parse_service.app:app"]
