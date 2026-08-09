@@ -134,7 +134,12 @@ app = FastAPI(title="kb-pipeline", lifespan=lifespan)
 
 
 def get_edgequake():
-    return EdgequakeClient(os.environ.get("KBP_EDGEQUAKE_URL", "http://localhost:8081"))
+    # 기본값은 **호스트 포트**다(P1 2026-08-10: 8081→3001). 호스트 dev 의 facade 프로세스가
+    # compose 가 발행한 edgequake 를 부르는 경로라서다. 컨테이너끼리면 서비스 DNS
+    # `http://edgequake:8081`(내부 포트)이고 그 값은 compose 가 env 로 준다.
+    # dedicated 런처(service/scripts/start_dedicated_edgequake.sh)로 띄웠으면 8081 이므로
+    # KBP_EDGEQUAKE_URL 로 명시해야 한다.
+    return EdgequakeClient(os.environ.get("KBP_EDGEQUAKE_URL", "http://localhost:3001"))
 
 
 def get_adaptive_chunk():

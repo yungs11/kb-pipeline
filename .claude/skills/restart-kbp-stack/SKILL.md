@@ -1,16 +1,16 @@
 ---
 name: restart-kbp-stack
-description: Use when (re)starting kb-pipeline services or preparing localhost:4000 for end-to-end testing — parse-svc (:19001), facade (:19000), its facade-worker job-queue consumer (no HTTP port), kb-backend (:8088), its durable batch worker, EdgeQuake (:8081), and the required EdgeQuake graph WebUI (:13000) — OR the excel-gate stack — doc_guard (:8000), excel-parser (:18055). Also use after editing their code, when batch uploads stay queued, "그래프 보기" fails, when a removed/old doc_guard gate still blocks uploads, when /parse returns empty enriched_content or missing gate_summary, on "Unable to locate a Java Runtime", on kordoc "*.md 를 찾을 수 없습니다", or on facade httpx.ReadTimeout. Always start and verify the facade-worker, the kb batch worker, and edgequake_webui when restoring the test stack — without facade-worker the facade rejects every /parse·/chunk·/insert·/ingest with 503. Each host service has its own launcher script that pins the right PATH/env and kills the old process BY PORT.
+description: Use when (re)starting kb-pipeline services or preparing localhost:18080 for end-to-end testing — parse-svc (:19001), facade (:3000), its facade-worker job-queue consumer (no HTTP port), kb-backend (:8088), its durable batch worker, EdgeQuake (:3001), and the required EdgeQuake graph WebUI (:3002) — OR the excel-gate stack — doc_guard (:8000), excel-parser (:18055). Also use after editing their code, when batch uploads stay queued, "그래프 보기" fails, when a removed/old doc_guard gate still blocks uploads, when /parse returns empty enriched_content or missing gate_summary, on "Unable to locate a Java Runtime", on kordoc "*.md 를 찾을 수 없습니다", or on facade httpx.ReadTimeout. Always start and verify the facade-worker, the kb batch worker, and edgequake_webui when restoring the test stack — without facade-worker the facade rejects every /parse·/chunk·/insert·/ingest with 503. Each host service has its own launcher script that pins the right PATH/env and kills the old process BY PORT.
 ---
 
 # Restart the kb-pipeline provider stack
 
 ## 필수 완료 조건 — batch worker + 그래프 UI 포함
 
-`localhost:4000` 테스트 환경 또는 전체 KB 스택을 복구할 때
+`localhost:18080` 테스트 환경 또는 전체 KB 스택을 복구할 때
 kb-backend의 durable batch worker와 `edgequake_webui`를 선택 서비스로 남겨두지
 말고 **반드시 함께 기동**한다.
-EdgeQuake API만 `:8081`에서 정상이어도 “그래프 보기”는 동작하지 않는다.
+EdgeQuake API만 `:3001`에서 정상이어도 “그래프 보기”는 동작하지 않는다.
 kb-backend API만 `:8088`에서 정상이어도 새 배치 행은 `queued`에 머문다.
 
 ```bash
@@ -18,19 +18,22 @@ kb-backend API만 `:8088`에서 정상이어도 새 배치 행은 `queued`에 �
 docker compose up -d --no-build postgres minio edgequake edgequake_webui
 ```
 
-이 머신의 그래프 WebUI 호스트 포트는 compose override에 의해 **`:13000`**이다.
-`:14000`은 이 프로젝트에서 사용하지 않는다. KB 프론트의 기본 그래프 URL도
-`http://localhost:13000`이다.
+이 머신의 그래프 WebUI 호스트 포트는 **`:3002`** 이다 — base `docker-compose.yml` 이
+`3002:3000` 으로 발행한다(P1 2026-08-10. 이전엔 `docker-compose.override.yml` 이 13000 으로
+리맵했는데 그 파일은 이제 주석만 남았다. **override 를 되살리지 마라** — 정답 포트는 base 에 있다).
+`:14000`은 이 프로젝트에서 사용하지 않는다.
+KB 프론트의 "그래프 보기" 는 **보고 있는 호스트의 `:3002`** 로 연다
+(`window.location` 파생 — 폐쇄망에서는 서버IP:3002. `NEXT_PUBLIC_EDGEQUAKE_WEBUI_URL` 로 덮을 수 있다).
 
 재기동 완료를 보고하기 전에 아래 검증을 모두 통과시킨다.
 
 ```bash
 docker compose ps edgequake edgequake_webui
-curl -fsS http://localhost:8081/health >/dev/null
-curl -fsS http://localhost:13000/popup/graph >/dev/null
+curl -fsS http://localhost:3001/health >/dev/null
+curl -fsS http://localhost:3002/popup/graph >/dev/null
 test -s /tmp/kb_batch_worker.pid
 kill -0 "$(cat /tmp/kb_batch_worker.pid)"
-curl -fsS http://localhost:4000/kb >/dev/null
+curl -fsS http://localhost:18080/kb >/dev/null
 ```
 
 `scripts/run-kb-backend.sh`는 Alembic migration 후 kb-backend와 batch worker를 함께
@@ -40,7 +43,7 @@ queued에 머물면 PID만 믿지 말고 worker 로그와 인증된
 `GET /kb/{kb_id}/batches/worker` 응답의 `online/capacity/available`을 확인한다.
 
 `edgequake_webui` health가 `starting`이면 `healthy`가 될 때까지 기다린 뒤 HTTP를
-검증한다. `:13000`이 실패하면 `docker compose up -d --no-build edgequake_webui`와
+검증한다. `:3002`이 실패하면 `docker compose up -d --no-build edgequake_webui`와
 `docker compose logs --tail 100 edgequake_webui`로 복구·진단한다.
 
 ## 1순위 — Docker Compose (전체 또는 단일 서비스 재빌드/재기동)
@@ -86,12 +89,12 @@ compose 를 쓰지 않거나, 특정 서비스를 호스트에서 직접 띄울 
 | Service | Port | Script | Gotcha it handles |
 |---|---|---|---|
 | parse-svc | 19001 | `scripts/run-parse-svc.sh` | needs **openjdk@17** on PATH (OpenDataLoader) + `KBP_OPENAI_API_KEY` (modal LLM) |
-| facade | 19000 | `scripts/run-facade.sh` | reads `os.environ` directly (no dotenv) → needs `KBP_*` **and `MINIO_*`** from `scripts/facade.env` |
+| facade | 3000 | `scripts/run-facade.sh` | reads `os.environ` directly (no dotenv) → needs `KBP_*` **and `MINIO_*`** from `scripts/facade.env` |
 | facade-worker | — (no port) | `scripts/run-facade-worker.sh` | 잡 큐 소비자. 다운스트림 호출은 **오직 여기 슬롯 안에서만** 일어난다. 살아있는지는 `GET /jobs/workers` 의 `online` 으로 확인 |
 | kb-backend + batch worker | 8088 + DB heartbeat | `scripts/run-kb-backend.sh` | runs Alembic first, restarts API and durable worker; worker capacity defaults to 2 |
 | doc_guard | 8000 | `scripts/run-doc-guard.sh` | verifies `POST /v1/check-excel` answers (new excel-gate endpoint), not just healthz |
 | excel-parser | 18055 | `scripts/run-excel-parser.sh` | pins **KORDOC_BIN + node PATH** (auto backend → kordoc); kills :18055 **by port** (module `service.main:app` is shared with adaptive_chunk :18060 — never module-pattern kill) |
-| edgequake_webui | 13000 | `docker compose up -d --no-build edgequake_webui` | required by KB frontend “그래프 보기”; verify `/popup/graph`, not port 14000 |
+| edgequake_webui | 3002 | `docker compose up -d --no-build edgequake_webui` | required by KB frontend “그래프 보기”; verify `/popup/graph`, not port 14000 |
 
 ```bash
 bash scripts/run-parse-svc.sh    # after editing parse_service/ or kb_pipeline/
@@ -102,9 +105,9 @@ bash scripts/run-doc-guard.sh    # after editing doc_guard app/
 bash scripts/run-excel-parser.sh # after editing 7.excel-parser excel_parser_rag/ or service/
 bash scripts/restart-gate-stack.sh   # all 3 excel-gate services in dep order (doc_guard+excel-parser→kb-backend)
 
-# localhost:4000 테스트 환경을 복구했다면 항상 마지막에 실행·검증
+# localhost:18080 테스트 환경을 복구했다면 항상 마지막에 실행·검증
 docker compose up -d --no-build edgequake_webui
-curl -fsS http://localhost:13000/popup/graph >/dev/null
+curl -fsS http://localhost:3002/popup/graph >/dev/null
 test -s /tmp/kb_batch_worker.pid
 kill -0 "$(cat /tmp/kb_batch_worker.pid)"
 ```
@@ -184,7 +187,7 @@ facade 는 이제 `/parse`·`/chunk`·`/insert`·`/ingest` 를 **직접 처리�
 
 ```bash
 bash scripts/run-facade-worker.sh
-curl -s http://localhost:19000/jobs/workers   # {"online":true,"capacity":4,...}
+curl -s http://localhost:3000/jobs/workers   # {"online":true,"capacity":4,...}
 ```
 
 `online:false` 또는 `capacity:0` 이면 worker 가 죽은 것이다. 이 상태에서 접수는

@@ -79,7 +79,8 @@ graph TD
 | **3002** | 3000 | edgequake_webui | 그래프 확인 UI | ✅ | 열기 |
 | **3003** | 9001 | minio 콘솔 | 버킷관리 웹 UI | ✅ | 열기 |
 | ~~3004~~ | 8000 | doc_guard | **외부노출 없음** — facade `/gate/*` 가 은닉한다 | ❌ | 닫기 |
-| **18081** | 19001 | parse-svc | OCR/파싱 엔진 (pdf·xlsx·docx·이미지 VL) | ✅ | 열기 |
+| **19001** | 19001 | parse-svc | OCR/파싱 엔진 (pdf·xlsx·docx·이미지 VL). **내부=외부**(P1 2026-08-10, 이전 18081) | ✅ | 열기 |
+| **18081** | — | **외부 OCR Gateway (kbp 미소유)** | PaddleOCR-VL 을 프론트하는 사내 게이트웨이. `KBP_PADDLE_OCR_GATEWAY_URL` 이 이 포트를 쓴다 — **kbp 가 점유하면 안 된다**(parse-svc 를 19001 로 비킨 이유) | — | 열기 |
 | 18060 | 18060 | adaptive_chunk | 청킹 허브 | 내부 | 닫기 |
 | 5433 | 5432 | postgres | edgequake 그래프 DB(pgvector+AGE) | 디버그 | **닫기** |
 | — | 9000 | minio S3 API | 객체 저장(내부 DNS `minio:9000`) | 내부 | 닫기 |
@@ -102,8 +103,8 @@ graph TD
 
 ### 방화벽 요약
 ```bash
-# 열 포트: kbp(3000 3001 3002 3003 18081) + kb(18080)
-for p in 3000 3001 3002 3003 18081 18080; do firewall-cmd --permanent --add-port=$p/tcp; done
+# 열 포트: kbp(3000 3001 3002 3003 19001) + 외부 OCR GW(18081) + kb(18080)
+for p in 3000 3001 3002 3003 19001 18081 18080; do firewall-cmd --permanent --add-port=$p/tcp; done
 firewall-cmd --reload
 ```
 **DB(5433·5434)·adaptive(18060)·api(8080)·minio S3(9000) 는 열지 않는다**(내부/디버그 전용).
@@ -181,5 +182,11 @@ frontend→minio)은
 ## 6. 설정 출처
 
 - 엔드포인트/시크릿/모델명/포트: 전부 각 스택의 **`.env`** (템플릿 `.env.airgap.example`).
-- 앱 소스에 하드코딩된 값 없음(전부 env-driven). 포트 변경도 compose(호스트 매핑)만 → **이미지 재빌드 불필요**.
+- 대부분 env-driven 이지만 **예외가 둘 있다**(P1 2026-08-10 실측):
+  - `service/app.py` 의 `KBP_EDGEQUAKE_URL` **코드 기본값**(호스트 3001). env 를 안 주면 이 값이 쓰인다.
+  - kb 프론트의 `NEXT_PUBLIC_*` 는 `next build` 시 **번들에 인라인**된다 → 그 값을 바꾸려면
+    **프론트 이미지 재빌드가 필요**하다(`frontend/Dockerfile` 주석 참조). 그래서 webui 주소는
+    env 대신 `window.location` 파생으로 바꿨다(보고 있는 호스트의 `:3002`).
+  즉 **"포트 변경은 compose 만 손대면 된다" 는 참이 아니다.** 호스트 매핑만 바꾸는 경우는
+  재빌드가 불필요하지만, 위 두 부류는 코드/번들을 따라간다.
 - 배포 절차: `docs/airgap-deploy.md`(kbp), `knowledge_base/docs/airgap-deploy.md`(kb).

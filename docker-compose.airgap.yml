@@ -331,7 +331,12 @@ services:
       MINIO_SECURE: ${MINIO_SECURE:-false}
     depends_on:
       minio: { condition: service_healthy }
-    ports: ["18081:19001"]   # 외부노출(OCR/파싱 엔진): 호스트 18081 → parse-svc 19001(컨테이너 유지, facade→parse-svc:19001 내부호출 무영향)
+    # 외부노출(OCR/파싱 엔진): **내부=외부 19001** (P1 2026-08-10, 이전 18081).
+    # ⚠️ 18081 을 비운 이유: `.env.airgap.example` 의 KBP_PADDLE_OCR_GATEWAY_URL 이
+    #    같은 호스트 18081 을 쓴다. 둘이 겹쳐 나중에 바인드하는 쪽이 실패하고 OCR 요청이
+    #    parse-svc 로 가는 사고가 있었다(현장 "18081 ALREADY PORT"). 18081 은 OCR
+    #    게이트웨이 단독 소유로 남긴다.
+    ports: ["19001:19001"]
     healthcheck:
       test: ["CMD","curl","-fsS","http://localhost:19001/healthz"]
       interval: 10s

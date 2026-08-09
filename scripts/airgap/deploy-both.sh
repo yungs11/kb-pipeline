@@ -82,10 +82,10 @@ log "4/5 kb 스택 기동 (${KB_DIR})"
 # ── 5) 요약 ──────────────────────────────────────────────────────────────────────
 log "5/5 완료 — 헬스체크 요약"
 FRONT_PORT="$(grep -E '^FRONTEND_PORT=' "$KB_DIR/.env" | head -1 | cut -d= -f2-)"
-FRONT_PORT="${FRONT_PORT:-3100}"
+FRONT_PORT="${FRONT_PORT:-18080}"
 echo "  facade   : curl -fsS http://localhost:3000/healthz"
 echo "  edgequake: curl -fsS http://localhost:3001/health"
-echo "  parse-svc: curl -fsS http://localhost:18081/healthz"
+echo "  parse-svc: curl -fsS http://localhost:19001/healthz"   # 18081 은 OCR 게이트웨이
 echo "  kb api   : curl -fsS http://localhost:8080/readyz"
 echo "  웹앱     : http://<서버IP>:${FRONT_PORT}"
 echo

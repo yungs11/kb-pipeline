@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # facade-worker (잡 큐 소비자) 런처 / 재기동.
 #
-# facade(:19000)와 **별도 프로세스**다. 다운스트림(parse-svc/adaptive_chunk/edgequake)
+# facade(:3000)와 **별도 프로세스**다. 다운스트림(parse-svc/adaptive_chunk/edgequake)
 # 호출은 오직 이 프로세스의 슬롯 안에서만 일어나므로, 이게 안 떠 있으면 facade 는
 # 접수를 503 으로 거절한다(`GET /jobs/workers` 의 online=false).
 #

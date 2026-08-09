@@ -100,7 +100,7 @@ log "compose up -d  (${COMPOSE[*]})"
 # 들고 있지 않으므로 두 곳이 어긋날 일이 없다.
 #
 # 예전에는 호스트 포트로 직접 폴링했는데 값이 compose 매핑과 전부 어긋나 있었다
-# (실측 2026-08-05: edgequake 8081→실제 3001, parse-svc 19001→18081, facade 19000→3000,
+# (P1 2026-08-10 기준: edgequake→3001, parse-svc→19001(내부=외부), facade→3000, webui→3002,
 # webui 13000→3002, minio S3 9000 은 아예 미발행, doc_guard 는 facade 뒤로 숨어 노출 없음).
 # 즉 이 단계가 사실상 전부 오탐이었다.
 #
@@ -233,7 +233,7 @@ if [ "$FAIL" -eq 0 ]; then
   printf '\n\033[1;32m✅ 전 서비스 healthy\033[0m\n'
   printf '   facade   http://<서버IP>:3000\n'
   printf '   webui    http://<서버IP>:3002    edgequake API  http://<서버IP>:3001\n'
-  printf '   minio 콘솔 http://<서버IP>:3003  parse-svc      http://<서버IP>:18081\n'
+  printf '   minio 콘솔 http://<서버IP>:3003  parse-svc      http://<서버IP>:19001\n'
   printf '   (doc_guard 는 외부 노출 없음 — facade /gate/* 로만 접근)\n'
 else
   die "일부 서비스 unhealthy. 로그 확인: ${COMPOSE[*]} logs <service>  (자세한 진단은 docs/airgap-deploy.md §트러블슈팅)"

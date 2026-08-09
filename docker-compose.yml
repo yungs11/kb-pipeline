@@ -117,7 +117,7 @@ services:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
     volumes: ["minio_data:/data"]
-    ports: ["19010:9000","19011:9001"]
+    ports: ["9000:9000","3003:9001"]
     healthcheck:
       # curl confirmed present in minio/minio
       test: ["CMD","curl","-fsS","http://localhost:9000/minio/health/live"]
@@ -174,7 +174,7 @@ services:
       RUST_LOG: ${EQ_RUST_LOG:-info}
       PDFIUM_AUTO_CACHE_DIR: /tmp/eqkbp-pdfium
     depends_on: { postgres: { condition: service_healthy } }
-    ports: ["8081:8081"]
+    ports: ["3001:8081"]
     healthcheck:
       test: ["CMD","curl","-fsS","http://localhost:8081/health"]
       interval: 10s
@@ -326,7 +326,7 @@ services:
       parse-svc: { condition: service_healthy }
       adaptive_chunk: { condition: service_healthy }
       edgequake: { condition: service_healthy }
-    ports: ["19000:19000"]
+    ports: ["3000:19000"]
     healthcheck:
       test: ["CMD","curl","-fsS","http://localhost:19000/healthz"]
       interval: 10s
@@ -364,7 +364,7 @@ services:
   # edgequake WebUI — 그래프 적재 확인용 (선택 서비스)
   # ---------------------------------------------------------------------------
   # edgequake 에 적재된 지식그래프(엔티티/관계)·워크스페이스·문서를 브라우저로 조회·
-  # 시각화·질의하기 위한 확인용 UI. http://localhost:3000.
+  # 시각화·질의하기 위한 확인용 UI. http://localhost:3002 (P1 2026-08-10: 13000→3002).
   # ※ 운영 적재 경로가 아님: 문서 적재는 facade `/ingest`(parse-svc 파싱 + adaptive
   #    청킹 + 모달원자성)로 한다. 이 UI 로 직접 업로드하면 kb-pipeline 경로를 우회하므로
   #    "적재 결과(그래프) 확인/디버깅" 용도로만 쓴다.
@@ -377,10 +377,14 @@ services:
       NODE_ENV: production
       # EDGEQUAKE_API_URL 은 **브라우저**가 API 에 닿는 URL(요청시각에 window 런타임설정으로
       # 주입) — 컨테이너 DNS(http://edgequake:8081)가 아니라 호스트 매핑 포트를 쓴다.
-      EDGEQUAKE_API_URL: ${EDGEQUAKE_WEBUI_API_URL:-http://localhost:8081}
+      EDGEQUAKE_API_URL: ${EDGEQUAKE_WEBUI_API_URL:-http://localhost:3001}
     depends_on:
       edgequake: { condition: service_healthy }
-    ports: ["3000:3000"]   # 호스트 3000 충돌 시 docker-compose.override.yml 에서 리맵
+    # 호스트 3002 → webui 3000. 이 호스트 포트가 충돌하면 **이 줄을 직접 바꾸거나**
+    # docker-compose.override.yml 로 리맵한다(P1 로 비워뒀지만 파일은 남아 있다).
+    # ⚠️ KBP_FACADE_PORT 는 여기에 안 듣는다 — 그건 호스트 facade 프로세스 전용이고
+    #    compose facade 는 3000:19000 으로 발행한다.
+    ports: ["3002:3000"]
     healthcheck:
       test: ["CMD","wget","--no-verbose","--tries=1","--spider","http://localhost:3000"]
       interval: 20s
