@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import time
 import os
 import re
 import uuid
@@ -204,6 +205,11 @@ class JobRunner:
             chunk_texts=chunks,
             skip_graph=not ctx.payload.get("extract_graph", True),
         )
+        # 야간 배치(A1)의 후보 증거. **그래프를 실제로 건드렸을 때만** 남긴다 —
+        # extract_graph=False 인 vector-only 적재까지 남기면 그 KB 가 현행 0회에서
+        # 매일 1회 LLM 빌드로 나빠진다(kb 트리거는 그 경우 enqueue 하지 않는다).
+        if ctx.payload.get("extract_graph", True):
+            self._touch_graph_safe(workspace_id)
         return _shape_insert_result(res, eq_ws)
 
     def _run_ingest(self, ctx: "_Ctx") -> dict[str, Any]:
@@ -248,6 +254,10 @@ class JobRunner:
         # /ingest 는 skip_graph 를 전달하지 않는다(현행 유지).
         ins = eq.insert_chunks(workspace_id=eq_ws, tenant_id=TENANT_ID,
                                title=doc_id, chunk_texts=chunk_texts)
+        # /ingest 는 skip_graph 를 전달하지 않아 **항상 그래프를 추출한다** → 무조건 남긴다.
+        # 위치가 함수 끝이 아니라 여기인 이유: 앞의 `status == "failed"` 조기 반환은
+        # HTTP 200 이지만 그래프를 전혀 안 건드린다(그 경로는 touch 하면 안 된다).
+        self._touch_graph_safe(workspace_id)
         return {
             "document_id": ins.get("document_id"),
             "chunk_count": ins.get("chunk_count"),
@@ -278,6 +288,11 @@ class JobRunner:
         # edgequake workspace UUID 로 해석한다 — 커뮤니티 행이 그 UUID 로 스코프된다.
         eq_ws = self.eq_client.ensure_workspace(workspace_id, name=workspace_id)
 
+        # ★ 빌드가 그래프를 **읽기 시작한 시각**. 완료 시각을 쓰면 수십 분짜리 빌드 도중
+        #   성공한 적재가 다음 밤 후보에서 영구 탈락한다(빌드는 진입 시점 그래프만 본다).
+        #   DB 시계로 받는다 — graph_touch.touched_at 이 서버 now() 라 축을 맞춰야 한다.
+        snapshot_at = self.repo.db_now()
+
         self._stage(ctx, "building")
         builder = self._community_builder
         if builder is None:
@@ -285,9 +300,60 @@ class JobRunner:
 
         from service.llm import get_text_llm
 
-        result = builder(eq_ws, llm=get_text_llm(), dsn=os.environ["KBP_PG_DSN"])
+        try:
+            result = builder(eq_ws, llm=get_text_llm(), dsn=os.environ["KBP_PG_DSN"])
+        except JobAborted:
+            # lease 상실은 **다른 세대가 이 workspace 를 소유**한 것이라 이쪽의 실패가
+            # 아니다. 실패로 기록하면 그쪽 세대의 이력을 덮어쓴다.
+            raise
+        except Exception:
+            self._record_community_failure_safe(workspace_id, eq_ws)
+            raise
+
+        self._record_community_success_safe(workspace_id, eq_ws, snapshot_at)
         return {"workspace_id": eq_ws,
                 "result": result if isinstance(result, (dict, list, str, int)) else None}
+
+    # ── 야간 커뮤니티 배치(A1) 이력 기록 — 전부 best-effort ────────────────
+    # 공통 이유: 이 호출들은 **부작용(edgequake 적재·LLM 빌드)이 끝난 뒤**다. 여기서
+    # 예외를 올리면 run() 의 공통 except 가 잡아 잡을 failed 로 정규화하는데, 그러면
+    # 이미 성공한 비싼 작업이 실패로 뒤집힌다.
+
+    def _touch_graph_safe(self, workspace_key: str) -> None:
+        """야간 후보의 증거를 남긴다. 실패해도 적재는 성공으로 끝낸다.
+
+        ⚠️ "실패해도 그 밤 한 번 거를 뿐" 이 아니다 — ``graph_touch`` 는 후보의
+        **유일한 증거원**이고 GC 대상도 아니라, 놓치면 그 workspace 는 **다음 적재가
+        올 때까지 무기한** 후보가 아니다. 그래서 1회 재시도하고 실패는 error 로 남긴다.
+        """
+        for attempt in (1, 2):
+            try:
+                self.repo.touch_graph(workspace_key)
+                return
+            except Exception:  # noqa: BLE001 — 적재 성공을 뒤집지 않는다
+                if attempt == 2:
+                    log.error(
+                        "graph_touch 기록 실패(재시도 후) — 이 workspace 는 다음 적재까지 "
+                        "야간 커뮤니티 후보가 되지 않는다 ws=%s", workspace_key,
+                        exc_info=True)
+                else:
+                    time.sleep(0.5)
+
+    def _record_community_success_safe(self, workspace_key: str, eq_ws: str,
+                                       snapshot_at: Any) -> None:
+        try:
+            self.repo.record_community_success(workspace_key, eq_ws, snapshot_at)
+        except Exception:  # noqa: BLE001 — 수십 분짜리 빌드를 뒤집지 않는다
+            log.error("community_builds 성공 기록 실패 ws=%s (다음 밤 재빌드된다)",
+                      workspace_key, exc_info=True)
+
+    def _record_community_failure_safe(self, workspace_key: str,
+                                       eq_ws: str | None) -> None:
+        try:
+            self.repo.record_community_failure(workspace_key, eq_ws)
+        except Exception:  # noqa: BLE001 — 원래 예외를 가리지 않는다
+            log.error("community_builds 실패 기록 실패 ws=%s", workspace_key,
+                      exc_info=True)
 
     # ── 보조 ───────────────────────────────────────────────────────────────
 

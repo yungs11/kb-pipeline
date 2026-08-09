@@ -934,6 +934,235 @@ class JobRepo:
             return (None, None)
         return (row["input_ref"], row["payload_ref"])
 
+    # ── 야간 커뮤니티 배치 (A1) ────────────────────────────────────────────
+
+    def db_now(self) -> Any:
+        """서버 시각. 후보 술어의 두 축을 **한 시계로** 맞추기 위해 쓴다.
+
+        ``graph_touch.touched_at`` 은 서버 ``now()`` 인데 ``last_success_at`` 을 워커의
+        파이썬 시각으로 쓰면, PG 컨테이너 시계가 δ 뒤질 때 빌드 스냅샷 이후 δ 이내에
+        완료된 적재가 ``touched_at > last_success_at`` 을 만족하지 못해 **영구 탈락**한다.
+        """
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT now() AS ts")
+                return cur.fetchone()["ts"]
+
+    def touch_graph(self, workspace_key: str) -> None:
+        """그래프를 실제로 건드린 적재를 기록한다(야간 후보의 유일한 증거원)."""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO kbp.graph_touch (workspace_key, touched_at)"
+                    " VALUES (%s, now())"
+                    " ON CONFLICT (workspace_key) DO UPDATE SET touched_at = now()",
+                    (workspace_key,),
+                )
+
+    def record_attempt(self, workspace_key: str, eq_workspace_id: str | None) -> None:
+        """제출을 **시도**했음을 기록한다 — 정렬 축(``last_attempt_at``).
+
+        성공/실패/dedupe/ensure_workspace 실패 **전부** 여기를 지나야 한다. 한 경로라도
+        빠지면 그 workspace 가 ``last_attempt_at IS NULL``(= epoch) 로 남아
+        ``ORDER BY COALESCE(last_attempt_at, epoch) ASC`` 상단을 **영구 점유**한다.
+        """
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO kbp.community_builds"
+                    "   (workspace_key, eq_workspace_id, last_attempt_at)"
+                    " VALUES (%s, %s, now())"
+                    " ON CONFLICT (workspace_key) DO UPDATE"
+                    "   SET last_attempt_at = now(),"
+                    # eq id 는 알아냈을 때만 덮는다(실패 경로는 None 을 넘긴다).
+                    "       eq_workspace_id = COALESCE(EXCLUDED.eq_workspace_id,"
+                    "                                  kbp.community_builds.eq_workspace_id)",
+                    (workspace_key, eq_workspace_id),
+                )
+
+    def record_community_success(self, workspace_key: str, eq_workspace_id: str,
+                                 snapshot_at: Any) -> None:
+        """빌드 성공. ``last_success_at`` 에 **빌드 시작 스냅샷**을 넣는다(완료 시각 아님).
+
+        완료 시각을 쓰면 수십 분짜리 빌드 **도중** 성공한 적재의 ``touched_at`` 이
+        스냅샷보다 뒤·완료보다 앞이라 다음 밤 후보에서 **영구 탈락**한다.
+        """
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO kbp.community_builds"
+                    "   (workspace_key, eq_workspace_id, last_success_at,"
+                    "    finished_at, status)"
+                    " VALUES (%s, %s, %s, now(), 'succeeded')"
+                    " ON CONFLICT (workspace_key) DO UPDATE"
+                    "   SET eq_workspace_id = EXCLUDED.eq_workspace_id,"
+                    "       last_success_at = EXCLUDED.last_success_at,"
+                    "       finished_at = now(), status = 'succeeded'",
+                    (workspace_key, eq_workspace_id, snapshot_at),
+                )
+
+    def record_community_failure(self, workspace_key: str,
+                                 eq_workspace_id: str | None) -> None:
+        """빌드 실패. **``last_success_at`` 은 건드리지 않는다** → 후보에 그대로 남는다.
+
+        이 writer 가 없으면 ``status``·``finished_at`` 컬럼이 영원히 안 채워진다.
+        """
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO kbp.community_builds"
+                    "   (workspace_key, eq_workspace_id, finished_at, status)"
+                    " VALUES (%s, %s, now(), 'failed')"
+                    " ON CONFLICT (workspace_key) DO UPDATE"
+                    "   SET finished_at = now(), status = 'failed',"
+                    "       eq_workspace_id = COALESCE(EXCLUDED.eq_workspace_id,"
+                    "                                  kbp.community_builds.eq_workspace_id)",
+                    (workspace_key, eq_workspace_id),
+                )
+
+    def workspaces_needing_community(self, cap: int) -> tuple[list[str], int]:
+        """(캡까지 자른 후보, **자르기 전 총 후보 수**).
+
+        총 수를 함께 주지 않으면 ``batch_runs.backlog`` 기록도 warning 도 못 한다.
+        정렬은 "가장 오래전에 시도한 것 먼저" — ``fail_streak``(A2) 없이 굶김을 막는다.
+        """
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    WITH cand AS (
+                      SELECT gt.workspace_key, gt.touched_at, cb.last_attempt_at
+                        FROM kbp.graph_touch gt
+                        LEFT JOIN kbp.community_builds cb
+                               ON cb.workspace_key = gt.workspace_key
+                       WHERE gt.touched_at > COALESCE(cb.last_success_at, to_timestamp(0))
+                    )
+                    SELECT workspace_key, count(*) OVER () AS total
+                      FROM cand
+                     ORDER BY COALESCE(last_attempt_at, to_timestamp(0)) ASC,
+                              touched_at ASC
+                     LIMIT %s
+                    """,
+                    (cap,),
+                )
+                rows = cur.fetchall()
+        if not rows:
+            return ([], 0)
+        return ([r["workspace_key"] for r in rows], int(rows[0]["total"]))
+
+    def has_live_community_job(self, eq_workspace_id: str) -> bool:
+        """queued|running community 잡이 있나. SQL 후보 쿼리에서 하지 않는 이유는
+        축이 갈려 있어서다 — insert 잡은 kb id, community 잡은 eq UUID 이고, eq id 는
+        빌드 이력이 있어야만 알 수 있어 **신규 workspace 에서 검사가 no-op** 이 된다.
+        제출 루프가 ``ensure_workspace`` 로 eq id 를 얻은 **직후** 부른다.
+        """
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM kbp.jobs"
+                    " WHERE kind = 'community' AND status IN ('queued','running')"
+                    "   AND workspace_key = %s LIMIT 1",
+                    (eq_workspace_id,),
+                )
+                return cur.fetchone() is not None
+
+    def claim_run(self, name: str, run_date: Any, stale_minutes: int) -> bool:
+        """그 밤을 이 프로세스가 맡는다(원자적). 이미 처리된 밤이면 False.
+
+        ``failed`` 뿐 아니라 **굳은 ``started`` 도 회수**한다 — ``finish_run`` 이 안 불리는
+        종료(SIGKILL·OOM·컨테이너 재기동)에서 행이 ``started`` 로 남으면 그 밤의 남은 틱이
+        전부 claim 실패해 제출 0건이 되기 때문이다.
+
+        ⚠️ ``interval '%s minutes'`` 로 쓰면 안 된다 — psycopg3 의 플레이스홀더 스캐너는
+        SQL 문자열 리터럴 안도 치환해 ``interval '$1 minutes'`` 가 되고 파라미터 개수가
+        어긋난다. 이 레포의 관용구는 ``make_interval(…=> %s)`` 뿐이다.
+        """
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO kbp.batch_runs (name, run_date) VALUES (%s, %s)
+                    ON CONFLICT (name, run_date) DO UPDATE
+                       SET run_at = now(), status = 'started', error = NULL
+                     WHERE kbp.batch_runs.status = 'failed'
+                        OR (kbp.batch_runs.status = 'started'
+                            AND kbp.batch_runs.run_at
+                                < now() - make_interval(mins => %s))
+                    RETURNING 1
+                    """,
+                    (name, run_date, stale_minutes),
+                )
+                return cur.fetchone() is not None
+
+    def has_stale_started(self, name: str, run_date: Any, stale_minutes: int) -> bool:
+        """굳은 ``started`` 행이 있나. 창(WINDOW)이 끝난 뒤에도 마감 전이면 회수해
+        재시도할 수 있게, 스케줄러가 창 판정에 이 값을 함께 쓴다.
+        """
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM kbp.batch_runs"
+                    " WHERE name = %s AND run_date = %s AND status = 'started'"
+                    "   AND run_at < now() - make_interval(mins => %s) LIMIT 1",
+                    (name, run_date, stale_minutes),
+                )
+                return cur.fetchone() is not None
+
+    def cancel_nightly_queued(self, *, key: str | None = None,
+                              exclude_key: str | None = None) -> int:
+        """야간 배치가 남긴 **queued** 잡을 취소한다. running 은 건드리지 않는다.
+
+        ``batch_key`` 로만 매칭한다 — ``idem_key`` 는 claim 시점에도, ``JobRetryable``
+        requeue 시에도 NULL 이 되어 정작 막아야 할 잡이 샌다.
+
+        키 문자열은 **호출자가 완성해서** 넘긴다. SQL 안에서 ``'…:' || %(d)s`` 로 조립하면
+        date→text 암묵 캐스트가 서버 ``DateStyle`` 에 의존해 매칭 0건이 될 수 있다.
+
+        ⚠️ 파라미터가 있는 쿼리라 리터럴 ``%`` 는 ``%%`` 로 이스케이프한다.
+        """
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE kbp.jobs
+                       SET status = 'canceled', completed_at = now(), idem_key = NULL
+                     WHERE kind = 'community' AND status = 'queued'
+                       AND batch_key LIKE 'community-nightly:%%'
+                       AND (%(key)s::text  IS NULL OR batch_key =  %(key)s::text)
+                       AND (%(excl)s::text IS NULL OR batch_key <> %(excl)s::text)
+                    """,
+                    {"key": key, "excl": exclude_key},
+                )
+                return cur.rowcount or 0
+
+    def finish_run(self, name: str, run_date: Any, *, submitted: int, deduped: int,
+                   failed: int, backlog: int, status: str,
+                   error: str | None = None) -> None:
+        """그 밤의 결과를 확정한다. 이게 안 불리면 행이 ``started`` 로 굳는다."""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE kbp.batch_runs"
+                    "   SET submitted=%s, deduped=%s, failed=%s, backlog=%s,"
+                    "       status=%s, error=%s"
+                    " WHERE name=%s AND run_date=%s",
+                    (submitted, deduped, failed, backlog, status, error, name, run_date),
+                )
+
+    def last_batch_run(self, name: str, run_date: Any) -> dict[str, Any] | None:
+        """**기대하는 밤**의 행을 돌려준다(가장 최근 행이 아니다).
+
+        '가장 최근'을 쓰면 워커가 3일간 창을 놓쳐 3일 전 ``ok`` 행만 남아 있어도
+        정상으로 보여 **멈춤을 못 잡는다**.
+        """
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM kbp.batch_runs WHERE name=%s AND run_date=%s",
+                    (name, run_date),
+                )
+                return cur.fetchone()
+
 
 def _as_uuid(value: uuid.UUID | str | None) -> uuid.UUID | None:
     if value is None or isinstance(value, uuid.UUID):

@@ -7,6 +7,7 @@
   * `table_blocks` → `blocks` 이름 변환, ingest 내부 chunk 인자가 /chunk 와 다른 현행
 """
 from __future__ import annotations
+from datetime import datetime, timedelta, timezone
 
 import uuid
 
@@ -32,12 +33,29 @@ class FakeBlobs:
 
 
 class FakeRepo:
-    """`set_stage` 호출을 기록하고, 지정한 단계에서 LeaseLost 를 던진다."""
+    """`set_stage` 호출을 기록하고, 지정한 단계에서 LeaseLost 를 던진다.
 
-    def __init__(self, *, lose_lease_at=None, jobs=None):
+    야간 커뮤니티 배치(A1)가 러너 안에서 부르는 repo 메서드도 여기 있어야 한다 —
+    없으면 `AttributeError` 가 `run()` 의 공통 except 에서 `classify()` 로 잡혀
+    **잡 실패로 정규화**되므로, 이 페이크를 쓰는 러너 테스트가 전부 깨진다.
+    호출을 기록해 두어 테스트가 단언할 수 있게 한다.
+    """
+
+    def __init__(self, *, lose_lease_at=None, jobs=None, fail_on=()):
         self.stages = []
         self.lose_lease_at = lose_lease_at
         self.jobs = jobs or {}
+        #: A1 호출 기록 — (workspace_key, ...) 튜플들
+        self.touched = []
+        self.community_success = []
+        self.community_failure = []
+        #: 이 이름의 메서드는 예외를 던진다(best-effort 경로 검증용)
+        self.fail_on = set(fail_on)
+        #: db_now() 는 **호출마다 1분씩 전진**한다. 고정값이면 "빌드 시작 스냅샷" 과
+        #: "완료 시각" 이 구분되지 않아, 완료 시각으로 기록해도 테스트가 통과해버린다
+        #: (실제로 그런 무의미한 테스트를 한 번 썼다 — 2026-08-09).
+        self.now = datetime(2026, 8, 9, 3, 0, tzinfo=timezone.utc)
+        self.now_calls = []
 
     def set_stage(self, job_id, *, worker_id, attempt, stage):
         self.stages.append(stage)
@@ -46,6 +64,26 @@ class FakeRepo:
 
     def get(self, job_id):
         return self.jobs.get(str(job_id))
+
+    # ── 야간 커뮤니티 배치(A1) ─────────────────────────────────────────────
+
+    def db_now(self):
+        ts = self.now + timedelta(minutes=len(self.now_calls))
+        self.now_calls.append(ts)
+        return ts
+
+    def touch_graph(self, workspace_key):
+        if "touch_graph" in self.fail_on:
+            raise RuntimeError("boom")
+        self.touched.append(workspace_key)
+
+    def record_community_success(self, workspace_key, eq_workspace_id, snapshot_at):
+        if "record_community_success" in self.fail_on:
+            raise RuntimeError("boom")
+        self.community_success.append((workspace_key, eq_workspace_id, snapshot_at))
+
+    def record_community_failure(self, workspace_key, eq_workspace_id):
+        self.community_failure.append((workspace_key, eq_workspace_id))
 
 
 class SpyEq:
@@ -380,3 +418,142 @@ def test_community_without_workspace_fails_fast():
     r = _runner(eq_client=SpyEq(), community_builder=lambda ws, **k: None)
     with pytest.raises(JobFailed):
         r.run(_job("community", payload={}), worker_id="w", attempt=1)
+
+
+# ── 야간 커뮤니티 배치(A1) — graph_touch 증거 기록 ─────────────────────────
+# 후보 선정의 **유일한 증거원**이라, 어느 경로가 남기고 어느 경로가 안 남기는지가
+# 곧 "어떤 KB 가 매일 밤 LLM 빌드를 도는가" 를 결정한다.
+
+def test_insert_with_graph_extraction_records_graph_touch():
+    repo = FakeRepo()
+    r = _runner(repo=repo, eq_client=SpyEq())
+    job = _job("insert", payload={"workspace_id": "kb-1", "doc_id": "d1",
+                                  "chunks": ["a"], "extract_graph": True})
+    r.run(job, worker_id="w1", attempt=1)
+    assert repo.touched == ["kb-1"]
+
+
+def test_insert_without_graph_extraction_does_not_record_touch():
+    """vector-only 적재는 그래프를 안 건드리므로 야간 후보가 되면 안 된다.
+
+    현행 kb 트리거는 `extract_graph is False` 면 커뮤니티 빌드를 enqueue 하지 않는다.
+    여기서 touch 를 남기면 그 KB 가 **0회 → 매일 1회 LLM 빌드**로 나빠진다.
+    """
+    repo = FakeRepo()
+    r = _runner(repo=repo, eq_client=SpyEq())
+    job = _job("insert", payload={"workspace_id": "kb-1", "doc_id": "d1",
+                                  "chunks": ["a"], "extract_graph": False})
+    r.run(job, worker_id="w1", attempt=1)
+    assert repo.touched == []
+
+
+def test_ingest_records_graph_touch_unconditionally():
+    """/ingest 는 skip_graph 를 전달하지 않아 **항상** 그래프를 추출한다.
+
+    payload 에 extract_graph 키 자체가 없으므로 게이트를 걸면 안 된다.
+    """
+    repo = FakeRepo()
+    r = _runner(repo=repo, eq_client=SpyEq(), parse_client=SpyParse(),
+                chunk_client=SpyChunk(), blobs=FakeBlobs({"k": b"x"}))
+    job = _job("ingest", input_ref="k",
+               payload={"filename": "a.pdf", "workspace_id": "kb-1", "doc_id": "d1"})
+    r.run(job, worker_id="w1", attempt=1)
+    assert repo.touched == ["kb-1"]
+
+
+def test_ingest_parse_failure_does_not_record_graph_touch():
+    """파싱 실패는 잡 성공(HTTP 200 + 원본)이지만 **그래프를 전혀 안 건드린다**.
+
+    조기 반환 경로라 touch 위치가 함수 끝이면 여기서도 남아버린다 — 그러면 파싱이
+    계속 실패하는 KB 가 매일 밤 빈 빌드를 돈다.
+    """
+    repo = FakeRepo()
+    r = _runner(repo=repo, eq_client=SpyEq(),
+                parse_client=SpyParse(result={"status": "failed", "detail": "x"}),
+                blobs=FakeBlobs({"k": b"x"}))
+    job = _job("ingest", input_ref="k",
+               payload={"filename": "a.pdf", "workspace_id": "kb-1", "doc_id": "d1"})
+    out = r.run(job, worker_id="w1", attempt=1)
+    assert out["status"] == "failed"          # 현행 계약 유지
+    assert repo.touched == []
+
+
+def test_graph_touch_failure_does_not_fail_the_insert_job():
+    """이 기록은 edgequake 적재가 **끝난 뒤**다 — 실패해도 적재를 뒤집으면 안 된다.
+
+    insert 는 max_attempts=1 이라 재시도도 없어, 여기서 예외를 올리면 성공한 적재가
+    그대로 failed 가 되고 kb 문서가 실패로 표시된다.
+    """
+    repo = FakeRepo(fail_on=("touch_graph",))
+    r = _runner(repo=repo, eq_client=SpyEq())
+    job = _job("insert", payload={"workspace_id": "kb-1", "doc_id": "d1",
+                                  "chunks": ["a"], "extract_graph": True})
+    out = r.run(job, worker_id="w1", attempt=1)   # 예외가 새면 여기서 실패한다
+    assert out["document_id"] == "doc-1"
+    assert repo.touched == []
+
+
+# ── 야간 커뮤니티 배치(A1) — 빌드 이력 ─────────────────────────────────────
+
+def test_community_success_records_start_snapshot_not_completion_time(monkeypatch):
+    monkeypatch.setenv("KBP_PG_DSN", "postgres://x/y")
+    monkeypatch.setattr("service.llm.get_text_llm", lambda: (lambda p, pl: "요약"))
+    """`last_success_at` 은 **빌드 시작 스냅샷**이어야 한다.
+
+    빌드는 진입 시점 그래프만 보고 수십 분 걸린다. 완료 시각으로 기록하면 빌드 도중
+    성공한 적재(touched_at 이 시작~완료 사이)가 다음 밤 후보에서 영구 탈락한다.
+    """
+    repo = FakeRepo()
+    r = _runner(repo=repo, eq_client=SpyEq(),
+                community_builder=lambda ws, **kw: {"communities": 3})
+    job = _job("community", payload={"workspace_id": "kb-1"})
+    r.run(job, worker_id="w1", attempt=1)
+    # ★ 기록된 값은 **첫 db_now()**(빌드 시작)여야 한다. 완료 시각(그 뒤 호출)이면 실패한다.
+    assert repo.community_success == [("kb-1", "ws-uuid", repo.now_calls[0])]
+    assert len(repo.now_calls) >= 1
+    assert repo.community_failure == []
+
+
+def test_community_failure_is_recorded(monkeypatch):
+    monkeypatch.setenv("KBP_PG_DSN", "postgres://x/y")
+    monkeypatch.setattr("service.llm.get_text_llm", lambda: (lambda p, pl: "요약"))
+    """DDL 의 status·finished_at 을 채우는 writer 가 실제로 불려야 한다."""
+    def boom(ws, **kw):
+        raise RuntimeError("build blew up")
+
+    repo = FakeRepo()
+    r = _runner(repo=repo, eq_client=SpyEq(), community_builder=boom)
+    job = _job("community", payload={"workspace_id": "kb-1"})
+    with pytest.raises(JobFailed):
+        r.run(job, worker_id="w1", attempt=1)
+    assert repo.community_failure == [("kb-1", "ws-uuid")]
+    assert repo.community_success == []
+
+
+def test_community_lease_loss_is_not_recorded_as_failure(monkeypatch):
+    monkeypatch.setenv("KBP_PG_DSN", "postgres://x/y")
+    monkeypatch.setattr("service.llm.get_text_llm", lambda: (lambda p, pl: "요약"))
+    """lease 상실은 **다른 세대가 그 workspace 를 소유**한 것이라 이쪽 실패가 아니다.
+
+    실패로 기록하면 그쪽 세대의 이력을 덮어쓴다.
+    """
+    repo = FakeRepo(lose_lease_at="building")
+    r = _runner(repo=repo, eq_client=SpyEq(),
+                community_builder=lambda ws, **kw: {"communities": 1})
+    job = _job("community", payload={"workspace_id": "kb-1"})
+    with pytest.raises(JobAborted):
+        r.run(job, worker_id="w1", attempt=1)
+    assert repo.community_failure == []
+    assert repo.community_success == []
+
+
+def test_community_success_record_failure_does_not_fail_the_build(monkeypatch):
+    monkeypatch.setenv("KBP_PG_DSN", "postgres://x/y")
+    monkeypatch.setattr("service.llm.get_text_llm", lambda: (lambda p, pl: "요약"))
+    """수십 분짜리 빌드를 이력 기록 실패로 뒤집지 않는다(best-effort)."""
+    repo = FakeRepo(fail_on=("record_community_success",))
+    r = _runner(repo=repo, eq_client=SpyEq(),
+                community_builder=lambda ws, **kw: {"communities": 3})
+    job = _job("community", payload={"workspace_id": "kb-1"})
+    out = r.run(job, worker_id="w1", attempt=1)
+    assert out["workspace_id"] == "ws-uuid"

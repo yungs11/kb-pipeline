@@ -75,6 +75,24 @@ x-facade-env: &facade_env
   KBP_JOB_ORPHAN_SWEEP_BOOT_DELAY_SECONDS: ${KBP_JOB_ORPHAN_SWEEP_BOOT_DELAY_SECONDS:-600}
   KBP_JOB_ORPHAN_GRACE_SECONDS: ${KBP_JOB_ORPHAN_GRACE_SECONDS:-21600}
 
+  # ── 야간 커뮤니티 배치(A1) ────────────────────────────────────────────────
+  # 커뮤니티 빌드를 적재 경로에서 떼어내 **밤 1회**로 모은다(주간 LLM 부하 회피 +
+  # 진입점 단일화). 대가는 "커뮤니티가 최대 하루 뒤 반영"이다.
+  # ⚠️ TZ 를 안 주면 컨테이너는 UTC 라 03:00 이 **KST 12:00** 에 열려 목적이 뒤집힌다.
+  TZ: ${TZ:-Asia/Seoul}
+  # false 면 스레드를 아예 안 띄운다(파서 전용 배포·비상 정지).
+  KBP_COMMUNITY_BUILD_ENABLED: ${KBP_COMMUNITY_BUILD_ENABLED:-true}
+  KBP_COMMUNITY_BUILD_AT: ${KBP_COMMUNITY_BUILD_AT:-03:00}
+  KBP_COMMUNITY_WINDOW_MINUTES: ${KBP_COMMUNITY_WINDOW_MINUTES:-120}
+  # 이 시각 이후에는 남은 queued 를 취소한다(업무시간 침범 방지). 창보다 커야 의미가 있다.
+  KBP_COMMUNITY_DEADLINE_MINUTES: ${KBP_COMMUNITY_DEADLINE_MINUTES:-420}
+  KBP_COMMUNITY_MAX_PER_NIGHT: ${KBP_COMMUNITY_MAX_PER_NIGHT:-8}
+  KBP_COMMUNITY_POLL_SECONDS: ${KBP_COMMUNITY_POLL_SECONDS:-60}
+  # SIGKILL/OOM 으로 batch_runs 행이 'started' 로 굳었을 때 회수하기까지의 지연(분).
+  KBP_COMMUNITY_STALE_RUN_MINUTES: ${KBP_COMMUNITY_STALE_RUN_MINUTES:-30}
+  # 제출 루프 시간 예산(초). ensure_workspace 가 동기 HTTP 라 edgequake 가 hang 이면
+  # 캡만큼 곱해져 틱 하나가 오래 막힌다.
+  KBP_COMMUNITY_SUBMIT_BUDGET_SECONDS: ${KBP_COMMUNITY_SUBMIT_BUDGET_SECONDS:-600}
 services:
   # ── 인프라 티어 (pull 이미지 — build-bundle.sh 가 로컬 태그를 부여해 save 한다) ──
   postgres:

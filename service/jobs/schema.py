@@ -100,6 +100,52 @@ CREATE TABLE IF NOT EXISTS kbp.job_workers (
   started_at   timestamptz NOT NULL,
   heartbeat_at timestamptz NOT NULL
 );
+
+-- ── 야간 커뮤니티 배치(A1) ──────────────────────────────────────────────────
+-- 후보의 **유일한 증거원**. 러너가 "그래프를 실제로 건드린" 적재를 성공으로 끝낼 때만
+-- UPSERT 한다. 잡 테이블을 스캔하지 않는 이유 두 가지:
+--   (a) `kind IN ('insert','ingest')` 만 보면 그래프 추출을 끈 vector-only KB 가
+--       현행 0회 → 매일 1회 LLM 빌드로 **나빠진다**(kb 트리거는 extract_graph=False 면
+--       enqueue 하지 않는다). payload 로도 못 거른다 — insert payload 는 chunks 전량이라
+--       거의 항상 오프로드되어 `jobs.payload` 컬럼이 NULL 이다.
+--   (b) GC 가 TTL(기본 72h) 경과 잡을 지우므로, 야간이 3일 넘게 멈추면 적재 **증거째**
+--       사라져 영구 미빌드가 된다. 이 테이블은 GC 대상이 아니다.
+CREATE TABLE IF NOT EXISTS kbp.graph_touch (
+  workspace_key text PRIMARY KEY,      -- kb id (insert 잡의 workspace_key 와 같은 축)
+  touched_at    timestamptz NOT NULL   -- 서버 now(). 후보 술어의 시계를 DB 로 통일한다
+);
+
+-- 빌드 이력. **두 축을 분리한다** — 한 컬럼으로 겸하면 어느 쪽으로도 틀린다:
+--   실패 시 갱신하면 후보에서 영구 탈락, 미갱신하면 회수된(러너를 안 탄) workspace 가
+--   매 밤 영구 1순위가 된다.
+CREATE TABLE IF NOT EXISTS kbp.community_builds (
+  workspace_key   text PRIMARY KEY,   -- kb id
+  eq_workspace_id text,
+  -- 제출 시점에 기록한다(러너를 안 타는 회수 경로에서도 남는다). **정렬 축**.
+  last_attempt_at timestamptz,
+  -- 성공 시에만. **후보 술어**. 값은 빌드가 그래프를 읽기 시작한 시각(스냅샷)이다 —
+  -- 완료 시각을 쓰면 수십 분짜리 빌드 **도중** 성공한 적재가 영구 탈락한다.
+  last_success_at timestamptz,
+  finished_at     timestamptz,
+  status          text                -- succeeded | failed
+);
+
+-- 야간 실행 이력. (name, run_date) 가 PK 라 "그 밤을 이미 처리했는가" 를 원자적으로 판정하고
+-- 이력도 보존한다(단일행이면 "3일 연속 잔여" 같은 것을 셀 수 없다).
+-- status/error 가 없으면 "마커만 서고 예외로 끝난 밤" 과 "후보가 원래 0건이던 밤" 이
+-- 구별되지 않는다 — 야간이 유일한 빌드 경로가 되므로 그 구별이 유일한 탐지 수단이다.
+CREATE TABLE IF NOT EXISTS kbp.batch_runs (
+  name       text NOT NULL,
+  run_date   date NOT NULL,
+  run_at     timestamptz NOT NULL DEFAULT now(),
+  submitted  int NOT NULL DEFAULT 0,
+  deduped    int NOT NULL DEFAULT 0,
+  failed     int NOT NULL DEFAULT 0,
+  backlog    int NOT NULL DEFAULT 0,
+  status     text NOT NULL DEFAULT 'started',   -- started | ok | failed
+  error      text,
+  PRIMARY KEY (name, run_date)
+);
 """
 
 

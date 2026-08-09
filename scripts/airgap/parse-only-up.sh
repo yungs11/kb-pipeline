@@ -105,6 +105,14 @@ done
 
 # ── 3) 기동 (부분집합 + --no-deps) ────────────────────────────────────────────
 log "compose up -d --no-deps  [${SERVICES[*]}]"
+# ── 야간 커뮤니티 배치를 **강제로 끈다** ──────────────────────────────────────
+# 템플릿 기본값에만 의존하면 뚫린다: 위 2) 단계는 .env 가 없으면 **전체 스택 템플릿**
+# (.env.airgap.example)을 복사하는데, 거기 기본값은 true 다. 파서 전용 스택에는
+# edgequake 가 아예 없으므로 야간 스레드가 뜨면 매 밤 도달 불가능한 호출을 반복한다.
+# compose 는 셸 환경을 --env-file 보다 우선하므로, 어떤 .env 로 와도 이 export 가 이긴다.
+export KBP_COMMUNITY_BUILD_ENABLED=false
+log "야간 커뮤니티 배치 비활성(파서 전용 배포)"
+
 "${COMPOSE[@]}" --env-file "$BUNDLE_ROOT/.env" up -d --no-deps "${SERVICES[@]}"
 
 # ── 4) health 폴링 ────────────────────────────────────────────────────────────

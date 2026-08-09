@@ -75,6 +75,7 @@ class Worker:
         self._lock = threading.Lock()
         self._hb_thread: threading.Thread | None = None
         self._gc_thread: threading.Thread | None = None
+        self._community_thread: threading.Thread | None = None
 
     # ── heartbeat (전용 스레드) ────────────────────────────────────────────
 
@@ -285,6 +286,24 @@ class Worker:
         self._gc_thread = threading.Thread(
             target=self._gc_loop, name="kbp-gc", daemon=True)
         self._gc_thread.start()
+
+        # 야간 커뮤니티 배치(A1)도 전용 스레드다(같은 이유). **기동 실패가 워커 본체를
+        # 막으면 안 된다** — 여기서 예외가 새면 live worker 0 이 되어 facade 의 모든
+        # 제출이 503 이 된다. 잡 처리가 야간 배치보다 우선이다.
+        try:
+            from service import community_schedule
+
+            if community_schedule._enabled():
+                self._community_thread = threading.Thread(
+                    target=community_schedule.run_forever,
+                    args=(self.repo, self.blobs, self.runner),
+                    kwargs={"stop": self._stop},
+                    name="kbp-community", daemon=True)
+                self._community_thread.start()
+            else:
+                log.info("야간 커뮤니티 배치 비활성(KBP_COMMUNITY_BUILD_ENABLED=false)")
+        except Exception:  # noqa: BLE001 - 워커 본체는 떠야 한다
+            log.exception("야간 커뮤니티 배치 스레드 기동 실패 — 워커는 계속 진행한다")
 
         while not self._stop.is_set():
             try:

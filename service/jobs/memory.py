@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import copy
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from service.jobs.repo import LeaseLost
@@ -23,6 +24,11 @@ from service.jobs.repo import LeaseLost
 class InMemoryJobRepo:
     def __init__(self) -> None:
         self.rows: dict[uuid.UUID, dict[str, Any]] = {}
+        # 야간 커뮤니티 배치(A1) 상태. 실 PG 의 kbp.graph_touch / community_builds /
+        # batch_runs 에 대응한다.
+        self.graph_touch: dict[str, Any] = {}
+        self.community_builds: dict[str, dict[str, Any]] = {}
+        self.batch_runs: dict[tuple[str, Any], dict[str, Any]] = {}
 
     # ── 제출·조회 ──────────────────────────────────────────────────────────
 
@@ -152,6 +158,96 @@ class InMemoryJobRepo:
         if not row or not row["legacy"]:
             return (None, None)
         return (row["input_ref"], row["payload_ref"])
+
+    # ── 야간 커뮤니티 배치 (A1) ────────────────────────────────────────────
+    # 실 Postgres 판정(SQL 의미론)은 requires_pg 테스트가 맡는다. 여기서는 러너·
+    # 엔드포인트 테스트가 AttributeError 로 깨지지 않게 **같은 계약**만 제공한다.
+
+    def db_now(self):
+        return datetime.now(timezone.utc)
+
+    def touch_graph(self, workspace_key: str) -> None:
+        self.graph_touch[workspace_key] = self.db_now()
+
+    def record_attempt(self, workspace_key: str, eq_workspace_id: str | None) -> None:
+        row = self.community_builds.setdefault(workspace_key, {})
+        row["last_attempt_at"] = self.db_now()
+        if eq_workspace_id:
+            row["eq_workspace_id"] = eq_workspace_id
+
+    def record_community_success(self, workspace_key: str, eq_workspace_id: str,
+                                 snapshot_at) -> None:
+        row = self.community_builds.setdefault(workspace_key, {})
+        row.update(eq_workspace_id=eq_workspace_id, last_success_at=snapshot_at,
+                   finished_at=self.db_now(), status="succeeded")
+
+    def record_community_failure(self, workspace_key: str,
+                                 eq_workspace_id: str | None) -> None:
+        row = self.community_builds.setdefault(workspace_key, {})
+        row.update(finished_at=self.db_now(), status="failed")
+        if eq_workspace_id:
+            row["eq_workspace_id"] = eq_workspace_id
+
+    def workspaces_needing_community(self, cap: int) -> tuple[list[str], int]:
+        epoch = datetime.fromtimestamp(0, timezone.utc)
+        cand = [
+            (k, t) for k, t in self.graph_touch.items()
+            if t > (self.community_builds.get(k, {}).get("last_success_at") or epoch)
+        ]
+        cand.sort(key=lambda kt: (
+            self.community_builds.get(kt[0], {}).get("last_attempt_at") or epoch, kt[1]))
+        return ([k for k, _ in cand[:cap]], len(cand))
+
+    def has_live_community_job(self, eq_workspace_id: str) -> bool:
+        return any(r["kind"] == "community" and r["status"] in ("queued", "running")
+                   and r.get("workspace_key") == eq_workspace_id
+                   for r in self.rows.values())
+
+    def claim_run(self, name: str, run_date, stale_minutes: int) -> bool:
+        row = self.batch_runs.get((name, run_date))
+        if row is None:
+            self.batch_runs[(name, run_date)] = {
+                "name": name, "run_date": run_date, "run_at": self.db_now(),
+                "submitted": 0, "deduped": 0, "failed": 0, "backlog": 0,
+                "status": "started", "error": None}
+            return True
+        if row["status"] == "failed" or (
+                row["status"] == "started"
+                and row["run_at"] < self.db_now() - timedelta(minutes=stale_minutes)):
+            row.update(run_at=self.db_now(), status="started", error=None)
+            return True
+        return False
+
+    def has_stale_started(self, name: str, run_date, stale_minutes: int) -> bool:
+        row = self.batch_runs.get((name, run_date))
+        return bool(row and row["status"] == "started"
+                    and row["run_at"] < self.db_now() - timedelta(minutes=stale_minutes))
+
+    def cancel_nightly_queued(self, *, key=None, exclude_key=None) -> int:
+        n = 0
+        for row in self.rows.values():
+            bk = row.get("batch_key") or ""
+            if row["kind"] != "community" or row["status"] != "queued":
+                continue
+            if not bk.startswith("community-nightly:"):
+                continue
+            if key is not None and bk != key:
+                continue
+            if exclude_key is not None and bk == exclude_key:
+                continue
+            row.update(status="canceled", completed_at=self.db_now(), idem_key=None)
+            n += 1
+        return n
+
+    def finish_run(self, name: str, run_date, *, submitted: int, deduped: int,
+                   failed: int, backlog: int, status: str, error=None) -> None:
+        row = self.batch_runs.get((name, run_date))
+        if row is not None:
+            row.update(submitted=submitted, deduped=deduped, failed=failed,
+                       backlog=backlog, status=status, error=error)
+
+    def last_batch_run(self, name: str, run_date):
+        return self.batch_runs.get((name, run_date))
 
 
 class InMemoryBlobStore:

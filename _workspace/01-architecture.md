@@ -18,7 +18,7 @@
        ↓
 [5 Insert]       edgequake: 엔티티/관계 추출 → 임베딩 → 그래프 → 단일 Postgres(pgvector+AGE) 적재(RLS)
        ↓
-[6 Community]    edgequake AGE → Louvain detect_communities + LLM 리포트 — 배치(스케줄/임계/온디맨드)
+[6 Community]    edgequake AGE → Louvain detect_communities + LLM 리포트 — **야간 배치 1회**(기본 03:00 KST) + 수동 온디맨드
        ↓
 [7 Search]       pgvector KNN + AGE 순회 + community 리포트 머지, per-KB RLS
 ```
@@ -219,6 +219,6 @@ Excel(xlsx/xlsm/xls)은 parse-svc `parsers/excel` 이 vendored **excel_parser_ra
 | **Modal Enrich** | `parse_service/app.py:run_parse` → `kb_pipeline.modal.enrich_with_spans`, LLM=`service/llm.py:get_text_llm` | `BEFORE_WINDOW=3`/`AFTER_WINDOW=6`, `KBP_MODAL_MAX_WORKERS`(기본 3), 마커 `〈MODAL id="X" type="..."〉…〈/MODAL〉`(U+3008/U+3009). 산출 `enriched_content`+`modal_spans`(반열림)+`page_spans`. 토글 `KBP_MODAL_ENRICH`(기본 off) |
 | **Chunking** | facade `/chunk` → `service/adaptive_chunk.py:AdaptiveChunkClient` | 마커 `MODAL_ATOMIC_MARKERS=[["〈MODAL","〈/MODAL〉"]]` → 잡 본문 `options.atomic_markers`. 비동기 `POST /chunk/jobs`→`GET /chunk/jobs/{id}`(간격 3s, 폴타임아웃 1800s, 클라 600s). 정규화 `chunk_text`→`text`, `chunk_pages`→`pages`. join `chr(0x1E)`(`PASSTHROUGH_SEP`) |
 | **Insert** | `service/edgequake.py:EdgequakeClient` + edgequake `Pipeline` | `POST /api/v1/documents`(`async_processing:true`). `chunk_async`(PassthroughStrategy)→`extract_parallel`(qwen)→`finish_document_processing`(link→`generate_all_embeddings` bge-m3 1024d→`build_lineage`). 폴링 `GET /api/v1/tasks/{track_id}`(또는 `document_phase`), poll_timeout 1200s. tenant 기본 `00000000-0000-0000-0000-000000000002`, ws `kb-<kbid>` `ensure_workspace`. 테이블 `eq_eq_default_ws_<short8>_vectors`, 그래프 `eq_eq_default_graph` |
-| **Community** | `kb_pipeline/community.py:build_workspace_communities`; 트리거 `service/app.py:communities_build`(202)→`_build_communities_job`(BackgroundTask, 예외 swallow) | `fetch_graph`(`properties::text::jsonb`)→`build_communities`(networkx+python-louvain `best_partition`, `random_state=42`)→`generate_report`(`COMMUNITY_REPORT_PROMPT`, `/no_think`)→`store_reports`(`public.community_reports` upsert, `ON CONFLICT (workspace_id, level, community_id)`) |
+| **Community** | `kb_pipeline/community.py:build_workspace_communities`; 트리거는 **둘뿐** — (1) **야간 배치** `service/community_schedule.py`(facade-worker 데몬 스레드, 기본 03:00 KST, `kbp.graph_touch` 를 근거로 그래프가 변한 workspace 만 큐에 넣는다), (2) 수동 `POST /communities/build`(202→잡 큐). **적재 tail 트리거는 제거됐다**(A1) | `fetch_graph`(`properties::text::jsonb`)→`build_communities`(networkx+python-louvain `best_partition`, `random_state=42`)→`generate_report`(`COMMUNITY_REPORT_PROMPT`, `/no_think`)→`store_reports`(`public.community_reports` upsert, `ON CONFLICT (workspace_id, level, community_id)`) |
 | **Search(실)** | `service/app.py:search` → `eq.ensure_workspace` → `eq.search(workspace_id, query, top_k)` | edgequake `POST /api/v1/query`(hybrid), top_k→max_results. 산출 `{answer, results[{chunk_id,text,score,document_id}]}` |
 | **Search(미배선)** | `kb_pipeline/search.py:unified_search`, `route()` | `GLOBAL_CUES`(요약/전체/핵심/개요/summary…)+tiny LLM 타이브레이크. local=edgequake `POST /api/v1/query`(`mode="hybrid"`, `include_references:true`, 180s), global=`community.global_query` map-reduce. app.py 미import |
