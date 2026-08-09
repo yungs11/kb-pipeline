@@ -6,6 +6,9 @@ __pycache__/
 *.pyc
 .venv/
 .venv-kb/
+# 워크트리에서 메인의 venv 를 심볼릭 링크로 쓰는 경우 — 디렉터리 패턴에 안 걸린다
+.venv-kb
+.venv
 .venv*/
 venv/
 .env

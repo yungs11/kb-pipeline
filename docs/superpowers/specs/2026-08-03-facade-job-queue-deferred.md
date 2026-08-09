@@ -637,6 +637,94 @@ grep 이 `set -e` 아래서 스크립트를 죽임). 최종적으로 v4 는 READ
 재검증 없이 구현만 하면 된다. 착수 조건: `/obj/*` 프록시로 인한 실제 403(챗 인용·썸네일
 깨짐)이 관측되거나, 폐쇄망 배포에서 요구될 때.
 
+---
+
+## D25~D37. 커뮤니티 야간 배치 plan v9 검증에서 **범위 밖**으로 분류된 항목 (2026-08-09)
+
+> 출처: `2026-08-06-community-nightly-batch-plan.md` **v9** 의 ultracode 경쟁 검증
+> (4렌즈 병렬 + 종합, verdict NEEDS_REVISION / must_fix 14 · out_of_scope 13).
+> 범위 안 blocking 14건은 **v10 으로 반영**했다. 아래는 그 plan 의 목표
+> (야간 일원화 · 주간 LLM 부하 회피 · 진입점 단일화) **밖**이라 분류한 것들이다.
+> 조용히 버리지 않기 위해 근거와 함께 남긴다.
+
+### D25. submit_job_ex 가 submit_job 본문을 복제하면 repo.live_worker_count() <= 0 → HTTPException(503)(service/jobs/api.py:151-153)까지 복제되어 웹 계층 예외가 배치 스레드로 샌다
+
+**왜 범위 밖**: 배치 스레드가 도는 facade-worker 프로세스 자신이 heartbeat 를 쓰므로(worker.py:265 선기동) 현행 배선에서 발화하지 않는다
+
+**언제 필요해지나**: §2.3 구현 시 그 가드를 제거하거나 RuntimeError 로 바꿔 둘 것. 배치 첫 틱이 heartbeat 등록보다 앞설 수 있게 기동 순서가 바뀌면 즉시 필요
+
+### D26. max_communities 상한의 sorted(key=len) 로 community_id(enumerate 인덱스)가 빌드 간 재배정되고 잘린 작은 커뮤니티가 영구히 리포트를 못 갖는다
+
+**왜 범위 밖**: plan 이 §6·deferred 로 이미 기록한 수용된 트레이드오프이며 안정 식별자 부여는 별건(replace=True 가 세대별 일관성은 회복시킨다)
+
+**언제 필요해지나**: B(global/local 검색)가 community_id 를 외부 참조·인용으로 쓰기 시작할 때
+
+### D27. _NODE_SQL/_EDGE_SQL(community.py:154,165) 표현식 인덱스 부재로 graph_counts 가 workspace 당 Seq Scan
+
+**왜 범위 밖**: §2.6 이 명시적으로 범위 밖 선언, 실측 16ms·리포트 보유 5개
+
+**언제 필요해지나**: 리포트 보유 workspace 가 수십 개로 늘어 스윕 1회가 분 단위가 되거나 graph_counts 를 요청 경로에서 부를 때
+
+### D28. GC TTL(72h, gc.py:37)과 §2.2 의 ORDER BY fail_streak ASC 가 겹쳐 반복 실패 workspace 가 캡 뒤로 밀리다 insert 행이 사라져 후보에서 영구 이탈할 수 있다
+
+**왜 범위 밖**: plan §2.2 가 TTL 잔여를 이미 명시하고 '잔여>0 3일 연속 error + deferred' 완화책을 적어 두었다. 근본 해결(후보 소스에 community_builds UNION 또는 적재 이력을 kbp.jobs 밖으로)은 별건 설계
+
+**언제 필요해지나**: 캡 8 을 넘는 활성 workspace 가 상시 존재하거나 TTL 을 48h 미만으로 내릴 때
+
+### D29. §2.2 in-flight NOT EXISTS 가 payload->>'workspace_id' 를 쓰는 것과 사실 3(오프로드 시 payload NULL)의 정합성
+
+**왜 범위 밖**: community payload 는 {"workspace_id": ...} 뿐이라 인라인 임계(blobs.py:29, 262144B)를 넘을 수 없어 기본 설정에서 정상 동작한다. §2.2 에 '커뮤니티 payload 는 항상 인라인' 한 줄 근거만 남기면 충분
+
+**언제 필요해지나**: KBP_JOB_INLINE_MAX_BYTES 를 극단적으로 낮추는 폐쇄망 튜닝을 할 때
+
+### D30. §2.2 in-flight NOT EXISTS 에 cancel_requested = false 필터 추가
+
+**왜 범위 밖**: 취소 요청만 걸린 queued 잡이 그 밤 하루 후보를 막는 정도이고 다음 밤 자동 복구 — 영구 탈락 아님
+
+**언제 필요해지나**: 취소 API 사용이 잦아져 하루 지연이 반복 관측될 때
+
+### D31. 야간 창 전체 동안 facade-worker 가 죽어 있으면 그 밤이 통째로 스킵된다
+
+**왜 범위 밖**: restart: unless-stopped(docker-compose.yml:328)로 대개 복구되고 snapshot_at 이 그대로라 다음 밤 최우선으로 잡힌다
+
+**언제 필요해지나**: WINDOW_MINUTES 기본값을 짧게 확정할 때 함께 결정
+
+### D32. kbp.batch_runs 행 무한 증가(정리 규정 없음)
+
+**왜 범위 밖**: 하루 1행이라 운영 영향이 없고 잡 GC 설계 변경은 범위 밖
+
+**언제 필요해지나**: 수년 누적되거나 batch_runs 를 다른 배치와 공유할 때
+
+### D33. TZ 를 facade_env 공유 앵커에 넣으면 facade API 컨테이너 로그 시각도 KST 가 되어 parse-svc(UTC)와 시각축이 섞인다
+
+**왜 범위 밖**: service/·kb_pipeline/ 에 naive datetime 사용처가 없어 데이터 정합성 영향이 확인되지 않았고 로그 관측 표준은 배포 정책
+
+**언제 필요해지나**: 전 서비스 TZ 통일/UTC 고정 같은 인시던트 로그 상관분석 표준을 정할 때
+
+### D34. DELETE /doc 이 잡 행을 안 남겨 부분 삭제 workspace 가 다음 적재까지 낡은 리포트를 쓴다
+
+**왜 범위 밖**: plan §2.6·§4 가 이미 deferred 로 명시
+
+**언제 필요해지나**: 문서 삭제가 검색 품질 사고로 이어진 사례가 나올 때
+
+### D35. .env.example 에 신규 KBP_COMMUNITY_*/TZ 키 추가
+
+**왜 범위 밖**: .env.example 은 KBP_JOB_* 계열을 하나도 담지 않는 현행 관례이고 compose 가 전부 ${VAR:-기본} 이라 dev 동작에 영향 없음
+
+**언제 필요해지나**: .env.example 을 compose 헤더가 말하는 full key catalog 로 정렬하는 별건 작업 때
+
+### D36. community 버킷 전역 상한 1(직렬)이라 KB 가 늘면 야간 창을 못 채운다(D21)
+
+**왜 범위 밖**: 2026-08-09 사용자가 재확인한 확정 결정
+
+**언제 필요해지나**: workspace 수가 캡 8 을 상시 초과해 백로그 경고가 상시화될 때
+
+### D37. §5 의 kb 회귀 기준선 '직전 관측 19건 미확정' 플레이스홀더
+
+**왜 범위 밖**: 측정 절차(착수 시 pytest -q 로 채움)가 정해져 있어 구현을 막지 않는다
+
+**언제 필요해지나**: 구현 착수 시 실제 숫자로 채울 때
+
 ## D38 — `_rank_reports` 가 한국어 조사·어미에 취약 (global 검색 선정)
 
 **무엇** — `kb_pipeline/community.py:_rank_reports` 는 질문 토큰의 **부분문자열 겹침**으로

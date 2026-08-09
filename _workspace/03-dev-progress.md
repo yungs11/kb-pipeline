@@ -607,3 +607,32 @@ facade 가 유일한 API 서버가 되는 방향에서, 잡 큐 도입 때 범�
 폐쇄망 배포가 임박하면 **D16**(버킷 공유 시 스윕이 서로의 staging 삭제)이 D8 과 같은
 시점 검토 대상이다. 그 외에는 D6(취소 반응성) → D10(`/communities/build` 큐 편입) 순.
 나머지(D3·D4·D7·D9·D11·D14·D15·D17·D18)는 관측 가능한 문제가 생길 때 다시 본다.
+
+## 커뮤니티 야간 배치 A1 — 구현 완료 (2026-08-09)
+
+브랜치 `feat/community-nightly-a1`. plan:
+`docs/superpowers/specs/2026-08-09-community-nightly-A1-scheduler-plan.md`(v5, READY).
+
+**완료**
+- 스키마 3종(`graph_touch`·`community_builds`·`batch_runs`), repo 11개 메서드,
+  `InMemoryJobRepo` 대응, 러너 배선(touch + 이력), `submit_job_ex`,
+  **`service/community_schedule.py`(신규)**, `worker.py` 스레드
+- 배포: compose ×2 앵커(`TZ` + `KBP_COMMUNITY_*` 7개), env 템플릿 3종,
+  `parse-only-up.sh` 가 파서 전용 배포에서 야간 스레드를 **강제 비활성**
+- kb: 적재 tail 트리거 제거(함수·arq 등록은 보존)
+
+**테스트** — kbp 303(PG 없음)/385(PG 포함), kb 648. 회귀 0.
+회귀 시뮬레이션 **8종**이 실제로 빨강이 되는 것을 확인했다(구현을 되돌려 실측).
+
+**남은 것**
+- **A2** 그래프 변화 스킵(`skip_if_unchanged`·`graph_counts`·`fail_streak`·
+  `max_communities`) — 없으면 vector-only 가 아닌 KB 는 그래프가 안 변해도 매 밤 재빌드
+- **A3** 리포트 세대 정리(`store_reports(replace=)`) + 좀비 방어 — 재빌드로 커뮤니티가
+  줄면 낡은 리포트가 영구히 남는다
+- **A4** 스테일 리포트 스윕 — `DELETE /doc` 으로 문서를 전량 지운 workspace
+- **B** global 검색 배선(`2026-08-06-global-search-button-plan.md`) — **지금은 리포트를
+  읽는 경로가 없다**. A3·A4 의 실효성은 B 가 배선된 뒤에야 체감된다
+- 폐쇄망 번들 재포장(스케줄러 env 7개가 들어간 compose·템플릿 반영)
+
+**운영 확인 필요(미실측)** — 실제 야간 발화. dev 에서 `KBP_COMMUNITY_BUILD_AT` 를
+현재+1분으로 두고 한 번 돌려보는 것이 남았다(계획서 §3 완료판정).

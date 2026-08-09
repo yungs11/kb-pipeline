@@ -619,6 +619,52 @@ VL 호출) 중 순서도 박스 라벨("접수/검토/승인")이 "첫 번째 �
 
 ---
 
+## 커뮤니티 빌드를 야간 배치로 일원화 (A1, 2026-08-09)
+
+**무엇이 바뀌었나** — 문서가 `ready` 될 때마다 kb 워커가 커뮤니티 빌드를 enqueue 하던 것을
+없애고, facade-worker 안의 **야간 스레드**(기본 03:00 KST)가 하루 1회 모아서 제출한다.
+수동 `POST /communities/build` 는 그대로다.
+
+**왜** — 빌드 1건이 수십 분(Louvain + 커뮤니티마다 LLM 리포트)이라, 배치 적재 중에는 앞선
+빌드가 끝나기 무섭게 다음이 시작되고 **그 결과는 곧 낡는다**(마지막 빌드만 전체를 커버).
+주간 LLM 부하를 그렇게 태울 이유가 없다. 목적은 웹 프로세스 보호가 아니라
+**주간 LLM 부하 회피 + 진입점 단일화**다.
+
+**대가(사용자가 인지하고 택함)** — 적재한 문서의 커뮤니티가 **최대 하루** 뒤 반영된다.
+즉시 필요하면 수동 트리거.
+
+**설계에서 중요한 결정 네 가지**
+
+1. **후보의 근거를 `kbp.graph_touch` 로 분리했다** — 잡 테이블을 스캔하지 않는다.
+   (a) `kind IN ('insert','ingest')` 만 보면 그래프 추출을 끈 vector-only KB 가 현행
+   **0회 → 매일 1회** LLM 빌드로 나빠진다(kb 트리거는 그 경우 enqueue 하지 않았다).
+   payload 로도 못 거른다 — insert payload 는 chunks 전량이라 거의 항상 오프로드되어
+   컬럼이 NULL 이고, **러너 시점에만** `extract_graph` 를 볼 수 있다.
+   (b) GC 가 TTL(72h) 경과 잡을 지우므로 야간이 3일 넘게 멈추면 적재 **증거째** 사라진다.
+2. **`last_success_at`(후보 술어)과 `last_attempt_at`(정렬 축)을 분리했다.** 한 컬럼으로
+   겸하면 실패 시 갱신하면 **영구 탈락**, 미갱신하면 회수된 workspace 가 **매 밤 1순위**가 된다.
+   그리고 `last_success_at` 은 **빌드 시작 스냅샷**이다 — 완료 시각을 쓰면 수십 분짜리 빌드
+   **도중** 성공한 적재가 영구 탈락한다(현행보다 나빠진다).
+3. **야간 `idem_key` 를 수동 키와 분리했다**(`community-nightly:{eq_ws}:{run_date}`).
+   같은 키면 야간 잡이 queued 인 동안 수동 재빌드가 그 job_id 를 돌려받아, 운영자가 202 를
+   받고도 아무 일이 안 일어난다.
+4. **community 버킷은 전역 상한 1(직렬) 유지**(D21 종결). 야간에는 직렬이 의도다 —
+   KB 별로 풀면 LLM 게이트웨이를 동시에 때리고, 키를 kb id 로 통일하면 30~120분 빌드가
+   그 KB 의 적재 슬롯을 점유한다.
+
+**범위 밖(별도 문서)** — A2 그래프 변화 스킵·`fail_streak`·`max_communities`,
+A3 리포트 세대 정리(`store_reports(replace=)`)·좀비 방어, A4 스테일 스윕.
+plan: `docs/superpowers/specs/2026-08-09-community-nightly-A1-scheduler-plan.md`.
+(원본 A 는 3라운드 검증에서 blocking 이 수렴하지 않아 A1~A4 로 쪼갰다 — 결함이 파괴적
+연산(DELETE)을 다루는 §3·§2.6 에 몰렸고 그 둘은 §0 목적과 무관했다.)
+
+**부수 수정** — kb `FakeKbPipeline.chunk()` 가 실 클라이언트의 `table_blocks` 인자를 안 받아
+`TypeError` 로 적재가 통째로 failed 였다(테스트 하네스 노후화). 그래서 provider=kb_pipeline
+적재가 tail 에 도달하는 하네스가 없었다. fake 를 실제 시그니처와 맞춰 **기존 실패 3건 복구**
+(kb 644 passed/19 failed → 648/16).
+
+---
+
 ## 12. global 검색 노출 — 명시 mode 토글 (2026-08-09)
 
 `kb_pipeline/search.py` 의 커뮤니티 map-reduce(`global_search`)는 W3 이후 라이브러리로만

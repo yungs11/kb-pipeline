@@ -181,6 +181,48 @@ def submit_job(
     return created
 
 
+def submit_job_ex(
+    repo, blobs, *, kind: str, payload: dict[str, Any],
+    file_bytes: bytes | None = None, workspace_key: str | None = None,
+    batch_key: str | None = None, parent_job_id: str | None = None,
+    legacy: bool = False, idem_key: str | None = None,
+) -> tuple[uuid.UUID, bool]:
+    """``submit_job`` 과 같은 일을 하되 ``(job_id, created)`` 를 돌려준다.
+
+    **왜 `submit_job` 의 반환형을 안 바꾸나** — 그건 legacy 4경로(`_legacy_job()` →
+    `/parse`·`/chunk`·`/insert`·`/ingest`)와 `/jobs/*` 라우터 4개가 공유하는 진입점이다.
+    튜플로 바꾸면 legacy 는 즉시 예외가 나고, `/jobs/*` 는 **조용히 잘못된 job_id 문자열을
+    응답에 실어 보낸다**(더 위험하다). 야간 배치 하나 때문에 그 계약을 흔들 이유가 없다.
+
+    **`live_worker_count() <= 0 → 503` 가드는 복제하지 않는다** — 이 함수는 facade-worker
+    **프로세스 안의 스레드**에서 불린다. 그 프로세스 자신이 워커이므로 웹 계층 예외
+    (`HTTPException`)를 배치 스레드로 새게 하면 안 된다.
+    """
+    if file_bytes is not None:
+        cap = blobs_mod.max_upload_bytes()
+        if len(file_bytes) > cap:
+            raise ValueError(f"upload exceeds {cap} bytes")
+
+    parent = _validate_parent(repo, parent_job_id)
+    job_id = uuid.uuid4()
+
+    input_ref = None
+    if file_bytes is not None:
+        input_ref = blobs.key(job_id, "input.bin")
+        blobs.put_bytes(input_ref, file_bytes, content_type="application/octet-stream")
+    inline, payload_ref = blobs.store_json(job_id, "payload", payload)
+
+    created = repo.submit(job_id=job_id, kind=kind, payload=inline,
+                          payload_ref=payload_ref, input_ref=input_ref,
+                          workspace_key=workspace_key, batch_key=batch_key,
+                          parent_job_id=parent, legacy=legacy, idem_key=idem_key)
+    if created != job_id:
+        blobs.delete(input_ref)
+        if payload_ref:
+            blobs.delete(payload_ref)
+    return created, created == job_id
+
+
 def _validate_parent(repo, parent_job_id):
     if not parent_job_id:
         return None
