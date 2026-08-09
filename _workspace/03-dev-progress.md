@@ -670,7 +670,7 @@ env 3종·compose 2종은 같은 위치에 서로 다른 키를 넣어 양쪽을
 |---|---|
 | kbp (PG 없이) | **643 passed, 3 skipped** (A1 단독 미포함 B 609 + A1 34) |
 | kbp (실 PG) | **738 passed, 0 failed** — 두 스키마 합본 DDL 확인 |
-| compose ×2 | `docker compose config` 전체 보간 통과(더미 env 104키). facade·facade-worker 양쪽에 `TZ`+`KBP_COMMUNITY_*` 8키+`KBP_GLOBAL_*` 2키 전달 확인, parse-svc 는 0(파서라 정상) |
+| compose ×2 | `docker compose config` 전체 보간 통과(더미 env 104키). facade·facade-worker 양쪽에 `KBP_COMMUNITY_*` 9키(`KBP_COMMUNITY_TZ` 포함)+`KBP_GLOBAL_*` 2키 전달 확인, parse-svc 는 0(파서라 정상). 컨테이너 `TZ` 는 D33 해소로 제거됨 |
 | kb `backend/tests/` | **647 passed, 20 failed** — A1 이전 커밋에서 같은 인터프리터로 측정한 기준선 **640/23** 대비 **새 실패 0건, 3건 회복**(`table_blocks` 하네스 수정) |
 
 > **수치 정정**: B 작업 중 "기준선 648 passed/16 failed" 로 보고했는데 오늘 재측정에서

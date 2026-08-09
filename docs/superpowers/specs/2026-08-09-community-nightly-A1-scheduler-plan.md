@@ -433,6 +433,13 @@ def _zone():
 | env | 기본 | 의미 |
 |---|---|---|
 | `TZ` | `Asia/Seoul` | 미설정이면 UTC(사실 3) → 03:00 이 KST 12:00 |
+
+> **⚠️ 이 절은 D33 해소(2026-08-10)로 대체됐다.** 스케줄 존은 `TZ` 가 아니라 전용
+> **`KBP_COMMUNITY_TZ`**(기본 `Asia/Seoul`)를 읽고, 컨테이너 `TZ` 는 compose·env 템플릿에서
+> 제거됐다(전 서비스 로그 UTC 통일). `TZ` 로 두면 한 변수가 "창 판정"과 "로그 시각 표기"를
+> 겸해 한쪽을 고칠 때 다른 쪽이 조용히 깨진다. **미설정 기본값이 `Asia/Seoul` 이라 값을
+> 안 줘도 정확하다** — 위 표의 "미설정이면 UTC" 는 더 이상 사실이 아니다.
+> 근거·테스트: `_workspace/02-changes.md` §D33, `deferred.md` D33.
 | `KBP_COMMUNITY_BUILD_ENABLED` | `true` | `false` 면 **스레드 미기동** |
 | `KBP_COMMUNITY_BUILD_AT` | `03:00` | 파싱 실패 → 기본값 + warning |
 | `KBP_COMMUNITY_WINDOW_MINUTES` | `120` | 실행 창 |
