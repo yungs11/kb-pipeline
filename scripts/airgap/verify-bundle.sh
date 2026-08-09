@@ -38,6 +38,18 @@ REQUIRED_ENV=(
   KBP_FACADE_KEY
 )
 
+# .env 에서 키 하나의 값을 뽑는다 — '=' 뒤 → 인라인 주석 제거 → 공백 제거.
+#
+# ⚠️ 이 함수가 없으면 이걸 쓰는 가드가 **조용히 통과한다**. `val` 이 `command not found`
+#    로 죽어 빈 문자열이 되고, `[ "$(val X)" = "paddle_gw" ]` 같은 비교가 항상 거짓이
+#    되기 때문이다. 가드가 사라진 게 아니라 **통과해버리는** 쪽이라 더 위험하다
+#    (실제로 그렇게 죽어 있었다 — 2026-08-10 발견).
+val() {
+  local k="$1" f="$2"
+  grep -E "^${k}=" "$f" 2>/dev/null | head -1 | cut -d= -f2- \
+    | sed 's/[[:space:]]*#.*$//' | tr -d '[:space:]'
+}
+
 check_env() {
   local envf="${1:-$REPO_ROOT/.env}"
   echo "== .env 검사: $envf =="
@@ -62,6 +74,37 @@ check_env() {
     echo "    ${RED}  → 스캔 PDF 가 조용히 ODL/VL 로 폴백한다(에러가 안 보인다).${RST}"
     echo "    ${RED}  → 주소를 채우거나, 안 쓸 거면 KBP_GATE_OCR_LANE=vl 로 명시적으로 끌 것.${RST}"
     miss=1
+  fi
+  # ── 야간 커뮤니티 배치(A1) ────────────────────────────────────────────────
+  # 컨테이너 기본 TZ 는 UTC 다. 야간 배치를 켜놓고 TZ 를 안 주면 KBP_COMMUNITY_BUILD_AT
+  # =03:00 이 **KST 정오**에 열려 목적(주간 LLM 부하 회피)이 정확히 뒤집힌다.
+  # 실패가 아니라 **잘못된 시각에 성공**하므로 로그만 봐서는 드러나지 않는다.
+  local cbe; cbe="$(val KBP_COMMUNITY_BUILD_ENABLED "$envf")"
+  if [ "$cbe" != "false" ]; then      # 미설정(=기본 true) 또는 true
+    local tz; tz="$(val TZ "$envf")"
+    if [ -z "$tz" ]; then
+      echo "  ${RED}✗ 야간 커뮤니티 배치가 켜져 있는데 TZ 가 비었다${RST}"
+      echo "    ${RED}  → 컨테이너 기본 UTC 라 BUILD_AT=03:00 이 KST 12:00 에 열린다(업무시간).${RST}"
+      echo "    ${RED}  → TZ=Asia/Seoul 을 채우거나, 안 쓸 거면 KBP_COMMUNITY_BUILD_ENABLED=false.${RST}"
+      miss=1
+    elif [ "$tz" != "Asia/Seoul" ]; then
+      echo "  ${YEL}! TZ=$tz — 야간 창이 KST 기준이 아니다. 의도한 것인지 확인.${RST}"
+    fi
+    # 마감이 창보다 짧으면 창 안에 제출된 잡이 그 밤에 곧바로 취소된다(제출 0건과 같다).
+    local win dl; win="$(val KBP_COMMUNITY_WINDOW_MINUTES "$envf")"; dl="$(val KBP_COMMUNITY_DEADLINE_MINUTES "$envf")"
+    if [ -n "$win" ] && [ -n "$dl" ] && [ "$dl" -le "$win" ] 2>/dev/null; then
+      echo "  ${RED}✗ KBP_COMMUNITY_DEADLINE_MINUTES($dl) <= WINDOW_MINUTES($win)${RST}"
+      echo "    ${RED}  → 창 안에 제출한 잡을 그 밤에 즉시 취소한다(제출 0건과 같아진다).${RST}"
+      miss=1
+    fi
+  fi
+  # ── global 검색(B) ────────────────────────────────────────────────────────
+  # 0 이면 슬롯을 못 잡아 프론트 버튼이 항상 503 이다. 파서 전용 배포에서는 의도지만
+  # 전체 스택에서 0 이면 기능이 조용히 죽은 것이다 — 버튼은 보이는데 안 된다.
+  local gsc; gsc="$(val KBP_GLOBAL_SEARCH_CONCURRENCY "$envf")"
+  if [ "$gsc" = "0" ]; then
+    echo "  ${YEL}! KBP_GLOBAL_SEARCH_CONCURRENCY=0 — global(전체 요약) 검색이 항상 503 이다."
+    echo "    파서 전용 배포면 정상. 전체 스택이면 프론트 버튼이 보이는데 안 된다.${RST}"
   fi
   if [ "$miss" -eq 0 ]; then echo "  ${GRN}✓ 필수키 모두 채워짐${RST}"; else return 1; fi
   return 0
