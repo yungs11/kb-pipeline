@@ -421,7 +421,10 @@ dev/폐쇄망 template 에 `EDGEQUAKE_WEBUI_API_URL`(호스트 3001) 을 **선�
 
 ## 5. 롤백
 
-1. `git revert`(kbp · kb · 벤치마크 레포)
+1. `git revert`(kbp · kb)
+   ★ **벤치마크 레포는 git 저장소가 아니다**(실측 2026-08-10 — `.git` 없음). 그래서 §2.12 의
+   두 줄은 **손으로 되돌려야** 한다: `edgequake.quickstart.yml` 의 `:139` `:-3010`→`:-3000`,
+   `:13` 주석. 되돌리지 않으면 그 스택 프론트가 3010 에 남는다(무해하지만 안내와 어긋난다).
 2. `scripts/facade.env` 의 `KBP_EDGEQUAKE_URL` → `:8081`
    ★ kb `.env` 도 확인한다 — V16 에서 `KB_PIPELINE_BASE_URL` 을 넣었다면 지운다(gitignored).
 3. ★ §3 step 2 백업으로 `docker-compose.override.yml` 복원(**`!override` 태그 포함** — 없으면
@@ -551,3 +554,11 @@ source 후 재적용한다(dotenv 관례: **CLI 가 파일보다 우선**).
 | V15 | `:14000` 원형 | ✅ 2건 보존, `118080`/`13002` 오염 0 |
 | V16 | 탈출구 왕복 | ◐ CLI 우선 배선은 V8 로 확인. kb `.env` 왕복은 미실행(§8.3) |
 | V17 | D-g | ◐ config 로 published `8080`·`3010` 확인. **전체 기동 미실행**(§8.3) |
+
+### 10.1 커밋 / 버전관리 상태
+
+| 리포 | 상태 |
+|---|---|
+| kbp `feat/fileconvert-api` | ✅ 커밋 `d2b74de` (13 파일 + 계획서 2) |
+| kb `main` | ✅ 커밋 `389081b` (10 파일) |
+| rag-edgequake-benchmark | ⚠️ **git 저장소가 아니다** — 변경은 적용됐으나 버전관리되지 않는다. 롤백은 §5-1 대로 수동(두 줄) |
