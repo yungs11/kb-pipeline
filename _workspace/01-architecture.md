@@ -155,9 +155,13 @@ Rust, `crates/edgequake-pipeline`. passthrough 로 facade 청크를 받아 추�
 
 산출 행 = `title, summary, findings(jsonb), rank, entity_ids[]`. 라이브 실측: 커뮤니티 60 / 리포트 15.
 
-### 5.3 Search — 두 경로
-- **실노출 경로** — facade `POST /search`: edgequake hybrid 질의(`POST /api/v1/query`, 벡터 KNN + 그래프 순회 서버측 머지)를 직접 호출 → `{answer, results}`(`results[]`={chunk_id,text,score,document_id}). local/global 라우팅 없음.
-- **라이브러리 경로(미배선)** — `kb_pipeline/search.py:unified_search`: `route()`(GLOBAL_CUES 단서어 + tiny LLM 타이브레이크 → local/global) → local=edgequake hybrid, global=커뮤니티 map-reduce(`community.global_query`). app.py 가 import 하지 않음 → 향후/계획.
+### 5.3 Search — 명시 mode(배선됨) + 자동 라우터(미배선)
+- **local(기본)** — facade `POST /search` `{mode:"local"}`(또는 생략): edgequake hybrid 질의(`POST /api/v1/query`, 벡터 KNN + 그래프 순회 서버측 머지) → `{answer, results}`(`results[]`={chunk_id,text,score,document_id}). 기존 동작 그대로.
+- **global(배선됨)** — `{mode:"global", global_top_k:1~5}`: `kb_pipeline.search.global_search` 를 직접 호출 → 커뮤니티 리포트 map-reduce. 응답에 `community_reports_ready`·`report_newest_at`·`report_oldest_at`·`report_count` 를 함께 싣는다.
+  - **동시성은 DB 카운터로 제한**한다(`kbp.global_search_slots` + `pg_advisory_xact_lock`). map N + reduce 1 의 **순차** LLM 이라 요청 하나가 `(N+1)×timeout` 을 점유하는데, gunicorn `-w 4` 에서 `threading.Semaphore` 는 프로세스마다 따로 세어 전역 상한이 되지 못한다. 상한 초과 = 즉시 503(대기 없음).
+  - **LLM 타임아웃은 이 경로만 별도**다 — `KBP_GLOBAL_LLM_TIMEOUT`(기본 60s) vs 적재 경로 `KBP_LLM_TIMEOUT`(300s). 300s 를 그대로 쓰면 한 요청이 최악 30분을 점유한다.
+  - `reports_exist` 가 **테이블 부재는 "없음"(fail-open), 그 외 psycopg 오류는 raise** 한다 — DB 장애를 "리포트가 아직 없다" 는 거짓 안내로 위장하면 안 되기 때문. app.py 가 그 예외를 503 으로 바꾼다.
+- **자동 라우터(여전히 미배선)** — `kb_pipeline/search.py:unified_search` + `route()`(GLOBAL_CUES 단서어 + tiny LLM 타이브레이크). **의도적으로 배선하지 않았다**: 사용자가 버튼으로 모드를 고르는 편이 오판(휴리스틱이 넓은 질문을 local 로 보내는 것)보다 낫고, 오판 비용이 최대 6분 LLM 이다. app.py 는 `global_search` 만 import 한다.
 
 ---
 
@@ -221,4 +225,5 @@ Excel(xlsx/xlsm/xls)은 parse-svc `parsers/excel` 이 vendored **excel_parser_ra
 | **Insert** | `service/edgequake.py:EdgequakeClient` + edgequake `Pipeline` | `POST /api/v1/documents`(`async_processing:true`). `chunk_async`(PassthroughStrategy)→`extract_parallel`(qwen)→`finish_document_processing`(link→`generate_all_embeddings` bge-m3 1024d→`build_lineage`). 폴링 `GET /api/v1/tasks/{track_id}`(또는 `document_phase`), poll_timeout 1200s. tenant 기본 `00000000-0000-0000-0000-000000000002`, ws `kb-<kbid>` `ensure_workspace`. 테이블 `eq_eq_default_ws_<short8>_vectors`, 그래프 `eq_eq_default_graph` |
 | **Community** | `kb_pipeline/community.py:build_workspace_communities`; 트리거 `service/app.py:communities_build`(202)→`_build_communities_job`(BackgroundTask, 예외 swallow) | `fetch_graph`(`properties::text::jsonb`)→`build_communities`(networkx+python-louvain `best_partition`, `random_state=42`)→`generate_report`(`COMMUNITY_REPORT_PROMPT`, `/no_think`)→`store_reports`(`public.community_reports` upsert, `ON CONFLICT (workspace_id, level, community_id)`) |
 | **Search(실)** | `service/app.py:search` → `eq.ensure_workspace` → `eq.search(workspace_id, query, top_k)` | edgequake `POST /api/v1/query`(hybrid), top_k→max_results. 산출 `{answer, results[{chunk_id,text,score,document_id}]}` |
-| **Search(미배선)** | `kb_pipeline/search.py:unified_search`, `route()` | `GLOBAL_CUES`(요약/전체/핵심/개요/summary…)+tiny LLM 타이브레이크. local=edgequake `POST /api/v1/query`(`mode="hybrid"`, `include_references:true`, 180s), global=`community.global_query` map-reduce. app.py 미import |
+| **Search(global, 실)** | `service/app.py:search` `mode="global"` → `_search_global` → `kb_pipeline.search.global_search` | `global_top_k` 1~5(clamp). 슬롯 `kbp.global_search_slots`+advisory lock(`KBP_GLOBAL_SEARCH_CONCURRENCY`, 기본 2, `0`=완전 차단), 슬롯 TTL=`(top_k_max+1)×timeout×2`. LLM 타임아웃 `KBP_GLOBAL_LLM_TIMEOUT`(60s). psycopg 오류→503, httpx 오류→422(kb 클라 재시도 증폭 방지 — 429/5xx 만 재시도한다) |
+| **Search(자동 라우터, 미배선)** | `kb_pipeline/search.py:unified_search`, `route()` | `GLOBAL_CUES`+tiny LLM 타이브레이크. **의도적 미배선** — 명시 mode 토글로 대체(오판 비용이 최대 6분 LLM). app.py 미import |

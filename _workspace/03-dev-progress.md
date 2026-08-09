@@ -29,7 +29,7 @@
 | **W2** | Modal enrichment | ✅ merged | 모달 블록 LLM 서술(텍스트/비전) + atomic 인라인 + (옵션)앵커 엔티티. `kb_pipeline/modal.py` |
 | **W3** | Community 배치 | ✅ merged | `kb_pipeline/community.py` — Louvain + qwen 리포트 + `global_query`. 순수 Python(edgequake 불변). 라이브: 커뮤니티 60/리포트 15 |
 | **W4** | 정합성/RLS | ◐ 하드닝 과제 | 앱레벨 격리 검증됨. DB레벨 FORCE RLS 는 superuser 롤 우회로 무력(아래 §4) |
-| **W5** | Search 머지 | ✅(라이브러리) / ◐(배선) | `kb_pipeline/search.py` local/global `route`. 단 facade `/search` 는 bare edgequake hybrid 만 노출, unified_search 미배선 |
+| **W5** | Search 머지 | ✅ 라이브러리 + ✅ 명시 mode 배선 / ✗ 자동 라우터 | `kb_pipeline/search.py`. facade `/search` 가 `mode=local\|global` 을 받고 global 은 `global_search` 직결(동시성 DB 슬롯 + 전용 LLM 타임아웃). kb 챗·프론트 토글까지 배선(B). `route()` 자동 라우팅은 **의도적 미배선** — 명시 토글로 대체 |
 | **W6** | 파서 라우팅 | ◐ 권고 반영 | markitdown 병합표 손실 → 병합 중요 pptx/DOCX 구조파서 라우팅(02-changes §4) |
 
 ---
@@ -126,7 +126,8 @@ timings = {
 - offset/line 근사: adaptive_chunk 텍스트 변형 시 lineage 정확도.
 
 ### 4.5 Insert / Community / Search 배선
-- **Search 라우터 배선**: facade `/search` 는 bare edgequake hybrid 만 노출, `unified_search` local/global 미배선(app.py 미import). global 능력 노출 시점 확정 필요.
+- ~~**Search 라우터 배선**~~ → **해소(B, 2026-08-09)**: facade `/search` 가 `mode` 를 받고 global 은 `global_search` 직결. 프론트에 "전체 요약 검색" 토글(kb_pipeline provider 한정). `route()` 자동 라우팅은 의도적 미배선(오판 비용 최대 6분 LLM → 사용자 명시 선택).
+  - **남은 수동 게이트**: 배포 전 대표 질문 10종으로 `_rank_reports` 의 한국어 관련성을 확인한다(리포트 선정이 무관하면 배포 보류). 자동 검증 불가 — 리포트 본문이 있는 라이브 KB 가 필요하다.
 - **커뮤니티 트리거/가드**: `/communities/build`(202+백그라운드, 예외 swallow) 온디맨드 + global 검색 build-if-missing 공존. KB 규모별 admission 임계(SPEC-006 리소스 가드)가 운영 가능 형태인지 확정.
 - **커뮤니티 재생성 비용/주기**(W3): 가드 임계 초과 시 거부 → KB 성장 곡선 맞춘 임계·주기 설계.
 - **DSN 포트 정합**: `port=5432`(코드 기본) vs `:5433`(운영) — 환경별 명시.

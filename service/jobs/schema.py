@@ -32,6 +32,7 @@ LOCK_CLASSID = 0x6B6270      # 7037552
 LOCK_OBJ_SCHEMA = 1          # 기동 시 DDL
 LOCK_OBJ_CLAIM = 2           # claim 틱 (repo.py)
 LOCK_OBJ_GC = 3              # TTL GC / 고아 스윕 (gc.py)
+LOCK_OBJ_GLOBAL_SEARCH = 4   # global 검색 동시성 슬롯 (app.py)
 
 #: 동시 DDL 경합에서만 나오는 SQLSTATE. 다른 프로세스가 먼저 만든 것이므로 무해하다.
 _RACE_SQLSTATES = frozenset({
@@ -92,6 +93,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS jobs_idem_idx ON kbp.jobs (idem_key) WHERE ide
 CREATE INDEX IF NOT EXISTS jobs_gc_idx
     ON kbp.jobs ((coalesce(completed_at, created_at)))
  WHERE status IN ('succeeded','failed','canceled');
+
+-- ── global 검색 동시성 슬롯 ────────────────────────────────────────────────
+-- facade 의 global 검색은 map N + reduce 1 의 **순차 LLM** 이라 요청 하나가 분 단위로
+-- 스레드를 점유한다. 잡 큐의 KBP_JOB_LIMIT_COMMUNITY 상한은 잡 경로에만 적용되므로,
+-- 동기 /search 경로에는 아무 상한도 없다 — D10 이 /communities/build 에서 없앤
+-- "facade 웹 프로세스 점유" 문제를 다른 경로로 재도입하는 셈이다.
+--
+-- **threading.Semaphore 로는 안 된다** — Dockerfile.facade 가 `-w 4` 로 뜨므로
+-- 모듈 스코프 세마포어는 프로세스마다 별도 인스턴스다. "상한 2" 를 의도해도 실제
+-- 전역 상한은 최대 4배가 된다. 그래서 DB 카운터로 프로세스 경계를 넘는다.
+CREATE TABLE IF NOT EXISTS kbp.global_search_slots (
+  id         serial PRIMARY KEY,
+  claimed_at timestamptz NOT NULL DEFAULT now()
+);
 
 CREATE TABLE IF NOT EXISTS kbp.job_workers (
   worker_id    text PRIMARY KEY,

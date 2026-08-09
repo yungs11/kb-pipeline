@@ -75,6 +75,13 @@ x-facade-env: &facade_env
   KBP_JOB_ORPHAN_SWEEP_BOOT_DELAY_SECONDS: ${KBP_JOB_ORPHAN_SWEEP_BOOT_DELAY_SECONDS:-600}
   KBP_JOB_ORPHAN_GRACE_SECONDS: ${KBP_JOB_ORPHAN_GRACE_SECONDS:-21600}
 
+  # ── global 검색 (B) ──────────────────────────────────────────────────────
+  # 커뮤니티 리포트 map N + reduce 1 의 **순차 LLM** 이라 요청 하나가 분 단위로 스레드를
+  # 점유한다. 잡 큐의 상한은 잡 경로에만 적용되므로 이 동기 경로에는 별도 상한이 필요하다.
+  # map 대상 수를 줄이려면 요청의 global_top_k(1~5 clamp)를 쓴다 — facade 의 top_k 와 다르다.
+  KBP_GLOBAL_LLM_TIMEOUT: ${KBP_GLOBAL_LLM_TIMEOUT:-60}
+  # **워커 4개를 합친 시스템 전역** 상한(DB 카운터 + advisory lock). 0 이면 사실상 비활성.
+  KBP_GLOBAL_SEARCH_CONCURRENCY: ${KBP_GLOBAL_SEARCH_CONCURRENCY:-2}
 services:
   # ── 인프라 티어 (pull 이미지 — build-bundle.sh 가 로컬 태그를 부여해 save 한다) ──
   postgres:

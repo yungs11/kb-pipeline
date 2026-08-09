@@ -145,6 +145,70 @@ def _reports_exist(workspace_id: str, dsn: str, *, level: int = 0) -> bool:
         return False
 
 
+def reports_exist(workspace_id: str, dsn: str, *, level: int = 0) -> bool:
+    """커뮤니티 리포트가 하나라도 있나. **인자는 eq workspace UUID 다**(kb id 아님).
+
+    ``_reports_exist`` 와 갈라놓는 이유는 **오류 의미론**이다. 그쪽은 "빌드하기 전에
+    있나 보는" 용도라 어떤 psycopg 오류든 False 로 삼켜도 안전하다(뒤이어 빌드가 돈다).
+    반면 웹 소비자는 "리포트가 아직 없다"(정상, 안내 문구)와 "DB 를 못 읽었다"(장애,
+    503)를 **구분해야 한다** — 삼키면 DB 장애가 *"야간 배치 이후 사용 가능"* 이라는
+    거짓 안내로 위장된다.
+
+    - 테이블 부재(``UndefinedTable``) → ``False``. 아직 아무도 안 만든 것이고 장애가 아니다
+      (``public.community_reports`` 는 ``store_reports`` 안에서 lazy 생성된다).
+    - 그 외 ``psycopg.Error`` → **raise**. 호출자가 503 으로 바꾼다.
+
+    ⚠️ ``workspace_id`` 는 **eq workspace UUID** 다. ``community_reports.workspace_id`` 가
+    그 축이라, facade 가 받는 kb id 를 그대로 넘기면 **영구히 0행**이 되어 오류 없이 매번
+    거짓 안내가 뜬다.
+    """
+    import psycopg
+
+    try:
+        with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM public.community_reports"
+                " WHERE workspace_id = %s AND level = %s LIMIT 1",
+                (workspace_id, level),
+            )
+            return cur.fetchone() is not None
+    except psycopg.errors.UndefinedTable:
+        return False
+
+
+def newest_report_time(workspace_id: str, dsn: str, *, level: int = 0):
+    """``(newest, oldest, count)`` — 이 workspace 리포트의 신선도. 없으면 ``(None, None, 0)``.
+
+    **왜 ``max`` 만으로는 부족한가** — ``community_reports`` 에는 코드 전체에 DELETE 가
+    0건이다(upsert-only). 문서를 지워도 그 기반 리포트가 영구 잔존하는데, workspace 전체
+    ``max(created_at)`` 은 그 행들을 완전히 가린다. 39행 중 38행이 두 달 전이고 1행만
+    어제 갱신됐어도 "어제 기준" 으로 보인다 — 신선도 신호가 **거짓 안심**을 준다.
+    ``oldest`` 를 함께 돌려주어 소비자가 "일부는 오래됐다" 를 표시할 수 있게 한다.
+
+    낡은 리포트의 **정리**는 이 함수의 책임이 아니다(야간 배치 A 소관). 여기서는
+    **감추지 않는 것**까지만 한다.
+
+    오류 의미론은 ``reports_exist`` 와 같다 — 테이블 부재는 "없음", 그 외는 raise.
+    """
+    import psycopg
+
+    try:
+        with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT max(created_at) AS newest, min(created_at) AS oldest,"
+                "       count(*) AS n"
+                "  FROM public.community_reports"
+                " WHERE workspace_id = %s AND level = %s",
+                (workspace_id, level),
+            )
+            row = cur.fetchone()
+    except psycopg.errors.UndefinedTable:
+        return (None, None, 0)
+    if not row:
+        return (None, None, 0)
+    return (row[0], row[1], int(row[2] or 0))
+
+
 def global_search(
     question: str,
     workspace_id: str,

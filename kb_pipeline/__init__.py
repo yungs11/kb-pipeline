@@ -27,6 +27,8 @@ from .community import (
 from .search import (
     local_search,
     global_search,
+    newest_report_time,
+    reports_exist,
     route,
     unified_search,
 )
@@ -44,6 +46,8 @@ __all__ = [
     "store_reports",
     "build_workspace_communities",
     "global_query",
+    "newest_report_time",
+    "reports_exist",
     "make_openrouter_llm",
     # W5 unified search
     "local_search",

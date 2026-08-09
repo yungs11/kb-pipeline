@@ -1,5 +1,6 @@
-<!-- plan-version: v3 -->
-<!-- ultracode-validation: PENDING -->
+<!-- plan-version: v5 -->
+<!-- implemented: 2026-08-09 — §6 닫힘(6.1), 검증(6.2), 배포 전 수동 게이트 1건 미완(6.3) -->
+<!-- ultracode-validation: READY v5 at 2026-08-09T21:10:00Z (구현 우선 전환 — §6 참조) -->
 
 # [B] global 검색을 명시적 버튼으로 노출
 
@@ -28,22 +29,29 @@
 
 ---
 
-## 1. 실측 사실 (2026-08-06. 라인번호 3회 재검증)
+## 1. 실측 사실 (2026-08-06 작성 / **2026-08-09 인용 재검증**)
+
+> **v3 → v4**: 코드 변경 없이 라인 인용만 재검증했다. 40개 중 34개는 그대로 맞고
+> **6개가 밀렸다**(교정 완료): 사실 1·10(facade `/search`), 6·26(`service/llm.py` —
+> 2026-08-09 의 다운스트림 로깅 커밋으로 import 가 늘었다), 12(`_reports_exist`),
+> 20(kb 클라이언트 `search`).
+> **핵심 전제는 그대로 유효하다** — `global_search` 는 여전히 facade 에 배선돼 있지 않고
+> (`service/` 에 grep 0건), `service/app.py` 는 `kb_pipeline` 을 import 하지 않는다.
 
 | # | 사실 | 근거 |
 |---|---|---|
-| 1 | facade `/search` 는 edgequake 프록시. mode/global 개념이 없다. **`def search(` 는 동기 함수** | `service/app.py:301-324`, `:302` |
+| 1 | facade `/search` 는 edgequake 프록시. mode/global 개념이 없다. **`def search(` 는 동기 함수** | `service/app.py:320-341`, `:321`(def search) |
 | 2 | `global_search` 호출부 = CLI(`search.py:347`) + `unified_search`(`:275`, `--mode auto`) + 테스트. **웹 경로 없음** | grep |
 | 3 | `global_search(question, workspace_id, *, llm, dsn, top_k=5, …)` — `llm` **기본값 없는 필수 키워드** | `search.py:148-157` |
 | 4 | 반환은 `{answer, sources, mode, workspace_id}`. `sources` 는 **커뮤니티 id 목록** | `search.py:186-192` |
 | 5 | `global_query` 는 map N + reduce 1 의 **순차 LLM**. `top_k` 가 곧 map 횟수 | `community.py:652-681` |
-| 6 | **`get_text_llm()` 은 인자를 받지 않고** `KBP_LLM_TIMEOUT`(기본 **300s**)만 읽는다 | `service/llm.py:9,16` |
+| 6 | **`get_text_llm()` 은 인자를 받지 않고** `KBP_LLM_TIMEOUT`(기본 **300s**)만 읽는다 | `service/llm.py:10`(def), `:17`(KBP_LLM_TIMEOUT) |
 | 7 | `KBP_GLOBAL_LLM_TIMEOUT` 은 리포지토리에 **0건** | grep |
-| 8 | `KBP_OPENAI_API_KEY: ${KBP_OPENAI_API_KEY}` — 기본값이 없어 미설정 시 **빈 문자열** 주입(KeyError 아님) | compose `:28`; `llm.py:10` |
+| 8 | `KBP_OPENAI_API_KEY: ${KBP_OPENAI_API_KEY}` — 기본값이 없어 미설정 시 **빈 문자열** 주입(KeyError 아님) | compose `:28`; `llm.py:11` |
 | 9 | `community_reports.workspace_id` = **eq workspace UUID** | 라이브 5행이 `workspaces.workspace_id` 와 일치 |
-| 10 | facade `/search` 가 받는 `workspace_id` 는 **kb id** — `ensure_workspace` 로 해석한다 | `app.py:313` |
+| 10 | facade `/search` 가 받는 `workspace_id` 는 **kb id** — `ensure_workspace` 로 해석한다 | `app.py:332` |
 | 11 | `public.community_reports` 는 `store_reports` 안의 `cur.execute(_DDL)` 에서만 **lazy 생성** | `community.py:484` |
-| 12 | `_reports_exist` 는 `UndefinedTable` 도 `psycopg.Error` 도 **모두 False** 로 삼킨다 | `search.py:139-146` |
+| 12 | `_reports_exist` 는 `UndefinedTable` 도 `psycopg.Error` 도 **모두 False** 로 삼킨다 | `search.py:125-133` |
 | 13 | `global_search`·`reports_exist` 는 `service/app.py` 에 **import 되어 있지 않다**(`:31` 은 `get_text_llm` 뿐) | grep |
 | 14 | facade 는 `KBP_PG_DSN` 없이도 뜬다(잡 큐만 꺼짐) | `app.py:113,124` |
 | 15 | kb 검색 진입은 **챗뿐** — 검색 전용 페이지가 없다 | `frontend/app/**/page.tsx` |
@@ -51,13 +59,13 @@
 | 17 | `ChatTurnResult`(`chat.py:127-132`) = answer/citations/dify_run_id | 해당 파일 |
 | 18 | `ChatRequest`/`ChatResponse` = `schemas/chat.py:14`/`:53`. **`extra='allow'` 없음** | 해당 파일 |
 | 19 | 라우터: 호출부 `:99-106`, **응답 조립 `:124-127`** | `routers/chat.py` |
-| 20 | 클라이언트 `def search(` = `:403`, 반환 **화이트리스트** = `:419-422`(`{answer, results}` 만) | `kb_pipeline_client.py` |
+| 20 | 클라이언트 `def search(` = `:410`, 반환 **화이트리스트** = `:426-428`(`{answer, results}` 만) | `kb_pipeline_client.py` |
 | 21 | `ChatPanel` props = `{ kbId }`. 부모는 `provider`/`providerStatus` **state** 를 갖고 `UploadPanel` 에만 준다 | `ChatPanel.tsx:29`; `page.tsx:21-25,105` |
 | 22 | `page.tsx:75-82` 이 provider 미해결(loading/error) 동안 UI 를 감추는 **기존 관례**를 갖는다 | 해당 파일 |
 | 23 | `tests/test_search.py:221` 이 `build_if_missing` 기본값에 의존한다 | 해당 파일 |
 | 24 | `_workspace/01-architecture.md:159`(불릿)·`:160`(라이브러리 경로)·`:223`·`:224`(표 행) — **네 곳** 모두 "미배선" 서술 | 해당 파일 |
 | 25 | `docker-compose.yml:27-29`·airgap `:46-48` — `KBP_OPENAI_API_KEY`/`KBP_OPENAI_BASE_URL`/`KBP_LLM_MODEL` **셋 다** `${VAR}`(기본값 없음) | 해당 파일 |
-| 26 | `get_text_llm()` 의 `base = os.environ.get("KBP_OPENAI_BASE_URL", "https://openrouter.ai/api/v1")` — **"있는데 빈 값"에는 default 가 적용되지 않는다** | `service/llm.py:11` |
+| 26 | `get_text_llm()` 의 `base = os.environ.get("KBP_OPENAI_BASE_URL", "https://openrouter.ai/api/v1")` — **"있는데 빈 값"에는 default 가 적용되지 않는다** | `service/llm.py:12` |
 | 27 | `kb_pipeline_client.py:139-148` 재시도 루프: `retryable = status==429 or status>=500`, `attempts=self._max_retries`(기본 **3**, `config.py:158`) | 해당 파일 |
 | 28 | `runner.py:247-261` docstring — D10 이 `/communities/build` 를 잡 큐로 옮긴 이유 3가지(유량제어 밖·**웹 프로세스 점유**·흔적 없음)를 명시한다 | 해당 파일 |
 | 29 | `admission.py:145` `KBP_JOB_LIMIT_COMMUNITY` 상한은 **잡 큐 경로에만** 적용된다 — `/search` 동기 호출에는 아무 상한도 없다 | 해당 파일 |
@@ -121,7 +129,7 @@ def _search_global(eq_ws, query, k):
             return {"answer": None, "results": [], "communities": [],
                     "mode": "global", "community_reports_ready": False,
                     "report_generated_at": None}
-        max_age_at = _newest_report_time(eq_ws, dsn)          # §2.6 — 신선도
+        max_age_at = newest_report_time(eq_ws, dsn)          # §2.6 — 신선도
         try:
             out = global_search(query, eq_ws, llm=get_text_llm(timeout=_GLOBAL_LLM_TIMEOUT),
                                 dsn=dsn, top_k=k, build_if_missing=False)
@@ -158,7 +166,24 @@ def _llm_configured() -> bool:
 배포가 정상이지만(로컬 개발·에어갭 모두), **가드는 방어적으로 세 개를 다 본다** — 코드
 변경으로 default 를 하나만 없애도 깨지지 않도록.
 
-### 2.2 오류 의미론 — `reports_exist` 는 **fail-open**
+### 2.2 오류 의미론 — **새로 추가하는 DB 호출 전부**에 적용한다
+
+> **★ v5**: v4 는 `try/except` 가 `reports_exist` 만 감쌌다. `_acquire_global_slot`·
+> `newest_report_time`·`_release_global_slot` 은 psycopg 예외에 무방비였다 →
+> `kbp.global_search_slots` 부재(UndefinedTable)나 요청 시점 PG 장애에서 **미처리 예외 →
+> FastAPI 500 → kb 클라이언트 3회 재시도**(사실 27).
+>
+> **테이블 부재는 가상이 아니다** — facade lifespan 이 `ensure_schema` 실패를
+> `except Exception` 으로 삼키고 기동을 계속한다(`service/app.py:113-124`,
+> "로그를 남기고 기동은 계속(가시성 우선)"). **스키마 없이 정상 응답하는 배포가 설계상
+> 존재한다.**
+>
+> **규칙**: `_search_global` 안의 모든 DB 호출은 `psycopg.Error` 를 잡아
+> **503**(설정·인프라 문제라는 정직한 신호)으로 바꾼다. 단 `_release_global_slot` 만
+> 예외다 — 이미 만든 응답을 뒤집으면 안 되므로 **로그만**(위 §2.3).
+> 500 대역은 어떤 경로로도 내지 않는다.
+
+### 2.2.1 `reports_exist` 는 **fail-open**
 
 ```python
 # kb_pipeline/search.py — 신규 공개 함수. **인자는 eq workspace UUID 다.**
@@ -224,9 +249,29 @@ CREATE TABLE IF NOT EXISTS kbp.global_search_slots (
 ```
 ```python
 def _acquire_global_slot(dsn: str, limit: int) -> int | None:
-    """현재 점유 수가 limit 미만이면 슬롯을 하나 잡고 그 행의 id 를 반환, 아니면 None."""
+    """현재 점유 수가 limit 미만이면 슬롯을 잡고 그 id 를, 아니면 None.
+
+    ★ v5: **트랜잭션 전체를 advisory lock 으로 직렬화한다.** `SELECT count(*)` → `INSERT`
+    를 잠금 없이 하면 커밋 전 INSERT 가 다른 트랜잭션의 count 에 보이지 않아, 워커 4개가
+    동시에 누르면 각자 `count < limit` 을 읽고 각자 INSERT 한다 → **전역 상한 2 가 4로
+    깨진다**(TOCTOU). 그러면 §2.3 이 threading.Semaphore 를 기각한 이유(프로세스마다
+    별도 인스턴스라 실제 상한이 워커 수배)가 **새 구현에도 그대로 남는다**.
+
+    이 레포는 같은 문제를 이미 해결해 뒀다 — `repo.py:279-301` 의 claim 이
+    "여러 worker 가 각자 '현재 running 수' 를 읽고 각자 승인하면 전역 상한이 깨지기
+    때문" 이라며 `SET LOCAL lock_timeout` + `pg_advisory_xact_lock` 으로 직렬화한다.
+    그 관용구를 그대로 따른다(락 안에서 다운스트림을 호출하지 않아 수 ms 다).
+    """
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-        cur.execute("DELETE FROM kbp.global_search_slots WHERE claimed_at < now() - interval '10 minutes'")  # ★ 죽은 슬롯 청소(프로세스가 응답 없이 죽는 경우)
+        # advisory lock 은 blocking 획득이라 상한이 없으면 무한정 매달린다(repo.py:298 동일).
+        cur.execute("SET LOCAL lock_timeout = '5s'")
+        cur.execute("SET LOCAL statement_timeout = '30s'")
+        cur.execute("SELECT pg_advisory_xact_lock(%s, %s)",
+                    (schema.LOCK_CLASSID, schema.LOCK_OBJ_GLOBAL_SEARCH))
+        # 죽은 슬롯 청소(프로세스가 응답 없이 죽는 경우). TTL 유도는 아래 ★ 참고.
+        cur.execute("DELETE FROM kbp.global_search_slots"
+                    " WHERE claimed_at < now() - make_interval(secs => %s)",
+                    (_slot_ttl_seconds(),))
         cur.execute("SELECT count(*) FROM kbp.global_search_slots")
         if cur.fetchone()[0] >= limit:
             return None
@@ -235,11 +280,54 @@ def _acquire_global_slot(dsn: str, limit: int) -> int | None:
         conn.commit()
         return slot_id
 
+
 def _release_global_slot(dsn: str, slot_id: int) -> None:
-    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-        cur.execute("DELETE FROM kbp.global_search_slots WHERE id = %s", (slot_id,))
-        conn.commit()
+    """★ v5: **예외를 삼킨다(로그만).** 이 호출은 `finally` 절에서 새 커넥션을 여는데,
+    그 시점에 PG 가 흔들리면 `psycopg.OperationalError` 가 **이미 완성된 성공 응답
+    (6분·LLM 6회분)이나 HTTPException(422) 을 500 으로 바꾼다** → kb 클라이언트의
+    재시도 조건(`>=500`, 사실 27)에 걸려 map-reduce 를 3회 반복한다.
+    §2.4 가 422 를 고른 유일한 목적을 자기 finally 절이 되돌리는 셈이다.
+    슬롯 회수는 위 TTL 청소가 담당한다.
+    """
+    try:
+        with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM kbp.global_search_slots WHERE id = %s", (slot_id,))
+            conn.commit()
+    except Exception:  # noqa: BLE001 — 성공한 응답을 뒤집지 않는다
+        log.error("global 검색 슬롯 반납 실패 id=%s (TTL 청소가 회수한다)", slot_id,
+                  exc_info=True)
+
+
+def _slot_ttl_seconds() -> int:
+    """★ v5: 죽은 슬롯 TTL 을 **LLM 타임아웃에서 유도한다**(10분 하드코딩 금지).
+
+    요청 최악 소요 = (global_top_k 상한 5 + reduce 1) × KBP_GLOBAL_LLM_TIMEOUT.
+    TTL 이 그보다 짧으면 **살아있는 요청의 슬롯이 매 acquire 마다 삭제**되고, 그 뒤
+    `_release_global_slot` 은 없는 id 를 조용히 지워 성공하므로 **상한이 사실상 사라진다.**
+    기본(60s)에서는 6분인데 10분 하드코딩이 겨우 맞았을 뿐이고, 기존 `KBP_LLM_TIMEOUT`
+    관례대로 300 을 넣으면 최악 30분이 되어 즉시 깨진다.
+    여유배수 2를 곱한다 — 커넥션·DB 왕복 등 LLM 외 시간을 감싼다.
+    """
+    return int((5 + 1) * _global_llm_timeout() * 2)
 ```
+#### 2.3.1 설정을 **요청 시점에** 읽는다 (v5)
+
+`_GLOBAL_SEARCH_CONCURRENCY`·`_GLOBAL_LLM_TIMEOUT` 을 모듈 상수(`_UPPER`)로 두면 두 가지가
+깨진다: (a) 빈/오타 값이 **import 시점 `ValueError`** → gunicorn 워커 **전체 기동 실패**로
+`/parse`·`/ingest` 까지 동반 사망한다(§3 이 "500" 이라 적었는데 증상이 완전히 다르고 훨씬
+나쁘다), (b) §4 의 회귀 테스트가 `monkeypatch.setenv` 로 상한을 바꿔 검증하는데 import
+시점 1회 읽기면 **먹지 않는다**.
+
+```python
+def _global_llm_timeout() -> float:
+    return _env_float("KBP_GLOBAL_LLM_TIMEOUT", 60.0)
+
+def _global_concurrency() -> int:
+    return _env_int("KBP_GLOBAL_SEARCH_CONCURRENCY", 2)
+```
+`_env_int`/`_env_float` 는 **파싱 실패 시 기본값 + warning**(레포 관례: `worker.py:43`,
+`community_schedule.py`). 설정 오타가 기동을 막거나 500 을 내지 않는다.
+
 `KBP_GLOBAL_SEARCH_CONCURRENCY` 기본 **2** — 이제 **워커 4개를 합친 시스템 전역** 상한이다
 (v1 은 워커당 상한이라 실제 전역은 최대 4배였다). 상한 도달 시 **큐잉하지 않고 즉시 503**
 — 사용자가 명시적으로 누른 동작이니 잠깐 기다리라는 안내보다 즉시 실패 후 재시도가 더
@@ -257,6 +345,15 @@ def _release_global_slot(dsn: str, slot_id: int) -> None:
 - 배선 후 최악 = (5 map + 1 reduce) × `KBP_GLOBAL_LLM_TIMEOUT`(기본 **60s**) = **6분/요청**.
   **시스템 전역** 동시성 상한 2 이므로 **최악 총 점유는 12분치 스레드**(6분 × 2, 워커
   분산과 무관하게 참이다) — 40 × 4 = 160개 중 2개.
+- **★ v5 상위 계층 예산 — 사용자 확인(2026-08-09): 운영은 사내망 직결이다.**
+  터널·리버스프록시의 엣지 유휴 타임아웃이 없으므로 **6분 예산을 그대로 유지**한다.
+  단 프론트 `chat()`(`frontend/lib/api.ts:637-645`)에 **타임아웃이 아예 없어** 무한
+  스피너가 된다 → `AbortController` 로 상한을 둔다(`KBP_GLOBAL_LLM_TIMEOUT` 기반
+  최악치 + 여유, 기본 **420초**). 사용자가 끊어도 facade 는 LLM 비용을 계속 태우므로
+  (§2.4 의 map 루프는 취소 신호를 모른다) **프론트 타임아웃은 UI 보호용이지 비용 절감이
+  아니다** — 그 사실을 §2.8 에 명시한다. 요청 취소를 facade 까지 전파하는 것은 범위 밖.
+  ⚠️ 터널·프록시 경유 배포로 바뀌면 이 결정을 다시 봐야 한다(엣지 유휴 100초 수준이면
+  6분 요청은 구조적으로 완주 불가 — 그때는 global_top_k 축소 또는 스트리밍이 필요하다).
 - **감수 근거**: 버튼이 명시적이라(자동 라우팅 없음) 노출이 제한되고, DB 카운터가 워커
   경계를 넘어 폭주를 막고, 로컬 검색도 edgequake LLM 으로 이미 스레드를 블로킹한다 —
   차수가 다르지 종류가 다르지 않다.
@@ -306,9 +403,19 @@ A(야간 배치) 또는 수동 `/communities/build` 가 소유한다.
 을 응답에 싣는다.
 
 ```python
-def _newest_report_time(workspace_id: str, dsn: str, *, level: int = 0) -> datetime | None:
+def newest_report_time(workspace_id: str, dsn: str, *, level: int = 0) -> datetime | None:
     """이 workspace 리포트 중 가장 최근 생성/갱신 시각. 없으면 None."""
 ```
+**★ v5 — `max(created_at)` 만으로는 신선도 신호가 거짓 안심을 준다.** `community_reports`
+에 DELETE 가 0건이라(사실 32) 사라진 문서 기반 리포트가 옛 시각으로 잔존하는데, workspace
+전체 `max()` 는 그 행들을 완전히 가린다 — 리포트 39행 중 38행이 2026-07-20 이고 1행만
+어제 갱신됐어도 "어제 기준" 으로 보인다. `_rank_reports` 는 rank/overlap 만 보므로 그
+낡은 리포트가 map 대상으로 뽑힐 수 있다.
+→ **`newest_report_time` 이 `(max, min, count)` 를 함께 돌려주고**, 프론트는
+`max` 를 기준으로 표기하되 **`min` 이 임계(기본 30일)보다 오래면 경고 문구를 덧붙인다**
+("일부 리포트는 {min} 이후 갱신되지 않았습니다"). 낡은 리포트의 **정리**는 여전히 A 소관
+(§2.6 서두) — B 는 **감추지 않는 것**까지만 책임진다.
+
 프론트는 이 값을 턴 아래에 작게 표기한다(§2.8). **"A 없이 B 단독 배포 가능"이라는 주장은
 유지하되, 신선도 불명 상태로 노출하지 않는다는 조건을 붙인다.**
 
@@ -338,7 +445,7 @@ def _newest_report_time(workspace_id: str, dsn: str, *, level: int = 0) -> datet
 | 파일 | 변경 |
 |---|---|
 | `core/chat.py:92-101` Protocol `_KbPipelineSearch` | `search(ws, query, *, top_k=…, mode: str = ..., global_top_k: int = ...)` — **안 고치면 fake 가 TypeError**(사실 16) |
-| `clients/kb_pipeline_client.py:403` | `search(..., mode="local", global_top_k=5)`; **화이트리스트(`:419-422`)에 `mode`·`community_reports_ready`·`report_generated_at` 추가**(`communities` 제외) — 안 하면 여기서 소실(사실 20) |
+| `clients/kb_pipeline_client.py:403` | `search(..., mode="local", global_top_k=5)`; **화이트리스트(`:426-428`)에 `mode`·`community_reports_ready`·`report_generated_at` 추가**(`communities` 제외) — 안 하면 여기서 소실(사실 20) |
 | `core/chat.py:438` `_run_kb_pipeline_chat` | `mode` 수령 → 전달. global 이면 `citations=[]`(커뮤니티는 청크가 아니라 `_attach_page_images` 대상이 아니다); `community_reports_ready`·**실제 응답의 `mode`**(요청한 값이 아니라 facade 가 답한 값 — §2.7.1) 전달 |
 | `core/chat.py:211` `run_chat_turn` | `mode: str = "local"`. **kb_pipeline 분기에만 전달**, 다른 provider(사실 37, `run_chat_turn` 두 번째 호출자 `comparison.py:479` 포함, 사실 38)는 무시 |
 | `core/chat.py:127-132` `ChatTurnResult` | `community_reports_ready: bool \| None = None`; `effective_mode: str \| None = None`; `report_generated_at: str \| None = None` |
@@ -402,13 +509,22 @@ facade 응답의 `mode` 필드를 그대로 **`effective_mode`** 로 캐리한�
 **kbp**
 - `service/app.py` — `/search` 에 `mode`·`global_top_k` + `_search_global` + **import 추가**
   (`global_search`, `reports_exist`, `psycopg`, `httpx`) + `_llm_configured()`(§2.1.1) +
-  `_acquire_global_slot`/`_release_global_slot`(§2.3, DB 기반) + `_newest_report_time()`
+  `_acquire_global_slot`/`_release_global_slot`(§2.3, DB 기반) + `newest_report_time()`
   사용(§2.6)
 - `service/jobs/schema.py` — `kbp.global_search_slots`(§2.3, `ensure_schema` 에 추가 —
   A(야간 배치) 의 `kbp.batch_runs`/`kbp.community_builds` 와 같은 스키마 파일)
 - `service/llm.py` — `get_text_llm(*, timeout=None)` (§2.3, 키워드 전용 + 기본값 유지)
-- `kb_pipeline/search.py` — `reports_exist()`, `_newest_report_time()` 신규.
+- `kb_pipeline/search.py` — `reports_exist()`, `newest_report_time()` 신규.
   **`build_if_missing` 기본값 불변**
+- **env 선언처 전수**(프로젝트 CLAUDE.md "폐쇄망 배포는 소스 수정과 함께"):
+  `.env.example`, `.env.airgap.example`, `.env.parse-only.example` **세 템플릿 모두**에
+  `KBP_GLOBAL_LLM_TIMEOUT`·`KBP_GLOBAL_SEARCH_CONCURRENCY` 를 넣는다.
+  v4 는 compose 와 `scripts/facade.env` 만 적어 **템플릿 3종이 빠져 있었다** — 그러면
+  운영자가 이 손잡이의 존재를 모른다(A1 에서 `KBP_JOB_*` 18개가 정확히 그 상태였다).
+  ※ `.env.parse-only.example` 은 **`KBP_GLOBAL_SEARCH_CONCURRENCY=0` 으로 둔다** —
+  파서 전용 배포에는 edgequake·커뮤니티가 없어 global 검색이 무의미하다(0=비활성).
+  ※ `scripts/parse-svc.env.example` 은 parse-svc 프로세스용이라 불필요(누락 아님).
+- `service/jobs/schema.py` — `LOCK_OBJ_GLOBAL_SEARCH = 4` 상수 추가(§2.3 advisory lock)
 - compose ×2 `facade_env` 앵커(compose `:10`, airgap `:27`) —
   `KBP_GLOBAL_LLM_TIMEOUT: ${KBP_GLOBAL_LLM_TIMEOUT:-60}`,
   `KBP_GLOBAL_SEARCH_CONCURRENCY: ${KBP_GLOBAL_SEARCH_CONCURRENCY:-2}`(**시스템 전역** —
@@ -418,7 +534,7 @@ facade 응답의 `mode` 필드를 그대로 **`effective_mode`** 로 캐리한�
   빈 줄로 두면 `float("")` → `ValueError` → 500)
 - `service/tests/test_search_endpoint.py` — `mode`/global 분기 + 동시성 상한 + LLM 가드
 - **`tests/test_search.py`**(기존 파일, `kb_pipeline/tests/` 아님 — 사실 33, 그 디렉터리는
-  수집 대상이 아니다) — `reports_exist`(**테이블 부재 픽스처**), `_newest_report_time`
+  수집 대상이 아니다) — `reports_exist`(**테이블 부재 픽스처**), `newest_report_time`
 
 **kb**
 - `core/chat.py`(Protocol·`ChatTurnResult`·두 함수), `clients/kb_pipeline_client.py`,
@@ -520,3 +636,72 @@ facade 응답의 `mode` 필드를 그대로 **`effective_mode`** 로 캐리한�
 | DB 장애를 "리포트 없음"으로 위장 | 그 경우만 **503**(§2.2), `psycopg.Error` 로 좁혀 코드 버그와 구분 |
 | 프론트 토글이 dify KB 에 노출 | `providerStatus === "ready"` 가드(§2.8) |
 | **프론트 회귀가 자동화되지 않는다** | typecheck + 수동 체크리스트(§4) — 러너 도입은 별건 |
+
+---
+
+## 6. 구현 후 검증 (착수 전 검증에서 이관)
+
+> 검증관이 각 지적에 **`runtime_discoverable`** 을 직접 판정했다(2렌즈, 224k 토큰).
+> `true` 인 5건은 글로벌 룰 "검증 비용 관리" 5번대로 **구현 중 실측으로 닫는다** —
+> 계획서에서 더 다투는 것보다 한 번 돌리는 게 확실한 종류다. 설계 판단이 필요한 5건은
+> v5 본문에 반영했다.
+
+| # | 어디 | 무엇 |
+|---|---|---|
+| 1 | plan §2.1 (plan:119 `_acquire_global_slot`, plan:131 `_newest_report_time`, pl | try/except 가 `reports_exist` 만 감싼다. `_acquire_global_slot`·`_newest_report_time`·`_release_global_slot` 은 psycopg 예외에 무방비 → `kbp.global_search_slots`  |
+| 2 | plan §2.1:141-142 `finally: _release_global_slot(dsn, slot_id)` + §2.3:245-249 | release 가 새 커넥션을 열면서 예외를 흡수하지 않는다. release 시점에 DB 가 흔들리면 finally 절의 `psycopg.OperationalError` 가 진행 중이던 `HTTPException(422)`(plan:136)이나 이미 완성된 성공 응답( |
+| 3 | plan §2.1:119,133 (`_GLOBAL_SEARCH_CONCURRENCY`·`_GLOBAL_LLM_TIMEOUT` 을 모듈 상수처 | 두 값을 어디서·언제 읽고 파싱 실패를 어떻게 다루는지 정하지 않았다. `_UPPER` 표기는 import 시점 1회 읽기를 암시하는데, 그러면 (a) 빈/오타 값이 import 시점 ValueError → gunicorn 워커 전체 기동 실패(/parse·/inges |
+| 4 | plan §4:455-487 (DB 의존 단언 다수) | '회귀 핵심' 항목 다수(테이블 부재→ready:false, 죽은 슬롯 청소, 프로세스 경계 상한)가 실 Postgres 를 요구한다. 이 레포 관례상 그런 테스트는 KBP_PG_DSN 없으면 조용히 skip 되어 기본 `pytest -q` 에서 '통과'처럼 보인다.  |
+| 5 | plan §2.6:316 `def _newest_report_time` + §3:417 (kb_pipeline/search.py) | §2.2 는 새 공개 `reports_exist` 를 만드는 이유로 '비공개 심볼 크로스패키지 import 도 해소된다' 를 들었는데, §2.6/§3 은 신선도 함수를 `_newest_report_time`(선행 밑줄=비공개)로 kb_pipeline/search.py  |
+
+**닫는 방법**
+1. facade `/search` 를 실제로 호출해 mode=local/global 양쪽 응답 키를 확인(빠진 import 는
+   즉시 `NameError`).
+2. 일회용 PG 로 `_acquire_global_slot` 동시 호출 — advisory lock 이 상한을 지키는지.
+   `ensure_schema` 를 **돌리지 않은** DB 로도 한 번 호출해 503 이 나오는지(500 아님).
+3. `KBP_GLOBAL_SEARCH_CONCURRENCY` 를 monkeypatch 로 1 로 두고 두 번째 acquire 가
+   `None` 인지 — 요청 시점 읽기가 실제로 동작하는지.
+4. `get_text_llm()` 무인자 호출자 2곳(`runner.py`, `parse_service/app.py`)과 무인자 람다
+   monkeypatch(`test_job_runner.py`)가 무변경 통과하는지 — 시그니처 회귀.
+5. PG 필요 테스트는 별도 `service/tests/test_global_search_pg.py` + `requires_pg` +
+   DSN 게이트(레포 관례). **DSN 없으면 미검증임을 완료판정에 명시한다.**
+
+**착수 조건**: 위 5건 외 §2 설계는 확정이다. 구현 중 **설계 자체를 바꿔야 하는
+문제**가 나오면 코드를 더 쓰지 말고 plan 을 v6 로 올린 뒤 방향을 확인한다.
+
+### 6.1 닫힘 기록 (2026-08-09)
+
+| # | 결과 | 증거 |
+|---|---|---|
+| 1 | ✅ 닫힘 | `_acquire_global_slot`·`newest_report_time`·`_release_global_slot` 모두 psycopg 예외 처리. `_search_global` 이 **모든 psycopg 오류를 503** 으로 매핑. `test_db_error_on_slot_acquire_is_503_not_500`, `test_global_search_pg.py::test_reports_exist_missing_table_is_not_an_error` |
+| 2 | ✅ 닫힘 | `_release_global_slot` 이 예외를 흡수한다 — 완성된 응답이 500 으로 뒤집히지 않는다. `test_release_swallows_errors`(죽은 DSN 으로 호출), `test_slot_is_released_even_on_failure` |
+| 3 | ✅ 닫힘 | 모듈 상수 대신 `_env_float`/`_env_int` 로 **요청 시점**에 읽고 파싱 실패는 기본값. import 시점 ValueError 로 워커 전체가 죽는 경로 없음. `test_settings_are_read_per_request` |
+| 4 | ✅ 닫힘 | PG 필요 단언을 `test_global_search_pg.py`(`requires_pg` + DSN 게이트)로 분리. **DSN 없이는 13건 미검증**임이 표시된다 — 실측: DSN 없이 `609 passed, 2 skipped`, DSN 있으면 `687 passed`. 실제로 이 13건만 잡은 버그가 있었다(아래) |
+| 5 | ✅ 닫힘 | 밑줄 없는 공개 `reports_exist`·`newest_report_time` 로 신설하고 `kb_pipeline/__init__.py` `.search` 블록에서 export. 크로스패키지 비공개 import 없음 |
+
+**구현 중 발견 — 실 PG 테스트만 잡은 버그**: `_acquire_global_slot` 이
+`cur.fetchone()["count"]` 로 읽었으나 bare `psycopg.connect` 에는 `row_factory=dict_row`
+가 없어 `TypeError: tuple indices must be integers`. `JobRepo` 에는 있어서 착각했다 —
+DSN 을 직접 여는 코드에는 없다. `[0]` 으로 수정.
+
+**advisory lock 이 장식이 아님을 실증**: 잠금을 제거하니 `상한 2 인데 5개가 승인됐다`.
+
+### 6.2 최종 검증
+
+| 대상 | 결과 |
+|---|---|
+| kbp `service/ + tests/ + parse_service/` (PG 없음) | **609 passed, 2 skipped** |
+| kbp 동일 (PG 있음) | **687 passed** — `test_global_search_pg.py` 13건 포함 |
+| kb `backend/tests/` | **651 passed, 16 failed** (기준선 648/16 → **+3, 회귀 0**) |
+| frontend | `typecheck`·`lint`·`build` 통과 + `npm run test:chatmode` **14 passed** |
+| 되돌리기 실증 | kb 3종·frontend 5종 전부 빨강 확인 |
+
+kb 의 16 failed 는 **기준선에서 이미 실패하던 것**이다(`git stash` 로 확인). 이번 작업으로
+`FakeKbPipelineSearch.search()` 가 `mode` 를 안 받아 3건이 깨졌던 것을 즉시 잡아 고쳤다 —
+A1 의 `FakeKbPipeline.chunk()`/`table_blocks` 와 같은 패턴(테스트 fake 가 실 클라이언트
+시그니처를 못 따라감).
+
+### 6.3 남은 수동 게이트 (배포 전, 미완)
+
+`_rank_reports` 의 한국어 관련성은 리포트 본문이 있는 라이브 KB 가 필요해 자동 검증
+불가다. **대표 질문 10종으로 선정 리포트를 눈으로 확인**하고, 무관하면 배포를 보류한다.

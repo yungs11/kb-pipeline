@@ -17,6 +17,9 @@ import logging
 import os
 import re
 
+import httpx
+import psycopg
+
 from contextlib import asynccontextmanager
 
 from fastapi import (FastAPI, UploadFile, File, Form, Depends,
@@ -29,6 +32,8 @@ from service.edgequake import EdgequakeClient
 from service.adaptive_chunk import AdaptiveChunkClient, MODAL_ATOMIC_MARKERS
 from service.parse_client import ParseSvcClient
 from service.llm import get_text_llm
+from service.jobs import schema as _schema
+from kb_pipeline.search import global_search, newest_report_time, reports_exist
 
 logger = logging.getLogger("kb_pipeline.service")
 
@@ -317,10 +322,137 @@ def chunk(enriched_content: str = Body(..., embed=True),
     return _legacy_job(repo, blobs, runner, kind="chunk", payload=payload)
 
 
+# ── global 검색 (B) ────────────────────────────────────────────────────────
+#
+# global 검색은 커뮤니티 리포트 map N + reduce 1 의 **순차 LLM** 이라 요청 하나가 분 단위로
+# 스레드를 점유한다. D10 이 /communities/build 를 잡 큐로 옮긴 이유 중 하나가 정확히
+# "facade 웹 프로세스 점유" 였는데, 이 경로는 동기 함수라 잡 큐의 상한이 적용되지 않는다.
+# 완전히 잡 큐로 옮기면 "즉시 답하는 대화형 검색" 이라는 목적이 깨지므로 **동시 실행 수를
+# 상한**한다.
+
+def _env_float(name: str, default: float) -> float:
+    """파싱 실패는 기본값 + warning(레포 관례). 설정 오타가 500 이나 기동 실패를 만들지 않는다."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("%s=%r 파싱 실패 — 기본값 %s 사용", name, raw, default)
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("%s=%r 파싱 실패 — 기본값 %s 사용", name, raw, default)
+        return default
+
+
+# ★ 설정은 **요청 시점에** 읽는다. 모듈 상수로 두면 (a) 빈/오타 값이 import 시점
+#   ValueError → gunicorn 워커 전체 기동 실패로 /parse·/ingest 까지 동반 사망하고,
+#   (b) 테스트가 monkeypatch.setenv 로 상한을 바꿔 검증할 수 없다.
+def _global_llm_timeout() -> float:
+    return _env_float("KBP_GLOBAL_LLM_TIMEOUT", 60.0)
+
+
+def _global_concurrency() -> int:
+    return _env_int("KBP_GLOBAL_SEARCH_CONCURRENCY", 2)
+
+
+def _slot_ttl_seconds() -> float:
+    """죽은 슬롯 TTL 을 **LLM 타임아웃에서 유도한다**(하드코딩 금지).
+
+    요청 최악 소요 = (global_top_k 상한 5 + reduce 1) × KBP_GLOBAL_LLM_TIMEOUT.
+    TTL 이 그보다 짧으면 **살아있는 요청의 슬롯이 매 acquire 마다 삭제**되고, 뒤이은
+    release 는 없는 id 를 조용히 지워 성공하므로 **상한이 사실상 사라진다.**
+    (기본 60s 면 6분인데 10분 하드코딩이 겨우 맞았을 뿐이고, KBP_LLM_TIMEOUT 관례대로
+    300 을 넣으면 최악 30분이 되어 즉시 깨진다.) 여유배수 2 는 LLM 외 시간을 감싼다.
+    """
+    return (GLOBAL_TOP_K_MAX + 1) * _global_llm_timeout() * 2
+
+
+#: global_top_k clamp 범위. facade 의 top_k(반환 청크 수)와 달리 global 의 top_k 는
+#: **map 대상 = 순차 LLM 호출 수** 다. 그대로 흘리면 기본이 11회 직렬 LLM 이 된다.
+GLOBAL_TOP_K_MIN, GLOBAL_TOP_K_MAX = 1, 5
+
+
+def _llm_configured() -> bool:
+    """세 변수를 **모두** 본다.
+
+    compose 양쪽이 셋 다 ``${VAR}``(기본값 없음)로 주입하므로 미설정 시 **빈 문자열**이
+    들어온다(KeyError 아님). 그리고 ``os.environ.get(k, default)`` 는 "있는데 빈 값" 에는
+    default 를 적용하지 않아, base="" 로 httpx.post("/chat/completions") 를 호출해
+    UnsupportedProtocol 로 **뒤늦게 500** 이 난다.
+    """
+    return all((os.environ.get(k) or "").strip()
+               for k in ("KBP_OPENAI_API_KEY", "KBP_OPENAI_BASE_URL", "KBP_LLM_MODEL"))
+
+
+def _acquire_global_slot(dsn: str, limit: int) -> int | None:
+    """점유 수가 limit 미만이면 슬롯을 잡고 id 를, 아니면 None.
+
+    ★ **트랜잭션 전체를 advisory lock 으로 직렬화한다.** SELECT count → INSERT 를 잠금
+    없이 하면 커밋 전 INSERT 가 다른 트랜잭션의 count 에 보이지 않아, 워커 4개가 동시에
+    누르면 각자 count<limit 을 읽고 각자 INSERT 한다 → **상한 2 가 4로 깨진다**(TOCTOU).
+    그러면 threading.Semaphore 를 기각한 이유(프로세스마다 별도 인스턴스)가 새 구현에도
+    그대로 남는다. 이 레포는 같은 문제를 claim 에서 이미 이렇게 풀었다(jobs/repo.py).
+    락 안에서 다운스트림을 호출하지 않으므로 직렬화 비용이 없다(수 ms).
+    """
+    with psycopg.connect(dsn) as conn:
+        with conn.cursor() as cur:
+            # advisory lock 은 blocking 획득이라 상한이 없으면 무한정 매달린다.
+            cur.execute("SET LOCAL lock_timeout = '5s'")
+            cur.execute("SET LOCAL statement_timeout = '30s'")
+            cur.execute("SELECT pg_advisory_xact_lock(%s, %s)",
+                        (_schema.LOCK_CLASSID, _schema.LOCK_OBJ_GLOBAL_SEARCH))
+            # 죽은 슬롯 청소(프로세스가 응답 없이 죽는 경우). 매 acquire 마다 함께 돈다.
+            cur.execute("DELETE FROM kbp.global_search_slots"
+                        " WHERE claimed_at < now() - make_interval(secs => %s)",
+                        (_slot_ttl_seconds(),))
+            cur.execute("SELECT count(*) FROM kbp.global_search_slots")
+            # ★ row_factory 를 지정하지 않았으므로 **tuple** 이다(JobRepo 는
+            #   dict_row 를 쓰지만 여기서는 커넥션을 직접 연다). 실 PG 로 돌려야만
+            #   드러나는 차이라 requires_pg 테스트가 이걸 잡았다.
+            if int(cur.fetchone()[0]) >= limit:
+                return None
+            cur.execute("INSERT INTO kbp.global_search_slots"
+                        " DEFAULT VALUES RETURNING id")
+            slot_id = int(cur.fetchone()[0])
+            conn.commit()
+            return slot_id
+
+
+def _release_global_slot(dsn: str, slot_id: int) -> None:
+    """★ **예외를 삼킨다(로그만).**
+
+    이 호출은 ``finally`` 절에서 새 커넥션을 여는데, 그 시점에 PG 가 흔들리면
+    psycopg 예외가 **이미 완성된 성공 응답(분 단위·LLM 여러 회분)이나 HTTPException(422)
+    을 500 으로 바꾼다** → kb 클라이언트의 재시도 조건(>=500)에 걸려 map-reduce 를 3회
+    반복한다. 422 를 고른 유일한 목적을 자기 finally 절이 되돌리는 셈이다.
+    슬롯 회수는 위 TTL 청소가 담당한다.
+    """
+    try:
+        with psycopg.connect(dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM kbp.global_search_slots WHERE id = %s",
+                            (slot_id,))
+                conn.commit()
+    except Exception:  # noqa: BLE001 — 성공한 응답을 뒤집지 않는다
+        logger.error("global 검색 슬롯 반납 실패 id=%s (TTL 청소가 회수한다)", slot_id,
+                     exc_info=True)
+
+
 @app.post("/search", dependencies=[Depends(require_facade_key)])
 def search(workspace_id: str = Body(..., embed=True),
            query: str = Body(..., embed=True),
            top_k: int = Body(10, embed=True),
+           mode: str = Body("local", embed=True),
+           global_top_k: int = Body(5, embed=True),
            eq=Depends(get_edgequake)):
     """Search a workspace via edgequake ``/api/v1/query`` (edgequake hidden).
 
@@ -328,8 +460,24 @@ def search(workspace_id: str = Body(..., embed=True),
     retrieval is workspace-scoped (isolation), maps ``top_k`` to edgequake's
     ``max_results``, and normalizes edgequake's ``sources`` into a stable
     ``results`` shape (chunk_id/text/score/document_id) plus the generated answer.
+
+    ``mode`` (B): ``"local"``(기본, 기존 동작 그대로) 또는 ``"global"``(커뮤니티 리포트
+    map-reduce). 기본값이 local 이라 **기존 호출자 전원이 무변경**이다. 응답에 ``mode`` 를
+    더한다(local 도).
     """
+    # ★ 검증을 ensure_workspace **앞**에 둔다 — 뒤에 두면 mode=bogus 요청이 workspace 를
+    #   만들고 나서 400 이 된다(부작용을 남기는 잘못된 요청).
+    if mode not in ("local", "global"):
+        raise HTTPException(status_code=400, detail="mode must be 'local' or 'global'")
+
     eq_ws = eq.ensure_workspace(workspace_id, name=workspace_id)
+
+    if mode == "global":
+        # ★ eq_ws 로 부른다. community_reports.workspace_id 는 eq UUID 인데 facade 가 받는
+        #   것은 kb id 다. kb id 를 그대로 넘기면 리포트 조회가 **영구히 0행**이 되어 오류
+        #   없이 매번 "야간 배치 이후 사용 가능" 이라는 거짓 안내가 뜬다.
+        return _search_global(eq_ws, query, global_top_k)
+
     res = eq.search(workspace_id=eq_ws, query=query, top_k=top_k)
     results = [
         {
@@ -340,7 +488,77 @@ def search(workspace_id: str = Body(..., embed=True),
         }
         for src in (res.get("sources") or [])
     ]
-    return {"answer": res.get("answer"), "results": results}
+    return {"answer": res.get("answer"), "results": results, "mode": "local"}
+
+
+def _search_global(eq_ws: str, query: str, k: int) -> dict:
+    """커뮤니티 리포트 map-reduce. **응답 키 집합은 두 분기(ready/not-ready)에서 동일하다.**
+
+    오류 의미론(§2.2): 이 함수 안의 **모든 DB 호출**은 ``psycopg.Error`` 를 503 으로 바꾼다
+    — 500 대역은 어떤 경로로도 내지 않는다. kb 클라이언트가 ``429`` 또는 ``>=500`` 을
+    재시도하므로, 500 을 내면 분 단위 map-reduce 가 3회 반복된다.
+    """
+    dsn = os.environ.get("KBP_PG_DSN")   # 인덱싱 금지 — facade 는 DSN 없이도 뜬다
+    if not dsn:
+        raise HTTPException(status_code=503,
+                            detail="global search unavailable: KBP_PG_DSN unset")
+    if not _llm_configured():
+        raise HTTPException(status_code=503,
+                            detail="global search unavailable: LLM not configured")
+
+    k = max(GLOBAL_TOP_K_MIN, min(GLOBAL_TOP_K_MAX, int(k)))
+
+    # 슬롯 획득도 DB 호출이다 — 테이블 부재(UndefinedTable)나 접속 실패가 500 이 되면 안
+    # 된다. facade lifespan 이 ensure_schema 실패를 삼키고 기동을 계속하므로(가시성 우선),
+    # **스키마 없이 정상 응답하는 배포가 설계상 존재한다.**
+    try:
+        slot_id = _acquire_global_slot(dsn, _global_concurrency())
+    except psycopg.Error as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"global search unavailable: {exc}") from exc
+    if slot_id is None:
+        # 큐잉하지 않고 즉시 503 — 사용자가 명시적으로 누른 동작이니 "잠깐 기다리라" 보다
+        # 즉시 실패 후 재시도가 명확하다. (503 은 kb 재시도 조건에 없다.)
+        raise HTTPException(status_code=503,
+                            detail="global search busy: too many concurrent requests")
+    try:
+        try:
+            ready = reports_exist(eq_ws, dsn)
+            newest, oldest, n_reports = newest_report_time(eq_ws, dsn)
+        except psycopg.Error as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"global search unavailable: {exc}") from exc
+
+        if not ready:
+            return {"answer": None, "results": [], "communities": [],
+                    "mode": "global", "community_reports_ready": False,
+                    "report_newest_at": None, "report_oldest_at": None,
+                    "report_count": 0}
+
+        try:
+            out = global_search(query, eq_ws,
+                                llm=get_text_llm(timeout=_global_llm_timeout()),
+                                dsn=dsn, top_k=k, build_if_missing=False)
+        except httpx.HTTPError as exc:
+            # ★ httpx.HTTPError 로 잡는다. (TimeoutException, HTTPStatusError) 로 좁게
+            #   쓰면 형제인 ConnectError·ReadError·RemoteProtocolError(폐쇄망에서 흔한
+            #   connection-refused 등)가 새어 500 이 되고, kb 가 3회 재시도한다.
+            # ★ 422 를 고른 이유: kb 재시도 조건이 429 또는 >=500 이라 4xx 는 재시도되지
+            #   않는다. 분 단위 map-reduce 를 3배로 만들지 않는다.
+            raise HTTPException(
+                status_code=422,
+                detail=f"global search LLM call failed: {exc}") from exc
+
+        return {"answer": out.get("answer"), "results": [],
+                "communities": out.get("sources") or [],
+                "mode": "global", "community_reports_ready": True,
+                "report_newest_at": newest.isoformat() if newest else None,
+                "report_oldest_at": oldest.isoformat() if oldest else None,
+                "report_count": n_reports}
+    finally:
+        _release_global_slot(dsn, slot_id)
 
 
 @app.post("/insert", dependencies=[Depends(require_facade_key)])

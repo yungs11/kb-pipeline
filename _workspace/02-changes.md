@@ -616,3 +616,81 @@ VL 호출) 중 순서도 박스 라벨("접수/검토/승인")이 "첫 번째 �
   도메인 `parse()`) 둘 다 `page_hybrid_prompts()`로 전환.
 - env 1개(`KBP_PAGE_HYBRID_DIAGRAM_RULE`, 기본 빈 문자열=코드 기본값)를 5개 env 파일에
   문서화. dotenv는 여러 줄 값을 지원하지 않아 값은 줄바꿈 없이 한 줄로 적어야 함을 명시.
+
+---
+
+## 12. global 검색 노출 — 명시 mode 토글 (2026-08-09)
+
+`kb_pipeline/search.py` 의 커뮤니티 map-reduce(`global_search`)는 W3 이후 라이브러리로만
+존재했다(app.py 미import). 이번에 **facade `/search` → kb 챗 → 프론트 토글**까지 배선했다.
+
+### 12.1 자동 라우터(`route()`)를 쓰지 않은 이유
+
+`unified_search`/`route()`(GLOBAL_CUES 단서어 + tiny LLM 타이브레이크)는 **의도적으로
+배선하지 않았다.** 오판 비용이 비대칭이다 — 넓은 질문을 local 로 보내면 부실한 답이지만,
+좁은 질문을 global 로 보내면 **최악 6분 + LLM 비용 6회**를 태운다. 휴리스틱 한국어 단서어
+목록의 정확도를 그 비용에 걸 근거가 없어, 사용자가 버튼으로 고르게 했다. `route()` 는
+라이브러리에 그대로 남아 있다.
+
+### 12.2 동시성은 `threading.Semaphore` 가 아니라 DB 카운터
+
+global 요청 하나는 map N + reduce 1 의 **순차** LLM 이라 `(N+1)×timeout` 을 점유한다.
+gunicorn `-w 4` 에서 모듈 스코프 `Semaphore` 는 **프로세스마다 따로 세어** 전역 상한이
+되지 못한다(실효 상한 = 설정값 × 워커수). 그래서 `kbp.global_search_slots` 행 카운터 +
+`pg_advisory_xact_lock` 으로 옮겼다.
+
+advisory lock 이 장식이 아니라는 것은 실측으로 고정했다 — 잠금을 빼면 커밋 전 INSERT 가
+다른 트랜잭션의 `count(*)` 에 안 보여 **상한 2 인데 5개가 승인**된다(TOCTOU).
+`test_global_search_pg.py::test_concurrent_acquire_never_exceeds_the_limit`.
+
+슬롯 TTL = `(GLOBAL_TOP_K_MAX+1) × timeout × 2`. **하드코딩하면 안 된다** — TTL 이 실제
+소요보다 짧으면 살아있는 슬롯이 청소되어 상한 자체가 사라진다.
+
+### 12.3 전용 LLM 타임아웃
+
+`get_text_llm(*, timeout=None)` 으로 **키워드 전용 + 기본값** 인자를 추가했다(무인자 기존
+호출자·테스트 monkeypatch 보존). global 만 `KBP_GLOBAL_LLM_TIMEOUT`(기본 60s)을 쓴다 —
+적재 관례값 300s 를 그대로 쓰면 요청 하나가 최악 30분을 점유한다. 프로세스 전역 env 를
+호출 시점에 바꾸는 방식은 같은 워커의 다른 경로와 경합하므로 금지.
+
+### 12.4 오류 의미론 — 침묵하는 거짓 안내 금지
+
+- `reports_exist`: **테이블 부재만 fail-open("없음")**, 그 외 `psycopg.Error` 는 raise.
+  DB 장애를 "리포트가 아직 없다" 로 위장하면 사용자가 야간 배치를 기다리게 된다.
+  app.py 가 그 예외를 **503** 으로 바꾼다.
+- LLM/httpx 실패는 **422**. kb 클라 재시도 조건이 `429 or >=500` 이라 5xx 로 주면
+  6분짜리 요청이 3배로 증폭된다.
+- `newest_report_time` 은 `(newest, oldest, count)` 를 준다. `newest` 만 노출하면
+  `community_reports` 에 DELETE 가 없어 **삭제된 문서 기반 리포트가 잔존**하는 상태
+  (1건만 어제, 37건은 두 달 전)가 "어제 기준" 으로 읽혀 거짓 안심을 준다. 프론트는
+  `oldest` 가 30일을 넘으면 경고를 띄운다.
+
+### 12.5 프론트 — 토글은 kb_pipeline 에서만
+
+백엔드는 `mode` 를 **provider 분기 안에서만** 읽으므로 dify/ragflow KB 에 버튼을 보여주면
+거짓 기능이 된다. `provider` 가 미해결(로딩/오류)인 동안에도 숨겨 local(기존 동작)로
+안전 폴백한다.
+
+`frontend/lib/api.ts` 의 `chat()` 은 global 턴에만 `AbortController` 420초를 건다. ⚠️ 이
+타임아웃은 **UI 보호용이지 비용 절감이 아니다** — 끊어도 facade 는 map 루프를 계속 돌린다.
+
+응답→턴 매핑과 신선도 판정은 `frontend/lib/chatMode.ts` 로 **React 없이** 분리했다.
+frontend 에 테스트 러너가 없어(`scripts` = dev/build/lint/typecheck) TSX 는 node 로 돌릴 수
+없는데, 이 판정이 틀리면 **조용히 거짓 안심**(낡은 리포트를 최신처럼, 빈 답변을 정상처럼)을
+주기 때문에 실행 검증이 필요했다. `npm run test:chatmode` 가 tsc 로 컴파일한 **실제 출하
+코드**를 불러 14건을 검증한다(복사본 검증 함정 회피). 되돌리기 5종 전부 빨강 확인.
+
+### 12.6 배포 전 수동 게이트 (미완)
+
+`_rank_reports` 의 한국어 관련성은 리포트 본문이 있는 라이브 KB 가 필요해 자동 검증할 수
+없다. **대표 질문 10종으로 선정 리포트를 눈으로 확인**하고, 무관하면 배포를 보류한다.
+
+### 12.7 검증
+
+- kbp `service/tests/ + tests/`: **383 passed, 1 skipped**(기준선 368 → +15, 회귀 0).
+  `test_global_search_pg.py` 13건은 실 Postgres 필요(`requires_pg`).
+- kb `backend/tests/`: **651 passed, 16 failed**(기준선 648/16 → +3, 회귀 0).
+- frontend: typecheck·lint·build 통과 + `test:chatmode` 14건.
+- **실 PG 테스트만 잡은 버그**: `_acquire_global_slot` 이 `cur.fetchone()["count"]` 로
+  읽었는데 bare `psycopg.connect` 는 `row_factory=dict_row` 가 없어 `TypeError`.
+  JobRepo 에는 있어서 착각한 것 — DSN 을 직접 여는 코드에는 없다.
