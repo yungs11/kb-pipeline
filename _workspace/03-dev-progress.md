@@ -636,3 +636,56 @@ facade 가 유일한 API 서버가 되는 방향에서, 잡 큐 도입 때 범�
 
 **운영 확인 필요(미실측)** — 실제 야간 발화. dev 에서 `KBP_COMMUNITY_BUILD_AT` 를
 현재+1분으로 두고 한 번 돌려보는 것이 남았다(계획서 §3 완료판정).
+
+---
+
+## A1 + B 통합 머지 (2026-08-10)
+
+`feat/community-nightly-a1`(A1) 과 `feat/global-search-button`(B) 를 통합 브랜치
+**`feat/fileconvert-api`** 에 합쳤다. `main` 이 아니다 — main 은 149커밋 뒤이고 두
+브랜치의 조상일 뿐이며, 폐쇄망 3커밋도 fileconvert 에 있다.
+
+두 작업은 커뮤니티 리포트의 **생산자/소비자** 양쪽이라 함께 있어야 의미가 있다.
+
+### 커뮤니티 빌드 진입점이 셋 → 하나 (D22 해소)
+
+| 진입점 | 상태 |
+|---|---|
+| 적재 성공 시 자동 트리거 | A1 이 제거 |
+| 검색의 `build_if_missing` | B 가 `build_if_missing=False` 로 차단 (`service/app.py`) |
+| 야간 배치 + 수동 `POST /communities/build` | **유일하게 남음** |
+
+이제 리포트 생성 시점이 예측 가능하다. A2/A3/A4 를 다루기 쉬워진 전제다.
+
+### 충돌 7건 — 전부 "양쪽 순수 추가"
+
+env 3종·compose 2종은 같은 위치에 서로 다른 키를 넣어 양쪽을 보존했다.
+`_workspace/02-changes.md` 는 **생산자(A1) → 소비자(B)** 순으로, deferred 문서는
+**번호순(D25~D37 → D38)** 으로 배치했다. `service/jobs/schema.py` 는 자동 병합됐고
+락 4종(`LOCK_OBJ_GLOBAL_SEARCH=4` 포함)·테이블 6종이 모두 살았음을 확인했다.
+
+### 검증
+
+| 대상 | 결과 |
+|---|---|
+| kbp (PG 없이) | **643 passed, 3 skipped** (A1 단독 미포함 B 609 + A1 34) |
+| kbp (실 PG) | **738 passed, 0 failed** — 두 스키마 합본 DDL 확인 |
+| compose ×2 | `docker compose config` 전체 보간 통과(더미 env 104키) |
+
+### 이 머지에서 잡은 배포 차단 버그 — `verify-bundle` 의 `val` 미정의
+
+`check_env` 가 `val KEY "$envf"` 를 쓰는데 **그 함수가 정의돼 있지 않았다.**
+`command not found` 로 빈 문자열이 되어 `[ "$(val X)" = "paddle_gw" ]` 가 항상 거짓,
+즉 **paddle_gw 가드가 배포된 채로 죽어 있었다.** 가드가 사라진 게 아니라 통과해버리는
+쪽이라 더 위험하다. 대조 실측: 구버전 exit 0 / 발화 0건 → 정의 후 exit 1 / 정확히 발화.
+
+같은 커밋에 A1/B env 가드를 넣었다.
+- 배치 켜짐 + `TZ` 빔 → **차단**. 컨테이너 기본 UTC 라 `BUILD_AT=03:00` 이 **KST 정오**에
+  열려 목적이 정확히 뒤집힌다(실패가 아니라 **잘못된 시각에 성공**이라 로그로 안 드러난다).
+- `DEADLINE_MINUTES <= WINDOW_MINUTES` → **차단**(창 안 제출을 그 밤에 즉시 취소).
+- `KBP_GLOBAL_SEARCH_CONCURRENCY=0` → 경고(파서 전용은 정상, 전체 스택이면 버튼이
+  보이는데 항상 503).
+
+가드 7경로를 실제로 돌려 확인했다. **D35(env 템플릿에 `KBP_COMMUNITY_*`/`TZ` 추가)는
+이 머지로 해소** — `scripts/parse-svc.env.example` 은 파서 전용 템플릿이라(facade 키 전무)
+제외가 맞다.
