@@ -670,7 +670,19 @@ env 3종·compose 2종은 같은 위치에 서로 다른 키를 넣어 양쪽을
 |---|---|
 | kbp (PG 없이) | **643 passed, 3 skipped** (A1 단독 미포함 B 609 + A1 34) |
 | kbp (실 PG) | **738 passed, 0 failed** — 두 스키마 합본 DDL 확인 |
-| compose ×2 | `docker compose config` 전체 보간 통과(더미 env 104키) |
+| compose ×2 | `docker compose config` 전체 보간 통과(더미 env 104키). facade·facade-worker 양쪽에 `TZ`+`KBP_COMMUNITY_*` 8키+`KBP_GLOBAL_*` 2키 전달 확인, parse-svc 는 0(파서라 정상) |
+| kb `backend/tests/` | **647 passed, 20 failed** — A1 이전 커밋에서 같은 인터프리터로 측정한 기준선 **640/23** 대비 **새 실패 0건, 3건 회복**(`table_blocks` 하네스 수정) |
+
+> **수치 정정**: B 작업 중 "기준선 648 passed/16 failed" 로 보고했는데 오늘 재측정에서
+> 재현되지 않았다(같은 코드에서 20 failed). 그래서 A1 이전 커밋에 워크트리를 만들어
+> **같은 시점·같은 인터프리터로** 다시 재어 비교했다 — 그 기준선이 23 failed 다.
+> **델타(새 실패 0 · 3건 회복)는 두 측정 모두에서 동일**하고, 그게 판정 근거다.
+> 절대 실패 수는 세션 간 재현되지 않으므로 완료 판정에 쓰지 않는다.
+>
+> 실패 20건은 전부 기존 군집(gate/job_status/pipeline/readyz/raganything/ragflow)이고
+> A1·B 가 건드린 파일이 아니다. 표본 확인 하나: `test_kb_provider_accept.py` 의
+> `kb_pipeline_timeout_seconds == 1800.0` 은 **낡은 테스트**다 — 코드 기본값이 `a9e7072`
+> 에서 3600.0 이 됐는데 기대값을 안 고쳤다(env 누출 아님). 이 군집 정리는 별건.
 
 ### 이 머지에서 잡은 배포 차단 버그 — `verify-bundle` 의 `val` 미정의
 

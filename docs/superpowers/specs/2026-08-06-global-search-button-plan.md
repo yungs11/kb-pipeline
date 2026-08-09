@@ -698,7 +698,7 @@ DSN 을 직접 여는 코드에는 없다. `[0]` 으로 수정.
 |---|---|
 | kbp `service/ + tests/ + parse_service/` (PG 없음) | **609 passed, 2 skipped** |
 | kbp 동일 (PG 있음) | **687 passed** — `test_global_search_pg.py` 13건 포함 |
-| kb `backend/tests/` | **651 passed, 16 failed** (기준선 648/16 → **+3, 회귀 0**) |
+| kb `backend/tests/` | **647 passed, 20 failed** — A1 이전 기준선 **640/23** 대비 **새 실패 0건, 3건 회복** |
 | frontend | `typecheck`·`lint`·`build` 통과 + `npm run test:chatmode` **14 passed** |
 | 되돌리기 실증 | kb 3종·frontend 5종 전부 빨강 확인 |
 
