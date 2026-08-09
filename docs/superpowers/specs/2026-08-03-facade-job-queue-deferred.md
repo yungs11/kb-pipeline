@@ -681,11 +681,26 @@ grep 이 `set -e` 아래서 스크립트를 죽임). 최종적으로 v4 는 READ
 
 **언제 필요해지나**: 리포트 보유 workspace 가 수십 개로 늘어 스윕 1회가 분 단위가 되거나 graph_counts 를 요청 경로에서 부를 때
 
-### D28. GC TTL(72h, gc.py:37)과 §2.2 의 ORDER BY fail_streak ASC 가 겹쳐 반복 실패 workspace 가 캡 뒤로 밀리다 insert 행이 사라져 후보에서 영구 이탈할 수 있다
+### D28. GC TTL(72h, gc.py:37)과 §2.2 의 ORDER BY fail_streak ASC 가 겹쳐 반복 실패 workspace 가 캡 뒤로 밀리다 insert 행이 사라져 후보에서 영구 이탈할 수 있다 — ✅ **해소 (A1 설계로 무효화, 2026-08-10 확인)**
 
 **왜 범위 밖**: plan §2.2 가 TTL 잔여를 이미 명시하고 '잔여>0 3일 연속 error + deferred' 완화책을 적어 두었다. 근본 해결(후보 소스에 community_builds UNION 또는 적재 이력을 kbp.jobs 밖으로)은 별건 설계
 
 **언제 필요해지나**: 캡 8 을 넘는 활성 workspace 가 상시 존재하거나 TTL 을 48h 미만으로 내릴 때
+
+**왜 무효화됐나** — 이 항목은 후보 자격이 `kbp.jobs` 의 insert 행에 있다는 전제였다.
+A1 은 후보를 **`kbp.graph_touch`** 에서 뽑는다(`repo.py:workspaces_needing_community`,
+`FROM kbp.graph_touch gt LEFT JOIN kbp.community_builds cb`). 그리고 GC 는
+`purge_expired` 가 **`kbp.jobs` 만** 지운다 — `graph_touch`·`community_builds`·`batch_runs`
+는 어디서도 삭제하지 않는다(2026-08-10 코드 확인). 그래서 "행이 사라져 후보에서 영구
+이탈" 이 **구조적으로 불가능**하다.
+
+`ORDER BY fail_streak ASC` 도 구현되지 않았다 — A1 은
+`ORDER BY COALESCE(last_attempt_at, to_timestamp(0)) ASC, touched_at ASC` 를 쓴다.
+"가장 오래전에 시도한 것 먼저" 라 `fail_streak` 없이 굶김을 막는다(A2 비범위 근거).
+
+**남는 것**: 캡(`MAX_PER_NIGHT`)보다 활성 workspace 가 많으면 그 밤에 못 도는 것은 여전하다.
+그건 이탈이 아니라 **지연**이고 `batch_runs.backlog` 에 기록된다 → 관측 후 캡 조정.
+
 
 ### D29. §2.2 in-flight NOT EXISTS 가 payload->>'workspace_id' 를 쓰는 것과 사실 3(오프로드 시 payload NULL)의 정합성
 
