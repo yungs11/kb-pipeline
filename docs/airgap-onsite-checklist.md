@@ -46,6 +46,32 @@ firewall-cmd --reload
 bash scripts/airgap/verify-bundle.sh --imports      # kb 번들 쪽에서 실행
 ```
 
+#### ★ 이 검사가 "fitz 없음" 이라고 하면, 먼저 **이미지를 로드했는지** 보라
+
+2026-08-10 현장에서 실제로 났다. 번들은 멀쩡했다 — 번들 안 이미지 tar 를 꺼내 로드해
+같은 명령을 돌리면 `OK` 다. 스토어의 `localhost/kb-api:airgap` 이 **이전 반입 때 남은
+옛 이미지**였고, 오늘 tar 는 아직 로드된 적이 없었다.
+
+왜 헷갈리나 — kb 의 `load-and-up.sh` 는 `.env` 검증(:88)에서 죽고 **`podman load` 는
+그보다 뒤(:116)** 다. `.env` 를 만들기 전에는 로드에 도달하지 못한다. 그런데 화면에는
+`✓ localhost/kb-api:airgap` 이 떠서 "이미지는 있는데 fitz 만 없다" 로 보인다.
+
+```bash
+podman load -i images/kb-images-amd64.tar.gz
+podman run --rm localhost/kb-api:airgap python -c 'import fitz, docx, openpyxl; print("OK")'
+```
+
+`OK` 가 나오면 `.env` 를 만들고 `load-and-up.sh` 를 돌린다.
+
+> **가드의 한계(미수정)** — `check_imports` 는 스토어에 있는 이미지를 검사할 뿐
+> **그게 이 번들에서 온 것인지 확인하지 않는다.** 옛 이미지가 남아 있으면 정상 번들을
+> 반입해놓고도 오진한다. (`docker save` 는 config 를 재작성하므로 manifest 의 config
+> digest 와 로컬 image ID 를 단순 비교하는 방법으로는 판정할 수 없다 — 로드해서 돌리거나
+> 이미지 생성시각을 봐야 한다.)
+>
+> `kbp` 파서 전용은 이 함정이 없다 — `parse-only-up.sh` 는 로드(:89)가 `.env` 검사(:92)보다
+> **먼저**다.
+
 ### ⚠️ 그래프 보기(webui) 주소 방식이 바뀌었다
 
 이전 프론트는 webui 주소를 `http://localhost:13000` 으로 **하드코딩**하고 있었다. 그 값은
@@ -190,8 +216,14 @@ curl -fsS http://localhost:8080/readyz             # kb api (스키마 마이그
 
 정직하게 남긴다. 된 것처럼 쓰지 않는다.
 
+> **2026-08-10 갱신 — 현장 기동 성공.** 이 번들로 실제 서버(RHEL + podman)에 올라갔다.
+> 아래 항목 중 **CNI 는 이제 "현장에서 통과함"** 으로 본다. 다만 어떤 값이 필요했고
+> 무엇이 걸렸는지는 §0 의 "fitz 없음 = 이미지 미로드" 항목을 참고한다.
+> **여전히 미검증**인 것은 온프렘 LLM/VL 실연동 품질과 대용량 동시 적재다.
+
 - **CNI 네트워크 백엔드** — 개발기 검증 환경은 `netavark` 였다. CNI 는 **한 번도 검증되지
   않았다.** `load-and-up.sh` 의 DNS 사전점검이 그걸 잡도록 만들어 뒀지만, 현장이 첫 실행이다.
+  → **2026-08-10 현장 기동 성공으로 이 가정은 해소됐다.**
 - **실제 온프렘 LLM·임베딩·리랭커·VL·파일변환 서버 연동** — 개발기에서는 목업이었다.
   주소·인증·응답 스키마가 사내 서버와 맞는지는 현장에서 확인해야 한다.
 - **이번 포트 변경의 폐쇄망 실측** — 포트 배치는 개발기(docker)에서만 왕복 검증했다

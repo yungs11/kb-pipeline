@@ -701,3 +701,65 @@ env 3종·compose 2종은 같은 위치에 서로 다른 키를 넣어 양쪽을
 가드 7경로를 실제로 돌려 확인했다. **D35(env 템플릿에 `KBP_COMMUNITY_*`/`TZ` 추가)는
 이 머지로 해소** — `scripts/parse-svc.env.example` 은 파서 전용 템플릿이라(facade 키 전무)
 제외가 맞다.
+
+---
+
+## 폐쇄망 현장 배포 성공 (2026-08-10)
+
+**결과** — 실제 서버(RHEL + podman, CNI)에 기동 성공. `airgap-onsite-checklist.md` §5 의
+"CNI 는 한 번도 검증되지 않았다" 가정은 이걸로 해소됐다. 여전히 미검증인 것은 온프렘
+LLM/VL **실연동 품질**과 대용량 동시 적재다(목업으로만 확인).
+
+### 반입 세트
+
+| 번들 | 크기 | `.env` |
+|---|---|---|
+| `kbp-parse-bundle-amd64.tar.gz` | 2.0GB | **채워서 동봉**(600, 실 비밀값) |
+| `kbp-airgap-bundle-amd64.tar.gz` | 2.9GB | 템플릿 |
+| `kb-airgap-bundle-amd64.tar.gz` | 0.5GB | 템플릿 |
+
+각각 `.sha256` 를 **쌍으로** 반입한다(빼먹으면 현장에서 `sha256sum -c` 불가).
+분할하지 않는다 — 2GB 를 넘어도 단일 파일이다(2026-08-10 방침).
+
+### 스크립트는 스택당 하나, 멱등
+
+```
+sha256sum -c → tar xzf → ① .env → ② verify-bundle --env .env [--parse-only] → ③ *-up.sh
+```
+
+`--env .env` 를 **반드시** 붙인다. 빼면 `verify-bundle.sh:263` 의 `*)` 로 떨어져 아직
+로드하지 않은 이미지까지 검사하고 무조건 실패한다 — 운영자는 진짜 env 문제인지 가드
+오작동인지 구분할 수 없다.
+
+### 현장에서 밟은 배포 차단 함정 3가지
+
+1. **"fitz 없음" 이 사실은 옛 이미지였다.** 번들은 멀쩡했다(번들 tar 를 꺼내 로드해 같은
+   명령 → `OK`). 스토어의 `localhost/kb-api:airgap` 이 이전 반입분이었고 오늘 tar 는 아직
+   로드된 적이 없었다. kb `load-and-up.sh` 는 `.env` 검증(:88)에서 죽고 `podman load` 는
+   그보다 뒤(:116)라 도달하지 못한다. → `podman load -i images/kb-images-amd64.tar.gz` 먼저.
+   **가드의 구멍(미수정)**: `check_imports` 는 스토어 이미지를 검사할 뿐 **번들 출처를
+   확인하지 않는다.** `docker save` 가 config 를 재작성하므로 manifest 의 config digest 와
+   로컬 image ID 단순 비교로는 판정 불가(postgres 로 교차확인) — 로드해서 돌리거나
+   이미지 생성시각을 봐야 한다. `parse-only-up.sh` 는 로드(:89)가 `.env` 검사(:92)보다
+   먼저라 이 함정이 없다.
+2. **채워진 `.env` 를 `cp` 로 덮으라던 안내.** `build-bundle.sh` 가 `PARSE_ONLY_ENV` 로 실
+   비밀값을 넣어놓고도 `cp .env.parse-only.example .env` 를 출력했다. 그대로 따르면 64키를
+   현장에서 다시 입력해야 한다. `ENV_EMBEDDED` 분기로 수정(`d05e755`).
+3. **비밀값 백업이 gitignore 를 빠져나갔다.** 규칙이 `bak-`(하이픈)만 막아
+   `scripts/parse-svc.env.bak.134521`(점)이 추적 대상으로 떴다. 점 형태 추가.
+   히스토리에 비밀값 env 가 커밋된 이력은 없음을 확인했다.
+
+### env 단일 출처 통합
+
+리포 루트 `.env` 를 단일 출처로 만들었다(38 → 58키). 게이트/트리아지 임계 16종 +
+`MODEL_NAME` + `VL_MAX_TOKENS` + OCR 게이트웨이 URL 이 `scripts/parse-svc.env` 에만 있어서
+**호스트 dev 는 정상인데 compose 로 띄우면 18개가 빈 값**이었고, `.env` 의
+`KBP_OPENAI_API_KEY` 가 빈 값이라 모달 LLM 이 `KeyError` 였다. 이제 `parse-svc.env` 는
+`scripts/sync-parse-svc-env.sh` 로 `.env` 에서 파생시킨다.
+
+실측: 런처 실효값 통합 전후 변화 **0건**, `.env` 단독으로 필수 5키 해소,
+dev/airgap compose config 양쪽 보간 성공.
+
+로더(`scripts/lib/load-dev-env.sh`)는 **CLI > `.env` > 레거시** 순이고 **빈 값을 "없음"
+으로 취급**한다 — 이게 없으면 템플릿에서 복사한 `.env` 의 `KEY=` 가 레거시 파일의 실 키를
+덮어써 기동이 죽는다(실측).
