@@ -104,6 +104,21 @@ bash scripts/airgap/deploy-both.sh
 | `FRONTEND_PORT` (kb) | `18080` | 웹앱 접속 포트 |
 | `CORS_ORIGINS` (kb) | `http://localhost:18080` | `FRONTEND_PORT` 와 같게 |
 
+## 3.0 OCR 주소는 **레인마다 하나** — 먼저 레인을 정한다
+
+"OCR 주소를 바꾼다" 는 env 가 하나가 아니다. **레인을 먼저 정하고 그 레인의 env 하나**를 바꾼다
+(`parse_service/parsers/pdf/gate.py:24`).
+
+| `KBP_GATE_OCR_LANE` | 바꿀 env | 무엇 |
+|---|---|---|
+| `paddle_gw` (기본) | **`KBP_PADDLE_OCR_GATEWAY_URL`** | 사내 OCR 게이트웨이(PaddleOCR-VL 프론트, 호스트 18081) |
+| `vl` | **`MODEL_API_URL`** | in-process VL(qwen) — 게이트웨이 없이 페이지를 직접 본다 |
+| `odl` | 없음 | OpenDataLoader 로컬 CLI(외부 주소 불필요) |
+
+`KBP_OCR_URL`(:18050)·`KBP_EXCEL_URL`(:18055)은 **죽은 env** 다 — Phase 2c/2e 에서 OCR·엑셀이
+parse-svc in-process 로 들어가 코드가 무시한다. 어디에 남아 있으면 무시하면 된다(2026-08-10
+런처에서 제거했다).
+
 ## 3.1 OCR 게이트웨이 주소가 **실제로 반영되는지** 확인하는 법
 
 `.env` 의 `KBP_PADDLE_OCR_GATEWAY_URL` 을 바꿨을 때 **응답 200 은 증거가 아니다** — 옛 주소가

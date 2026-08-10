@@ -103,8 +103,19 @@ if [ -f "$ENV_FILE" ]; then set -a; . "$ENV_FILE"; set +a; fi
 for _kv in $_CALLER_OVERRIDES; do export "$_kv"; done
 true
 : "${KBP_OPENAI_API_KEY:?missing — create scripts/parse-svc.env with KBP_OPENAI_API_KEY=...}"
-export KBP_OCR_URL="${KBP_OCR_URL:-http://localhost:18050}"
-export KBP_EXCEL_URL="${KBP_EXCEL_URL:-http://localhost:18055}"
+# ── OCR 주소 env — **레인마다 하나씩, 총 두 개다**(2026-08-10 정리) ─────────────
+#
+# 예전엔 OCR 주소처럼 보이는 env 가 넷이라 "어느 걸 바꿔야 하나" 가 안 보였다.
+# 죽은 둘(`KBP_OCR_URL` :18050 / `KBP_EXCEL_URL` :18055)을 여기서 **제거**한다 —
+# Phase 2c/2e 에서 OCR·엑셀이 parse-svc **in-process** 로 들어가 소비자가 무시하는데
+# 런처가 계속 export 해서 오해를 만들었다(`parse_service/app.py:460` "무시하는 dead 파라미터").
+#
+# 남은 둘은 **합칠 수 없다** — 레인이 다른 별개 서비스다(`parsers/pdf/gate.py:24`):
+#   KBP_GATE_OCR_LANE=vl        → MODEL_API_URL              (in-process VL, qwen)
+#   KBP_GATE_OCR_LANE=paddle_gw → KBP_PADDLE_OCR_GATEWAY_URL (외부 OCR 게이트웨이)
+#   KBP_GATE_OCR_LANE=odl       → 외부 주소 없음(OpenDataLoader 로컬 CLI)
+# 즉 "OCR 주소를 바꾼다" 는 **먼저 레인을 정한 뒤 그 레인의 env 하나**를 바꾸는 것이다.
+# 반영 확인: bash scripts/ocr-test/verify-ocr-gw-url.sh
 
 # ── excel-parser(:18055) 기동 — 레거시 provider=excel_parser 코호트용 ──────────
 start_excel_parser () {
