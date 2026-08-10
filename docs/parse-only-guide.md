@@ -48,11 +48,22 @@ cd /path/to/8.kb-pipeline
 ### 2-2. 대상 서버에서
 
 ```bash
+sha256sum -c kbp-parse-bundle-amd64.tar.gz.sha256      # 반입 매체 정합성
 mkdir kbp && tar xzf kbp-parse-bundle-amd64.tar.gz -C kbp && cd kbp
-cp .env.airgap.example .env
-vi .env
+
+# ★ 번들에 **채워진 `.env` 가 이미 들어 있으면** cp 로 덮어쓰지 마라.
+#   덮어쓰면 실 비밀값이 빈 템플릿으로 날아가 현장에서 전부 다시 입력해야 한다.
+test -f .env && vi .env || { cp .env.parse-only.example .env && vi .env; }
+
+bash scripts/airgap/verify-bundle.sh --parse-only      # 기동 전 env·이미지 가드
 ./scripts/airgap/parse-only-up.sh
 ```
+
+`.env` 가 이미 있는지 먼저 본다: 있으면 **현장값만** 고친다(가장 흔한 건
+`KBP_PADDLE_OCR_GATEWAY_URL`). 반영 확인은
+`bash scripts/ocr-test/verify-ocr-gw-url.sh --container` 로 한다 —
+컨테이너 env 는 **생성 시점에 고정**되므로 `.env` 를 고친 뒤에는 `restart` 가 아니라
+`parse-only-up.sh` 재실행(=`up -d` 재생성)이 필요하다.
 
 **docker·podman 둘 다 지원**한다(자동 탐지). 강제 지정은 `KBP_ENGINE=docker`.
 인터넷이 되는 환경이면 번들 tar 없이 이미 빌드/pull 된 이미지로도 기동한다.

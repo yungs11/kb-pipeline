@@ -90,6 +90,24 @@ bash scripts/airgap/load-and-up.sh
 bash scripts/airgap/deploy-both.sh
 ```
 
+### 2.1 파서 전용 번들(`kbp-parse-bundle-*.tar.gz`)은 ② 가 다르다
+
+```bash
+sha256sum -c kbp-parse-bundle-amd64.tar.gz.sha256
+mkdir kbp && tar xzf kbp-parse-bundle-amd64.tar.gz -C kbp && cd kbp
+
+# ★ 이 번들에는 **채워진 `.env` 가 이미 들어 있다**(권한 600, 실 비밀값).
+#    `cp .env.parse-only.example .env` 로 덮어쓰면 값이 전부 날아간다.
+test -f .env && vi .env || { cp .env.parse-only.example .env && vi .env; }
+
+bash scripts/airgap/verify-bundle.sh --parse-only
+bash scripts/airgap/parse-only-up.sh
+```
+
+현장에서 실제로 고칠 값은 보통 **`KBP_PADDLE_OCR_GATEWAY_URL` 하나**다. 고친 뒤에는
+`restart` 가 아니라 `parse-only-up.sh` 를 다시 돌린다(컨테이너 env 는 생성 시점에 고정).
+반영 확인: `bash scripts/ocr-test/verify-ocr-gw-url.sh --container`.
+
 ## 3. `.env` 에서 이번에 새로 봐야 하는 키
 
 | 키 | 기본값 | 의미 |

@@ -42,9 +42,15 @@ docker-compose.override.yml
 !.env.*.example
 
 # secret-bearing env backups (never commit)
+# ★ 구분자가 두 종류다 — 하이픈(`bak-`)만 막아뒀더니 sync-parse-svc-env.sh 가 쓰는
+#   점 형태(`.env.bak.134521`)가 그대로 추적 대상으로 떴다(실측 2026-08-10).
+#   루트 `.env.bak.*` 는 위 `.env.*` 에 걸려 우연히 막혔지만 `scripts/` 아래는 뚫렸다.
 scripts/*.env.bak-*
+scripts/*.env.bak.*
 *.env.bak-*
+*.env.bak.*
 .env.bak-*
+.env.bak.*
 
 # 폐쇄망 번들 산출물 — 7GB+ 이미지 tar 와 분할 파트. 재생성 가능(scripts/airgap/build-bundle.sh).
 dist/

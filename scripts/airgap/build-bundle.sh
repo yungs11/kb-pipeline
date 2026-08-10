@@ -162,8 +162,10 @@ cp docs/airgap-deploy.md                "$BUNDLE/docs/" 2>/dev/null || true
 cp docs/airgap-onsite-checklist.md      "$BUNDLE/docs/" 2>/dev/null || true
 # --parse-only: 채워진 `.env` 를 함께 넣을 수 있다(PARSE_ONLY_ENV=<경로>).
 # ⚠️ 그 번들은 **실 비밀값을 담는다** — 매체 취급에 주의. 지정하지 않으면 템플릿만 들어간다.
+ENV_EMBEDDED=0
 if [ "$PARSE_ONLY" -eq 1 ] && [ -n "${PARSE_ONLY_ENV:-}" ] && [ -f "$PARSE_ONLY_ENV" ]; then
   install -m 600 "$PARSE_ONLY_ENV" "$BUNDLE/.env"
+  ENV_EMBEDDED=1
   log "채워진 .env 를 번들에 포함(600) — 비밀값 매체로 취급할 것"
 fi
 cp docs/architecture-ports.md           "$BUNDLE/docs/" 2>/dev/null || true
@@ -181,7 +183,13 @@ if [ "$PARSE_ONLY" -eq 1 ]; then
 fi
 chmod +x "$BUNDLE"/scripts/airgap/*.sh
 
-if [ "$PARSE_ONLY" -eq 1 ]; then
+if [ "$PARSE_ONLY" -eq 1 ] && [ "$ENV_EMBEDDED" -eq 1 ]; then
+  # ★ 채워진 `.env` 가 이미 들어 있다. 여기서 `cp .env.parse-only.example .env` 를 안내하면
+  #   **채워진 값을 빈 템플릿으로 덮어써서** 현장에서 전부 다시 입력하게 된다(실측 함정).
+  #   덮어쓰지 말고 현장값(OCR 게이트웨이 주소 등)만 고치라고 안내한다.
+  NEXT_ENV='vi .env   # ★ 채워진 .env 가 이미 들어 있다. cp 로 덮어쓰지 마라. 현장값만 수정'
+  NEXT_UP='./scripts/airgap/parse-only-up.sh'
+elif [ "$PARSE_ONLY" -eq 1 ]; then
   NEXT_ENV='cp .env.parse-only.example .env && vi .env   # 파서 전용 키만 (docs/parse-only-guide.md)'
   NEXT_UP='./scripts/airgap/parse-only-up.sh'
 else
