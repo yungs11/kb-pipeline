@@ -50,12 +50,46 @@ val() {
     | sed 's/[[:space:]]*#.*$//' | tr -d '[:space:]'
 }
 
+# 파서 전용 배포에서 **필요 없는** 필수키 — 그 서비스를 아예 띄우지 않는다.
+# (실측 판정: compose 에서 edgequake/adaptive_chunk 만 쓰는 키들. parse-only 가 띄우는 건
+#  postgres·minio·parse-svc·facade·facade-worker 다섯이다.)
+# ★ 이걸 안 걸러내면 운영자가 빨간 줄 9개를 보고 **가드를 무시하게 된다** — 그게 더 위험하다.
+PARSE_ONLY_SKIP=(
+  OPENROUTER_API_KEY
+  LITELLM_EMBEDDING_BASE_URL LITELLM_EMBEDDING_API_KEY
+  ADAPTIVE_CHUNK_OPENROUTER_API_KEY ADAPTIVE_CHUNK_OPENROUTER_BASE_URL
+  ADAPTIVE_CHUNK_SCORING_EMBEDDING_BASE_URL ADAPTIVE_CHUNK_SCORING_EMBEDDING_API_KEY
+  ADAPTIVE_CHUNK_RERANK_BASE_URL ADAPTIVE_CHUNK_RERANK_API_KEY
+  EDGEQUAKE_RERANK_BASE_URL EDGEQUAKE_RERANK_API_KEY
+)
+
 check_env() {
   local envf="${1:-$REPO_ROOT/.env}"
   echo "== .env 검사: $envf =="
   [ -f "$envf" ] || { echo "${RED}✗ 파일 없음${RST}"; return 1; }
   local miss=0 inet=0
-  for k in "${REQUIRED_ENV[@]}"; do
+  # ★ compose 가 `${VAR:?}` 로 **강제**하는 변수를 자동으로 필수 목록에 더한다(2026-08-10).
+  #   손으로 관리하는 REQUIRED_ENV 와 compose 가 어긋나면 **가드는 통과하고 배포가 죽는다** —
+  #   실측: `MODEL_NAME` 이 compose 에서 `:?` 인데 가드에 없어서
+  #   "✓ 필수키 모두 채워짐" 뒤에 `required variable MODEL_NAME is missing a value` 로 실패했다.
+  #   compose 에서 파생하면 다시 어긋날 수 없다.
+  local COMPOSE_YML="$REPO_ROOT/docker-compose.airgap.yml"
+  local REQ_FROM_COMPOSE=()
+  if [ -f "$COMPOSE_YML" ]; then
+    while IFS= read -r v; do [ -n "$v" ] && REQ_FROM_COMPOSE+=("$v"); done < <(
+      grep -oE '\$\{[A-Z_][A-Z0-9_]*:\?' "$COMPOSE_YML" | sed 's/\${//;s/:?//' | sort -u)
+    [ "${#REQ_FROM_COMPOSE[@]}" -gt 0 ] && \
+      echo "  (compose 가 강제하는 변수 ${#REQ_FROM_COMPOSE[@]}개를 필수에 포함: ${REQ_FROM_COMPOSE[*]})"
+  fi
+
+  # --parse-only 면 그 배포에 없는 서비스의 키를 건너뛴다(위 PARSE_ONLY_SKIP).
+  local skip
+  for k in "${REQUIRED_ENV[@]}" ${REQ_FROM_COMPOSE[@]+"${REQ_FROM_COMPOSE[@]}"}; do
+    if [ "${PROFILE:-full}" = "parse-only" ]; then
+      skip=0
+      for _s in "${PARSE_ONLY_SKIP[@]}"; do [ "$k" = "$_s" ] && { skip=1; break; }; done
+      [ "$skip" = "1" ] && continue
+    fi
     # 값 추출: '=' 뒤 → 인라인 주석(` #...`) 제거 → 공백 제거
     local v; v="$(grep -E "^${k}=" "$envf" | head -1 | cut -d= -f2- | sed 's/[[:space:]]*#.*$//' | tr -d '[:space:]')"
     if [ -z "$v" ]; then echo "  ${RED}✗ 비어있음: $k${RST}"; miss=1; fi
@@ -215,6 +249,12 @@ print("OK chunks=%d gate_ok=%s" % (n, (gs or {}).get("ok")))
   # 사전 방어선이다. docx/hwp/ppt/html 파싱은 그 서비스가 실제로 응답해야 성공한다
   # (A6 — 구 kordoc docx 폴백은 제거됨, 지금은 이 경로가 유일하다).
 }
+
+# --parse-only 를 어디에 붙여도 받는다(순서 무관):  --env .env --parse-only  /  --parse-only --env .env
+PROFILE=full
+for _a in "$@"; do [ "$_a" = "--parse-only" ] && PROFILE=parse-only; done
+set -- $(printf '%s\n' "$@" | grep -v '^--parse-only$' || true)
+[ "$PROFILE" = "parse-only" ] && echo "프로필: parse-only (edgequake/adaptive_chunk 전용 키 ${#PARSE_ONLY_SKIP[@]}개 건너뜀)"
 
 case "${1:-}" in
   --env)     check_env "${2:-}"    || rc=1 ;;

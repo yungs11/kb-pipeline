@@ -160,6 +160,12 @@ cp scripts/airgap/parse-only-up.sh      "$BUNDLE/scripts/airgap/"
 cp docs/airgap-deploy.md                "$BUNDLE/docs/" 2>/dev/null || true
 # 현장 체크리스트 — 이번 번들이 이전과 달라진 점(포트·fitz·CNI)과 미검증 항목.
 cp docs/airgap-onsite-checklist.md      "$BUNDLE/docs/" 2>/dev/null || true
+# --parse-only: 채워진 `.env` 를 함께 넣을 수 있다(PARSE_ONLY_ENV=<경로>).
+# ⚠️ 그 번들은 **실 비밀값을 담는다** — 매체 취급에 주의. 지정하지 않으면 템플릿만 들어간다.
+if [ "$PARSE_ONLY" -eq 1 ] && [ -n "${PARSE_ONLY_ENV:-}" ] && [ -f "$PARSE_ONLY_ENV" ]; then
+  install -m 600 "$PARSE_ONLY_ENV" "$BUNDLE/.env"
+  log "채워진 .env 를 번들에 포함(600) — 비밀값 매체로 취급할 것"
+fi
 cp docs/architecture-ports.md           "$BUNDLE/docs/" 2>/dev/null || true
 # OCR 게이트웨이 주소 반영을 현장에서 검증하는 도구(목업 + 컨테이너 실효 env 확인).
 mkdir -p "$BUNDLE/scripts/ocr-test"
