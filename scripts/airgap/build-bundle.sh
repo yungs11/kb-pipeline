@@ -161,6 +161,10 @@ cp docs/airgap-deploy.md                "$BUNDLE/docs/" 2>/dev/null || true
 # 현장 체크리스트 — 이번 번들이 이전과 달라진 점(포트·fitz·CNI)과 미검증 항목.
 cp docs/airgap-onsite-checklist.md      "$BUNDLE/docs/" 2>/dev/null || true
 cp docs/architecture-ports.md           "$BUNDLE/docs/" 2>/dev/null || true
+# OCR 게이트웨이 주소 반영을 현장에서 검증하는 도구(목업 + 컨테이너 실효 env 확인).
+mkdir -p "$BUNDLE/scripts/ocr-test"
+cp scripts/ocr-test/verify-ocr-gw-url.sh  "$BUNDLE/scripts/ocr-test/" 2>/dev/null || true
+cp scripts/ocr-test/mock_ocr_gateway.py   "$BUNDLE/scripts/ocr-test/" 2>/dev/null || true
 # --parse-only 번들은 전체 스택 문서/템플릿만 들어 있으면 받는 쪽이 쓰지도 않는 키
 # (edgequake·adaptive_chunk·임베딩·리랭커)를 채우려다 헤맨다. 파서 전용 세트를 같이 넣는다.
 if [ "$PARSE_ONLY" -eq 1 ]; then

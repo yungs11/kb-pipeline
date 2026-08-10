@@ -104,6 +104,39 @@ bash scripts/airgap/deploy-both.sh
 | `FRONTEND_PORT` (kb) | `18080` | 웹앱 접속 포트 |
 | `CORS_ORIGINS` (kb) | `http://localhost:18080` | `FRONTEND_PORT` 와 같게 |
 
+## 3.1 OCR 게이트웨이 주소가 **실제로 반영되는지** 확인하는 법
+
+`.env` 의 `KBP_PADDLE_OCR_GATEWAY_URL` 을 바꿨을 때 **응답 200 은 증거가 아니다** — 옛 주소가
+아직 살아 있으면 그쪽으로 가고도 성공한다. 요청이 **그 호스트에 도착하는 것**만이 증거다.
+
+```bash
+bash scripts/ocr-test/verify-ocr-gw-url.sh --container
+```
+→ parse-svc 컨테이너의 **실효 env** 를 출력하고, 그 주소로 계약(`POST <base>/tasks`)을
+직접 찔러 도달성을 본다. **HTTP 코드가 돌아오면 도달한다**(4xx 도 도달이다). 연결 실패면
+주소·방화벽·컨테이너 DNS 를 본다(CNI 면 `podman-plugins`).
+
+### ⚠️ 컨테이너 env 는 생성 시점에 고정된다
+
+`.env` 를 고친 뒤 **`podman-compose ... up -d`(재생성)** 를 해야 새 값이 프로세스에 들어간다.
+`restart` 만으로는 **옛 값이 그대로 남는다.** 코드는 요청마다 `os.environ` 을 읽으므로
+(`parse_service/parsers/pdf/paddle_gw.py:90`) 프로세스 캐시 문제는 없다 — 컨테이너만 새로
+만들면 즉시 반영된다.
+
+### 게이트웨이 응답 계약 (틀리면 무한 폴링)
+
+파서는 3단 계약을 쓴다. **status 문자열이 정확히 `completed`/`failed` 여야 한다** —
+다른 값(예 `success`)을 돌려주면 폴링이 끝나지 않고 파싱이 시한까지 매달린다(실측으로 밟았다).
+
+| 단계 | 요청 | 기대 응답 |
+|---|---|---|
+| submit | `POST {base}/tasks` (multipart 이미지) | `{"task_id": "..."}` |
+| poll | `GET {base}/tasks/{id}` | `{"status": "completed"}` (또는 `pending`/`failed`) |
+| result | `GET {base}/tasks/{id}/result` | `{"status": "ok", "text": "..."}` |
+
+`{base}` 는 env 값 **그대로**다 — `/ocr/paddleocr_vl` 같은 경로 접두어까지 포함해서 쓰인다.
+엔진 이름을 잘못 적으면 submit 이 404 로 실패한다.
+
 ## 4. 기동 후 한 바퀴 (여기까지 봐야 "됐다")
 
 ```bash
@@ -139,6 +172,8 @@ curl -fsS http://localhost:8080/readyz             # kb api (스키마 마이그
 | 컨테이너가 서로 못 찾음 | CNI 인데 `podman-plugins`(dnsname) 미설치 → §1 |
 | 검색이 전부 502 | `EDGEQUAKE_BASE_URL` 이 `https://` 이거나 미설정(코드 기본값이 컨테이너 자신을 부른다) |
 | 스캔 PDF 파싱이 "성공" 인데 내용이 부실 | `KBP_GATE_OCR_LANE=paddle_gw` 인데 게이트웨이 주소가 비어 조용히 폴백 |
+| OCR 주소를 바꿨는데 안 먹음 | 컨테이너를 **재생성**하지 않았다(`restart` 로는 옛 env 가 남는다) → §3.1 |
+| 스캔 PDF 파싱이 시한까지 매달림 | 게이트웨이 poll 응답 `status` 가 `completed` 가 아니다(예 `success`) → §3.1 계약표 |
 | 페이지 수가 이상 / 신호 수집이 부실 | `fitz` 누락 → `verify-bundle.sh --imports` |
 | "그래프 보기" 가 안 열림 | 3002 방화벽 미개방 (프론트가 `<서버IP>:3002` 를 직접 연다) |
 | 커뮤니티 리포트가 안 생김 | 야간 배치는 **밤 1회**(기본 03:00 KST)다. 즉시 필요하면 `POST /communities/build` |

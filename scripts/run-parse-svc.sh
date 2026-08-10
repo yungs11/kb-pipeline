@@ -89,7 +89,19 @@ mkdir -p "$KORDOC_MD_OUT"
 
 # 2) env + secrets (gitignored). set -a auto-exports every KEY=value.
 ENV_FILE="$ROOT/scripts/parse-svc.env"
+# ★ 호출자가 준 값이 parse-svc.env 보다 **우선**한다(dotenv 관례).
+#   `set -a; . "$ENV_FILE"` 만 하면 파일 값이 CLI 값을 덮어써서
+#   `KBP_PADDLE_OCR_GATEWAY_URL=... bash scripts/run-parse-svc.sh` 가 **조용히 무시**된다.
+#   실측 2026-08-10: OCR 게이트웨이 주소 변경 검증이 이 때문에 옛 주소로 갔다
+#   (run-facade.sh 에서 이미 같은 버그를 고쳤다 — 두 런처가 같은 함정을 갖고 있었다).
+_CALLER_OVERRIDES=""
+for _k in KBP_PADDLE_OCR_GATEWAY_URL KBP_GATE_OCR_LANE KORDOC_BIN KORDOC_MD_OUT EXCEL_PARSER_BACKEND MODEL_API_URL MODEL_NAME; do
+  eval "_v=\${$_k:-}"
+  [ -n "$_v" ] && _CALLER_OVERRIDES="$_CALLER_OVERRIDES $_k=$_v"
+done
 if [ -f "$ENV_FILE" ]; then set -a; . "$ENV_FILE"; set +a; fi
+for _kv in $_CALLER_OVERRIDES; do export "$_kv"; done
+true
 : "${KBP_OPENAI_API_KEY:?missing — create scripts/parse-svc.env with KBP_OPENAI_API_KEY=...}"
 export KBP_OCR_URL="${KBP_OCR_URL:-http://localhost:18050}"
 export KBP_EXCEL_URL="${KBP_EXCEL_URL:-http://localhost:18055}"
