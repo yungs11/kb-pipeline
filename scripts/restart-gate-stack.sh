@@ -4,6 +4,8 @@
 #
 #   doc_guard(:8000, /v1/check-excel) ─┐
 #   excel-parser(:18055, gate_summary)─┴─▶ kb-backend(:8088, parse_preview 게이트 호출)
+# ※ excel-parser 런처는 run-parse-svc.sh 로 통합됐다(--excel-only). kordoc env 를 두 곳에서
+#   각자 관리하다 어긋나 호스트 dev 엑셀 파싱이 죽은 사고가 있었다(2026-08-10).
 #
 # 코드 변경(3레포 어디든) 후 게이트가 옛 코드로 남는 사고를 막는다. 각 서비스는 포트
 # 기준 종료 + 새 코드 응답 검증까지 한다(run-*.sh).
@@ -20,7 +22,7 @@ run() {  # name script
 
 FAIL=0
 run "doc_guard (:8000)"     run-doc-guard.sh
-run "excel-parser (:18055)" run-excel-parser.sh
+run "excel-parser (:18055)" run-parse-svc.sh --excel-only   # 2026-08-10: run-parse-svc 로 통합
 run "kb-backend (:8088)"    run-kb-backend.sh
 
 echo "── 요약 ──"

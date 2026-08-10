@@ -168,6 +168,48 @@ check_imports() {
     echo "$out" | sed 's/^/    /'
     return 1
   fi
+  # ★ 바이너리 존재만으로는 부족하다(2026-08-10). kordoc 백엔드는 **env 3종**에도 의존한다 —
+  #   KORDOC_BIN / KORDOC_MD_OUT / EXCEL_PARSER_BACKEND. 실제로 호스트 dev 에서 그 env 가
+  #   빠져 "'*.md' 를 찾을 수 없습니다" 로 엑셀 파싱이 죽었다(컨테이너는 Dockerfile ENV 로
+  #   살아 있었다). 이미지 쪽도 언젠가 같은 식으로 어긋날 수 있으므로 **실제 xlsx 를 한 번
+  #   파싱**해 왕복을 확인한다 — fitz 때와 같은 부류(있는데 안 돌려서 놓친 것)를 막는다.
+  echo "== 엑셀 파싱 왕복 스모크(kordoc 백엔드 + env) =="
+  local XLS_PY='
+import os, sys, io
+need = ["KORDOC_BIN", "KORDOC_MD_OUT", "EXCEL_PARSER_BACKEND"]
+missing = [k for k in need if not os.environ.get(k)]
+if missing:
+    print("ENV_MISSING:" + ",".join(missing)); sys.exit(1)
+md = os.environ["KORDOC_MD_OUT"]
+if not os.path.isdir(md):
+    print("MD_OUT_MISSING:" + md); sys.exit(1)
+from openpyxl import Workbook
+wb = Workbook(); ws = wb.active; ws.title = "smoke"
+ws.append(["a", "b"]); ws.append(["1", "2"])
+buf = io.BytesIO(); wb.save(buf)
+from parse_service.parsers.excel import parse as xparse
+r = xparse(buf.getvalue(), "smoke.xlsx")
+n = len(getattr(r, "chunks", None) or [])
+gs = getattr(r, "gate_summary", None)
+if n < 1 or gs is None:
+    print("PARSE_EMPTY: chunks=%d gate_summary=%r" % (n, gs)); sys.exit(1)
+print("OK chunks=%d gate_ok=%s" % (n, (gs or {}).get("ok")))
+'
+  local xout
+  if [ -n "$TIMEOUT_BIN" ]; then
+    xout="$("$TIMEOUT_BIN" "${IMPORTS_CHECK_TIMEOUT:-120}" "$ENGINE" run --rm -w /app -e PYTHONPATH=/app \
+      --entrypoint python "$ref" -c "$XLS_PY" 2>&1)"
+  else
+    xout="$("$ENGINE" run --rm -w /app -e PYTHONPATH=/app --entrypoint python "$ref" -c "$XLS_PY" 2>&1)"
+  fi
+  case "$xout" in
+    *OK\ chunks=*) echo "  ${GRN}✓ 엑셀 왕복 성공 — ${xout##*OK }${RST}" ;;
+    *ENV_MISSING:*) echo "  ${RED}✗ 이미지에 kordoc env 가 없다: ${xout#*ENV_MISSING:}${RST}"
+                    echo "    ${RED}  → Dockerfile.parse-svc 의 ENV KORDOC_BIN/KORDOC_MD_OUT/EXCEL_PARSER_BACKEND 확인${RST}"; return 1 ;;
+    *MD_OUT_MISSING:*) echo "  ${RED}✗ KORDOC_MD_OUT 디렉터리 부재: ${xout#*MD_OUT_MISSING:}${RST}"; return 1 ;;
+    *) echo "  ${RED}✗ 엑셀 파싱 왕복 실패 — 이미지가 healthy 로 떠도 xlsx 적재가 깨진다:${RST}"
+       echo "$xout" | tail -6 | sed 's/^/    /'; return 1 ;;
+  esac
   # ⚠️ 파일변환(한컴) API 는 이미지 안 도구가 아니라 온프렘 HTTP 엔드포인트라 여기서
   # 도달성을 못 확인한다 — check_env() 의 KBP_FILECONVERT_URL 값 존재 확인이 유일한
   # 사전 방어선이다. docx/hwp/ppt/html 파싱은 그 서비스가 실제로 응답해야 성공한다

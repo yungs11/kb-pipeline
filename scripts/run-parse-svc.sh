@@ -17,9 +17,35 @@
 #      up` facade/parse-svc for dev; use run-facade.sh / run-parse-svc.sh (or rebuild the
 #      image with `docker compose build parse-svc facade` if you truly want containers).
 #
+# ─────────────────────────────────────────────────────────────────────────────
+# 통합 런처 (2026-08-10) — parse-svc 와 레거시 excel-parser 를 한 스크립트가 관리한다.
+#
+#   bash scripts/run-parse-svc.sh                # parse-svc(:19001) 만 — 기본
+#   bash scripts/run-parse-svc.sh --with-excel   # + excel-parser(:18055)
+#   bash scripts/run-parse-svc.sh --excel-only   # excel-parser(:18055) 만
+#
+# 왜 합쳤나 — Phase 2e 에서 엑셀 파싱이 parse-svc **in-process** 로 흡수됐는데
+# kordoc env(KORDOC_BIN/KORDOC_MD_OUT/EXCEL_PARSER_BACKEND)는 `run-excel-parser.sh`
+# 에만 남아 있었다. 그래서 컨테이너에서는 되고 호스트 dev 에서만 엑셀 파싱이
+# `'*.md' 를 찾을 수 없습니다` 로 죽었다. 두 스크립트가 같은 env 를 각자 관리하면
+# 또 어긋난다 — 한 곳에서 세팅한다.
+#
+# ⚠️ excel-parser(:18055)를 **지우지 않은 이유**: kb 의 `provider=excel_parser` 코호트가
+#    아직 그 서비스를 부른다(`config.py:224 excel_parser_base_url`,
+#    `dependencies.py:97 ExcelParserClient`). kb_pipeline 경로의 게이트는 parse-svc 의
+#    gate_summary 가 소스지만(`:18055 폐기 후 파서 게이트 소스`), 그 코호트는 살아 있다.
+# ─────────────────────────────────────────────────────────────────────────────
 # Usage:  bash scripts/run-parse-svc.sh         # kills any running parse-svc, relaunches
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+RUN_PARSE=1; RUN_EXCEL=0
+case "${1:-}" in
+  --with-excel) RUN_EXCEL=1 ;;
+  --excel-only) RUN_EXCEL=1; RUN_PARSE=0 ;;
+  "") ;;
+  *) echo "usage: $0 [--with-excel|--excel-only]" >&2; exit 2 ;;
+esac
 cd "$ROOT"
 
 # 0) Guard against the docker-shadow gotcha (#3): stop any compose parse-svc container.
@@ -39,12 +65,71 @@ if ! command -v java >/dev/null 2>&1 || ! java -version >/dev/null 2>&1; then
   exit 1
 fi
 
+# 1-b) kordoc CLI(node) → PATH + KORDOC_* env.
+#
+# ★ Phase 2e 에서 excel-parser 서비스를 parse-svc 안으로 흡수했는데(파서 일원화) **이 env 가
+#   따라오지 않았다.** `Dockerfile.parse-svc:10` 은 `ENV KORDOC_BIN=kordoc
+#   KORDOC_MD_OUT=/tmp/kordoc_md_out EXCEL_PARSER_BACKEND=auto` 를 갖는데 호스트 런처엔
+#   없어서, 컨테이너에서는 되고 **호스트 dev 에서만** 엑셀 파싱이 죽었다:
+#     parse_failed: excel parse failed for X.xlsx: kordoc backend:
+#     'excel_parser_7_xxxx.md' 를 찾을 수 없습니다.
+#   기본 backend=auto 가 비-전결 xlsx 를 kordoc 으로 보내는데 CLI 도, 자동생성 경로도
+#   없으면 이 에러가 난다. `run-excel-parser.sh` 에는 있던 처리를 여기로 옮긴다.
+KORDOC_PATH="$(command -v kordoc 2>/dev/null || ls "$HOME"/.nvm/versions/node/*/bin/kordoc 2>/dev/null | head -1 || true)"
+if [ -n "$KORDOC_PATH" ]; then
+  export PATH="$(dirname "$KORDOC_PATH"):$PATH"
+  export KORDOC_BIN="${KORDOC_BIN:-kordoc}"
+else
+  echo "WARN: kordoc CLI 미발견 — 비-전결 xlsx 파싱이 \"*.md 를 찾을 수 없습니다\" 로 실패한다." >&2
+  echo "      npm i -g kordoc  또는 KORDOC_BIN 을 수동 지정할 것." >&2
+fi
+export KORDOC_MD_OUT="${KORDOC_MD_OUT:-/tmp/kordoc_md_out}"
+export EXCEL_PARSER_BACKEND="${EXCEL_PARSER_BACKEND:-auto}"
+mkdir -p "$KORDOC_MD_OUT"
+
 # 2) env + secrets (gitignored). set -a auto-exports every KEY=value.
 ENV_FILE="$ROOT/scripts/parse-svc.env"
 if [ -f "$ENV_FILE" ]; then set -a; . "$ENV_FILE"; set +a; fi
 : "${KBP_OPENAI_API_KEY:?missing — create scripts/parse-svc.env with KBP_OPENAI_API_KEY=...}"
 export KBP_OCR_URL="${KBP_OCR_URL:-http://localhost:18050}"
 export KBP_EXCEL_URL="${KBP_EXCEL_URL:-http://localhost:18055}"
+
+# ── excel-parser(:18055) 기동 — 레거시 provider=excel_parser 코호트용 ──────────
+start_excel_parser () {
+  local EP_DIR="${EXCEL_PARSER_DIR:-/Users/xxx/workspace/7.excel-parser}"
+  local PORT=18055
+  [ -d "$EP_DIR" ] || { echo "ERROR: $EP_DIR 없음 (EXCEL_PARSER_DIR 로 지정)" >&2; return 1; }
+  [ -x "$EP_DIR/.venv/bin/python" ] || { echo "ERROR: $EP_DIR/.venv/bin/python 없음" >&2; return 1; }
+  # ⚠️ 포트 기준 종료. `service.main:app` 은 adaptive_chunk(:18060)도 쓰므로 모듈 패턴 kill 은
+  #    그쪽까지 죽인다(광역 kill 금지).
+  kill $(lsof -nP -iTCP:$PORT -sTCP:LISTEN -t 2>/dev/null) 2>/dev/null || true
+  for _ in $(seq 1 20); do lsof -nP -iTCP:$PORT -sTCP:LISTEN >/dev/null 2>&1 || break; sleep 0.5; done
+  lsof -nP -iTCP:$PORT -sTCP:LISTEN >/dev/null 2>&1 && { kill -9 $(lsof -nP -iTCP:$PORT -sTCP:LISTEN -t 2>/dev/null) 2>/dev/null || true; sleep 1; }
+  local EPLOG="${EXCEL_PARSER_LOG:-/tmp/excel_parser.log}"
+  ( cd "$EP_DIR" && nohup .venv/bin/python -m uvicorn service.main:app \
+      --host 127.0.0.1 --port $PORT > "$EPLOG" 2>&1 & )
+  echo "excel-parser launched on :$PORT — log: $EPLOG (KORDOC_BIN=${KORDOC_BIN:-unset}, backend=$EXCEL_PARSER_BACKEND)"
+  for _ in $(seq 1 20); do curl -s -m 3 "http://localhost:$PORT/healthz" >/dev/null 2>&1 && break; sleep 1; done
+  # 헬스만으론 옛 코드/kordoc 깨짐을 구분 못 한다 — /parse 가 gate_summary 를 내는지 본다.
+  local SMOKE="${EXCEL_PARSER_SMOKE_FILE:-$EP_DIR/test_doc_excel/신한자산신탁_외부테이터_필요사이트 정리.xlsx}"
+  if [ -f "$SMOKE" ]; then
+    local ok; ok="$(curl -s -m 120 -F "file=@$SMOKE" "http://localhost:$PORT/parse" 2>/dev/null \
+      | python3 -c "import sys,json
+try:
+    d=json.load(sys.stdin)
+    print('ERR:'+d['detail'][:80] if 'detail' in d else ('gate_summary='+('ok='+str((d.get('stats') or {}).get('gate_summary',{}).get('ok')) if (d.get('stats') or {}).get('gate_summary') is not None else 'MISSING(옛코드?)')))
+except Exception as e: print('FAIL:'+str(e)[:80])" 2>/dev/null || true)"
+    echo "excel-parser /parse: $ok"
+    case "$ok" in *MISSING*|ERR:*|FAIL:*) echo "WARN: /parse 검증 실패 — $EPLOG 확인" >&2; return 1;; esac
+  else
+    echo "excel-parser: healthz OK (smoke 파일 없음 — /parse 미검증)"
+  fi
+  return 0
+}
+
+if [ "$RUN_PARSE" = "0" ]; then
+  start_excel_parser; exit $?
+fi
 
 # 3) restart (no --reload by design; relaunch to pick up code changes).
 #    Wait for the old process to release :19001 — a bare `sleep 1` races the port
@@ -61,14 +146,18 @@ fi
 LOG="${PARSE_SVC_LOG:-/tmp/parse_svc.log}"
 nohup "$ROOT/.venv-kb/bin/python" -m uvicorn parse_service.app:app \
   --host 127.0.0.1 --port 19001 > "$LOG" 2>&1 &
+echo "parse-svc: KORDOC_BIN=${KORDOC_BIN:-unset} backend=$EXCEL_PARSER_BACKEND md_out=$KORDOC_MD_OUT"
 echo "parse-svc launched (pid $!) on :19001 — log: $LOG"
 echo "java: $(command -v java)"
 
 # 4) health check.
+RC=1
 for i in $(seq 1 10); do
   r="$(curl -s -m 3 http://localhost:19001/healthz 2>/dev/null || true)"
-  if [ -n "$r" ]; then echo "healthz: $r"; exit 0; fi
+  if [ -n "$r" ]; then echo "healthz: $r"; RC=0; break; fi
   sleep 1
 done
-echo "WARN: healthz not ready after 10s — check $LOG" >&2
-exit 1
+[ "$RC" = "0" ] || { echo "WARN: healthz not ready after 10s — check $LOG" >&2; exit 1; }
+
+[ "$RUN_EXCEL" = "1" ] && { start_excel_parser || exit 1; }
+exit 0

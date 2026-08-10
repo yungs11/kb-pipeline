@@ -88,12 +88,12 @@ compose 를 쓰지 않거나, 특정 서비스를 호스트에서 직접 띄울 
 
 | Service | Port | Script | Gotcha it handles |
 |---|---|---|---|
-| parse-svc | 19001 | `scripts/run-parse-svc.sh` | needs **openjdk@17** on PATH (OpenDataLoader) + `KBP_OPENAI_API_KEY` (modal LLM) |
+| parse-svc | 19001 | `scripts/run-parse-svc.sh` | needs **openjdk@17** on PATH (OpenDataLoader) + `KBP_OPENAI_API_KEY` (modal LLM) + **kordoc env**(KORDOC_BIN/KORDOC_MD_OUT/EXCEL_PARSER_BACKEND — Phase 2e 로 엑셀 파싱이 in-process 다) |
 | facade | 3000 | `scripts/run-facade.sh` | reads `os.environ` directly (no dotenv) → needs `KBP_*` **and `MINIO_*`** from `scripts/facade.env` |
 | facade-worker | — (no port) | `scripts/run-facade-worker.sh` | 잡 큐 소비자. 다운스트림 호출은 **오직 여기 슬롯 안에서만** 일어난다. 살아있는지는 `GET /jobs/workers` 의 `online` 으로 확인 |
 | kb-backend + batch worker | 8088 + DB heartbeat | `scripts/run-kb-backend.sh` | runs Alembic first, restarts API and durable worker; worker capacity defaults to 2 |
 | doc_guard | 8000 | `scripts/run-doc-guard.sh` | verifies `POST /v1/check-excel` answers (new excel-gate endpoint), not just healthz |
-| excel-parser | 18055 | `scripts/run-excel-parser.sh` | pins **KORDOC_BIN + node PATH** (auto backend → kordoc); kills :18055 **by port** (module `service.main:app` is shared with adaptive_chunk :18060 — never module-pattern kill) |
+| excel-parser (레거시 코호트) | 18055 | `scripts/run-parse-svc.sh --excel-only` | **run-parse-svc 로 통합**(2026-08-10). kordoc env 를 두 스크립트가 각자 관리하다 어긋나 호스트 엑셀 파싱이 죽었다. kills :18055 **by port** (module `service.main:app` is shared with adaptive_chunk :18060 — never module-pattern kill) |
 | edgequake_webui | 3002 | `docker compose up -d --no-build edgequake_webui` | required by KB frontend “그래프 보기”; verify `/popup/graph`, not port 14000 |
 
 ```bash
@@ -102,7 +102,8 @@ bash scripts/run-facade.sh          # after editing service/ (facade)
 bash scripts/run-facade-worker.sh   # 잡 큐 소비자 — facade 만 띄우면 접수가 전부 503
 bash scripts/run-kb-backend.sh   # after editing knowledge_base backend/config
 bash scripts/run-doc-guard.sh    # after editing doc_guard app/
-bash scripts/run-excel-parser.sh # after editing 7.excel-parser excel_parser_rag/ or service/
+bash scripts/run-parse-svc.sh --excel-only   # 레거시 excel-parser(:18055) 만 — provider=excel_parser 코호트
+bash scripts/run-parse-svc.sh --with-excel   # parse-svc + excel-parser 둘 다
 bash scripts/restart-gate-stack.sh   # all 3 excel-gate services in dep order (doc_guard+excel-parser→kb-backend)
 
 # localhost:18080 테스트 환경을 복구했다면 항상 마지막에 실행·검증
@@ -128,7 +129,10 @@ running NEW code (doc_guard `/v1/check-excel`, excel-parser `/parse` returns
    (`--host 127.0.0.1` sits between `backend` and `--port`) → old process survived, new
    one failed to bind and died, **old code kept serving :8088**. All launchers now
    `kill $(lsof -nP -iTCP:<port> -sTCP:LISTEN -t)`.
-2. **excel-parser needs kordoc env.** default `EXCEL_PARSER_BACKEND=auto` routes non-전결
+2. **kordoc env 는 parse-svc 도 필요하다.** (2026-08-10) Phase 2e 에서 엑셀 파싱이 parse-svc
+   in-process 로 흡수됐는데 env 가 `run-excel-parser.sh` 에만 남아, 컨테이너에서는 되고
+   **호스트 dev 에서만** `parse_failed: ... '*.md' 를 찾을 수 없습니다` 로 죽었다. 두 런처를
+   `run-parse-svc.sh` 로 합쳐 한 곳에서 세팅한다. 원문: default `EXCEL_PARSER_BACKEND=auto` routes non-전결
    xlsx to the kordoc CLI; without `KORDOC_BIN=kordoc` + node on PATH, `/parse` 500s
    ("*.md 를 찾을 수 없습니다") → kb gets no `gate_summary` → gate silently passes
    everything. `run-excel-parser.sh` discovers kordoc (`command -v kordoc` / nvm glob)
