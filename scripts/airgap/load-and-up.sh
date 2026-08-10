@@ -229,7 +229,8 @@ log "상태"
 "${COMPOSE[@]}" ps || true
 if [ "$FAIL" -eq 0 ]; then
   # 안내 주소는 **호스트 매핑**이다(위 health 는 컨테이너 내부 포트). 어긋나면 배포자가
-  # 접속 못 하는 주소를 받는다 — 실측 2026-08-05 기준 19000/13000 은 발행되지 않는다.
+  # 접속 못 하는 주소를 받는다. 아래 값은 docker-compose.airgap.yml 의 **published** 포트다
+  # (P1 2026-08-10: parse-svc 는 18081→19001. 18081 은 사내 OCR 게이트웨이 것이다).
   printf '\n\033[1;32m✅ 전 서비스 healthy\033[0m\n'
   printf '   facade   http://<서버IP>:3000\n'
   printf '   webui    http://<서버IP>:3002    edgequake API  http://<서버IP>:3001\n'

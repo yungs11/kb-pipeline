@@ -135,9 +135,32 @@ cp docker-compose.airgap.yml            "$BUNDLE/"
 cp .env.airgap.example                  "$BUNDLE/"
 cp scripts/airgap/load-and-up.sh        "$BUNDLE/scripts/airgap/"
 cp scripts/airgap/verify-bundle.sh      "$BUNDLE/scripts/airgap/"
+
+# ★ 가드를 **강제 실행**한다(2026-08-10). 복사만 해두면 안 돌린다 — 실제로 그렇게
+#   `fitz`(PyMuPDF) 누락 이미지가 폐쇄망까지 반입됐다. verify-bundle 의 import 검사가
+#   잡을 수 있었는데 아무도 돌리지 않았다. 이미지가 healthy 로 떠도 신호수집이 조용히
+#   폴백만 타므로 배포 후에도 드러나지 않는 부류다.
+#   SKIP_VERIFY=1 로만 건너뛸 수 있게 하고, 건너뛰면 크게 경고한다.
+if [ "${SKIP_VERIFY:-0}" = "1" ]; then
+  echo "⚠️  SKIP_VERIFY=1 — 이미지/의존성 가드를 건너뛴다. 폐쇄망 반입 전에 반드시 수동 실행:"
+  echo "     bash scripts/airgap/verify-bundle.sh --images && bash scripts/airgap/verify-bundle.sh --imports"
+else
+  echo "== 배포 가드 강제 실행(--images, --imports) =="
+  if ! bash scripts/airgap/verify-bundle.sh --images; then
+    echo "✗ 이미지 가드 실패 — 번들을 만들지 않는다(반입 후에야 드러나는 부류다)." >&2; exit 1
+  fi
+  if ! bash scripts/airgap/verify-bundle.sh --imports; then
+    echo "✗ 런타임 의존성 가드 실패 — 번들을 만들지 않는다." >&2
+    echo "  (이 검사가 잡는 것: 이미지에 파서/추출기 바이너리·모듈이 빠진 채 healthy 로 뜨는 상태)" >&2
+    exit 1
+  fi
+fi
 cp scripts/airgap/deploy-both.sh        "$BUNDLE/scripts/airgap/"
 cp scripts/airgap/parse-only-up.sh      "$BUNDLE/scripts/airgap/"
 cp docs/airgap-deploy.md                "$BUNDLE/docs/" 2>/dev/null || true
+# 현장 체크리스트 — 이번 번들이 이전과 달라진 점(포트·fitz·CNI)과 미검증 항목.
+cp docs/airgap-onsite-checklist.md      "$BUNDLE/docs/" 2>/dev/null || true
+cp docs/architecture-ports.md           "$BUNDLE/docs/" 2>/dev/null || true
 # --parse-only 번들은 전체 스택 문서/템플릿만 들어 있으면 받는 쪽이 쓰지도 않는 키
 # (edgequake·adaptive_chunk·임베딩·리랭커)를 채우려다 헤맨다. 파서 전용 세트를 같이 넣는다.
 if [ "$PARSE_ONLY" -eq 1 ]; then
