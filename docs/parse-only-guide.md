@@ -55,7 +55,9 @@ mkdir kbp && tar xzf kbp-parse-bundle-amd64.tar.gz -C kbp && cd kbp
 #   덮어쓰면 실 비밀값이 빈 템플릿으로 날아가 현장에서 전부 다시 입력해야 한다.
 test -f .env && vi .env || { cp .env.parse-only.example .env && vi .env; }
 
-bash scripts/airgap/verify-bundle.sh --parse-only      # 기동 전 env·이미지 가드
+# env 가드. ★ `--env .env` 를 반드시 붙인다 — 빼면 아직 로드하지 않은 이미지까지
+#   검사해 헛되게 실패한다(이미지 검사는 빌드머신용이다).
+bash scripts/airgap/verify-bundle.sh --env .env --parse-only
 ./scripts/airgap/parse-only-up.sh
 ```
 

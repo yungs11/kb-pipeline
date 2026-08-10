@@ -100,7 +100,8 @@ mkdir kbp && tar xzf kbp-parse-bundle-amd64.tar.gz -C kbp && cd kbp
 #    `cp .env.parse-only.example .env` 로 덮어쓰면 값이 전부 날아간다.
 test -f .env && vi .env || { cp .env.parse-only.example .env && vi .env; }
 
-bash scripts/airgap/verify-bundle.sh --parse-only
+# ★ `--env .env` 를 빼면 아직 로드하지 않은 이미지까지 검사해 헛되게 실패한다.
+bash scripts/airgap/verify-bundle.sh --env .env --parse-only
 bash scripts/airgap/parse-only-up.sh
 ```
 
