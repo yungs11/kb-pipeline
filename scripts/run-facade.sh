@@ -34,18 +34,16 @@ for _cid in $(docker ps -q --filter "label=com.docker.compose.service=facade" 2>
 done
 
 # env + secrets (gitignored). set -a auto-exports every KEY=value.
-ENV_FILE="$ROOT/scripts/facade.env"
-# ★ 호출자가 준 값이 facade.env 보다 **우선**한다(dotenv 관례).
-#   `set -a; . "$ENV_FILE"` 만 하면 파일 값이 CLI 값을 덮어써서
-#   `KBP_EDGEQUAKE_URL=... bash scripts/run-facade.sh` 가 조용히 무시된다.
-#   (실측 2026-08-10: 그래서 KBP_REQUIRE_EDGEQUAKE=1 가드 테스트가 통과해버렸다.)
-#   덮어쓰기를 허용할 키만 명시적으로 스냅샷한다 — `export -p` 재적용은 PWD 같은 것까지 건드린다.
-_CALLER_EQ_URL="${KBP_EDGEQUAKE_URL:-}"
-_CALLER_PORT="${KBP_FACADE_PORT:-}"
-if [ -f "$ENV_FILE" ]; then set -a; . "$ENV_FILE"; set +a; fi
-[ -n "$_CALLER_EQ_URL" ] && export KBP_EDGEQUAKE_URL="$_CALLER_EQ_URL"
-[ -n "$_CALLER_PORT" ]   && export KBP_FACADE_PORT="$_CALLER_PORT"
-true   # 위 두 [ ] 가 거짓일 때 set -e 로 죽지 않게 한다
+# ── env — 리포 루트 `.env` 하나가 비밀값·선택값을 소유한다(2026-08-10 통합) ─────
+#   전엔 `.env`/`facade.env`/`parse-svc.env` 셋에 API 키·MinIO 자격증명 6개가 3중 중복이라
+#   한 곳만 고치면 조용히 어긋났다. 호스트 주소는 설정하지 않고 **파생**한다(localhost+포트).
+#   CLI > .env > 레거시 facade.env > 파생 기본값 순으로 세다.
+# shellcheck source=scripts/lib/load-dev-env.sh
+. "$ROOT/scripts/lib/load-dev-env.sh"
+_DEV_ENV_LEGACY=""; _DEV_ENV_MAIN=""
+_dev_env_load "$ROOT" "$ROOT/scripts/facade.env"
+_dev_env_host_addrs
+_dev_env_report "$ROOT"
 : "${KBP_OPENAI_API_KEY:?missing — scripts/facade.env must set KBP_OPENAI_API_KEY}"
 : "${KBP_PG_DSN:?missing — scripts/facade.env must set KBP_PG_DSN}"
 # 잡 staging 이 여기 없으면 /parse·/ingest 접수가 런타임에 전면 실패한다.
