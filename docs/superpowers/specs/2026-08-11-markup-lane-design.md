@@ -155,6 +155,14 @@ findings 0.
 
 **결과 계약**: 엑셀 레인 그대로 `kind="chunks"`, `chunk_needed=False`, `gate_summary` 포함.
 
+**한계(수용됨, 2026-08-11 사용자 확인)**: 첫 컬럼 헤더가 계층 spine 용어
+(`사항/항목/구분/내용/업무/분류/제목/품목/품명`)를 **포함**하면 `_detect_hierarchy_cols`
+(`detection/header_detector.py:476`)가 그 열을 계층 열로 잡아, 키 이름이 `항목:` 이 아니라
+`A:` 로 떨어진다(실측 4종 중 3종). **값은 청크 경로(`titles_context`)로 승격돼 보존**되므로
+검색에서 잡히고, 잃는 것은 키 이름과의 결합뿐이다. 이것은 엑셀 레인이 실제 xlsx 에도 적용하는
+의도된 휴리스틱이고 끄는 스위치가 없어(`RegionOverride.hierarchy_cols` 는 비어 있지 않을
+때만 적용) csv 만 예외 처리하지 않는다. `deferred.md` D45.
+
 ### 4.4 json/xml → 평문 통과
 
 `TEXT_EXTS` 에 `xml` 추가. json 은 현상 유지. 코드 변경은 이것뿐이다.
