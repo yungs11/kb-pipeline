@@ -1,7 +1,8 @@
 """확장자 → 도메인 파서 디스패치. 파싱 로직 없음(얇은 계층).
 
-매핑(2026-08-06): 엑셀→excel(자체청킹, chunk_needed=False), 이미지→ocr(in-process VL),
-평문→text(그대로 블록화), **그 외 전부→pdf**.
+매핑(2026-08-11): 엑셀→excel(자체청킹, chunk_needed=False), 이미지→ocr(in-process VL),
+html/htm→html(markdownify + `<table>` 보존, 형변환 API 미경유), 평문→text(그대로 블록화),
+**그 외 전부→pdf**.
 
 비-PDF 는 `run_parse` 가 **변환 API 로 PDF 를 만든 뒤** 여기로 보낸다(app.py). 변환은
 router 가 하지 않는다 — `route()` 의 `filename` 은 값 복사라 페이지 이미지 소비처
@@ -16,6 +17,7 @@ from parse_service.parsers import RouteResult, ParserError
 from parse_service.parsers import pdf as _pdf
 from parse_service.parsers import ocr as _ocr
 from parse_service.parsers import excel as _excel
+from parse_service.parsers import html as _html
 from parse_service.tools import fileconvert
 
 
@@ -29,6 +31,10 @@ def _ocr_parse(fb, fn, *, ocr_url, excel_url):
 
 def _excel_parse(fb, fn, *, ocr_url, excel_url):
     return _excel.parse(fb, fn, excel_url=excel_url)
+
+
+def _html_parse(fb, fn, **_):
+    return _html.parse(fb, fn)
 
 
 def _text_parse(fb, fn, **_):
@@ -55,7 +61,7 @@ def _text_parse(fb, fn, **_):
 
 
 _PARSERS = {"pdf": _pdf_parse, "excel": _excel_parse,
-            "ocr": _ocr_parse, "text": _text_parse}
+            "ocr": _ocr_parse, "html": _html_parse, "text": _text_parse}
 
 
 def domain_of(filename: str) -> str:
@@ -65,7 +71,9 @@ def domain_of(filename: str) -> str:
         return "excel"
     if ext in _ocr.IMAGE_EXTS:                  # png jpg … — 이미지 직행
         return "ocr"
-    if ext in fileconvert.TEXT_EXTS:            # txt md csv json — 변환 불가·불필요
+    if ext in _html.HTML_EXTS:                  # html htm — 형변환 없이 자체 레인
+        return "html"
+    if ext in fileconvert.TEXT_EXTS:            # txt md csv json log xml — 변환 불가·불필요
         return "text"
     return "pdf"                                # 변환을 거쳤으므로 여기 오는 건 전부 PDF
 
