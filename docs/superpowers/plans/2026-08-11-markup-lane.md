@@ -1,4 +1,4 @@
-<!-- plan-version: v5 -->
+<!-- plan-version: v6 -->
 <!-- ultracode-validation: PENDING -->
 
 # 구조화 텍스트 레인 Implementation Plan
@@ -193,9 +193,20 @@ def _text_parse(fb, fn, **_):
     md = decode_text(fb, fn)
     if not md.strip():
         raise ParserError(f"empty text file: {fn}")
+    blocks = hybrid_to_blocks(md, page_idx=1)
+    # 빈 블록 가드 — 본문이 있는데 블록이 0개면 조용한 빈 적재가 된다. XML 편입(Task 3)
+    # 으로 이 경로가 실제로 열린다: `<?xml …?><root><item id="1"/></root>` 같은 속성 전용
+    # export 는 텍스트 노드가 없어 blocks=0 인데, run_parse 는 예외 없이
+    # enriched_content="" 로 200 을 돌려주고 facade `/chunk` 에도 빈 본문 가드가 없다.
+    # 편입 전에는 `%PDF` 가드가 parse_failed 로 크게 죽었으므로, 가드가 없으면
+    # "큰 실패 → 조용한 성공" 으로 실패 유형이 나빠진다. `parsers/html` 도 같은 가드를
+    # 갖는다(레인 간 대칭).
+    #   부수효과(의도됨): 주석만 있는 .md 처럼 지금까지 조용히 빈 결과를 내던 입력도
+    #   이제 parse_failed 로 크게 실패한다.
+    if not blocks:
+        raise ParserError(f"no blocks from text file: {fn}")
     return RouteResult(kind="pages", chunk_needed=True,
-                       pages=[{"page_number": 1,
-                               "blocks": hybrid_to_blocks(md, page_idx=1)}])
+                       pages=[{"page_number": 1, "blocks": blocks}])
 ```
 
 - [ ] **Step 6: 회귀 확인**
@@ -397,12 +408,27 @@ def test_table_before_body_open_is_not_lost():
 
 
 def test_title_does_not_leak_into_text():
-    """<head> 를 떼지 않으면 _pick_target 이 soup 전체를 고를 때 <title> 이 본문에 섞인다."""
+    """<title>/<meta> 를 떼지 않으면 _pick_target 이 soup 전체를 고를 때 본문에 섞인다."""
     raw = ("<html><head><title>문서제목ZZZ</title></head>"
            "<body><p>본문</p></body></html>").encode("utf-8")
     joined = " ".join(b.get("text", "") for b in _blocks(raw))
     assert "문서제목ZZZ" not in joined
     assert "본문" in joined
+
+
+def test_unclosed_head_does_not_wipe_body():
+    """`</head>` 생략은 HTML5 가 허용하고 실무에서 흔하다. bs4 는 브라우저와 달리 head 를
+    자동으로 닫지 않고 <body> 를 head 자식으로 중첩시키므로, <head> 를 통째로 extract 하면
+    본문·표가 전멸한다(실측: '<html></html>' 만 남는다)."""
+    raw = ("<html><head><title>TTT</title>"
+           "<body><p>본문살아있음</p><table><tr><td>표살아있음</td></tr></table>"
+           "</body></html>").encode("utf-8")
+    blocks = _blocks(raw)
+    joined = " ".join(b.get("text", "") for b in blocks)
+    assert "본문살아있음" in joined
+    assert "TTT" not in joined
+    tables = [b for b in blocks if b["type"] == "table"]
+    assert len(tables) == 1 and "표살아있음" in tables[0]["table_body"]
 
 
 def test_empty_html_raises():
@@ -481,8 +507,9 @@ def _pick_target(soup):
     ``soup.find("body")`` 는 그 표를 보지 못하고, 표가 **경고 없이 사라진다**(실측:
     수정 전 tables=0 → 수정 후 tables=1). 조용한 데이터 손실이라 status=ok 로 끝난다.
 
-    그래서 body 의 형제로 남은 내용이 있으면 soup 전체를 대상으로 삼는다. `<head>` 는
-    호출부에서 미리 제거하므로 `<title>` 이 본문에 섞이지 않는다.
+    그래서 body 의 형제로 남은 내용이 있으면 soup 전체를 대상으로 삼는다. `<title>`·
+    `<meta>` 는 호출부에서 미리 제거하므로 본문에 섞이지 않는다(`<head>` 엘리먼트 자체는
+    남는데, 비어 있어 markdownify 에 무해하다).
     """
     body = soup.find("body")
     if body is None:
@@ -510,9 +537,13 @@ def parse(file_bytes: bytes, filename: str, *, ocr_url: str | None = None) -> Ro
     """html/htm → 단일 페이지 blocks. ocr_url 은 router 계약상 받되 쓰지 않는다."""
     text = decode_text(file_bytes, filename)
     soup = BeautifulSoup(text, "html.parser")
-    # head 도 제거한다 — <title>/<meta> 가 본문 텍스트로 섞이는 것을 막는다.
+    # <title>/<meta> 가 본문 텍스트로 섞이는 것을 막는다. **<head> 를 통째로 지우면 안
+    # 된다** — `</head>` 가 생략된 html(HTML5 가 허용하고 실무에서 흔하다)에서 bs4 는
+    # 브라우저와 달리 head 를 자동으로 닫지 않고 <body> 를 head 자식으로 중첩시킨다.
+    # 그 상태에서 head.extract() 하면 본문·표가 통째로 사라진다(실측: '<html></html>' 만
+    # 남는다). 그래서 head 전용 메타 태그만 골라 지운다. 남는 빈 <head> 는 무해하다.
     # (_pick_target 이 soup 전체를 고를 수 있으므로 반드시 그 앞에서 떼어낸다.)
-    for tag in soup(["script", "style", "head"]):
+    for tag in soup(["script", "style", "title", "meta", "link", "base"]):
         tag.extract()
     target = _pick_target(soup)
     _strip_data_uri_images(target)
@@ -549,7 +580,7 @@ def parse(file_bytes: bytes, filename: str, *, ocr_url: str | None = None) -> Ro
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `PYTHONPATH=$PWD /Users/xxx/workspace/8.kb-pipeline/.venv-kb/bin/python -m pytest parse_service/tests/test_parser_html.py -q`
-Expected: PASS (15 tests)
+Expected: PASS (16 tests)
 
 - [ ] **Step 6: Commit**
 
@@ -616,6 +647,24 @@ def test_parsers_table_covers_every_domain():
     """domain_of 에 분기를 추가하고 _PARSERS 키를 빠뜨리면 런타임 KeyError 로
     해당 레인 전체가 죽는다 — domain_of 단언만으로는 못 잡는다."""
     assert set(router._PARSERS) == {"pdf", "excel", "ocr", "html", "text"}
+
+
+def test_blockless_xml_fails_loudly():
+    """속성 전용 XML export 는 텍스트 노드가 없어 blocks=0 이다(실측). 가드가 없으면
+    enriched_content="" 로 200 이 나가 조용한 빈 적재가 된다 — 편입 전 `%PDF` 가드가
+    parse_failed 로 크게 죽던 것보다 나쁜 실패 유형이다."""
+    from parse_service.parsers import ParserError
+
+    with pytest.raises(ParserError):
+        router.route(b'<?xml version="1.0"?><root><item id="1"/></root>', "a.xml",
+                     ocr_url="", excel_url="")
+
+
+def test_xml_with_text_still_parses():
+    rr = router.route('<?xml version="1.0"?><root><item>내용</item></root>'.encode("utf-8"),
+                      "a.xml", ocr_url="", excel_url="")
+    assert rr.kind == "pages"
+    assert any("내용" in b.get("text", "") for b in rr.pages[0]["blocks"])
 
 
 def test_route_dispatches_html_end_to_end():
@@ -1128,7 +1177,7 @@ print("OK html_blocks=%d" % len(blocks))
     *OK\ html_blocks=*) echo "  ${GRN}✓ html 왕복 성공 — ${hout##*OK }${RST}" ;;
     *NO_TABLE_BLOCK:*|*MERGE_LOST:*) echo "  ${RED}✗ html 표 보존 실패 — pipe 평탄화 회귀다:${RST}"
        echo "$hout" | tail -4 | sed 's/^/    /'; return 1 ;;
-    *) echo "  ${RED}✗ html 파싱 왕복 실패 — markdownify 누락이 유력하다:${RST}"
+    *) echo "  ${RED}✗ html 파싱 왕복 실패 — markdownify 누락 또는 parsers/html import 실패:${RST}"
        echo "$hout" | tail -6 | sed 's/^/    /'; return 1 ;;
   esac
 ```
@@ -1218,7 +1267,16 @@ git commit -m "feat(airgap): html 왕복 스모크 — markdownify 누락과 표
 
 §3 도입부(`:50`)의 다른 한 곳도 함께 고친다 — `Excel(xlsx/xlsm/xls)은 \`chunk_needed=False\` 로 자체청킹 청크를 그대로 반환한다.` 를 `Excel(xlsx/xlsm/xls) 과 CSV 는 \`chunk_needed=False\` 로 자체청킹 청크를 그대로 반환한다.` 로.
 
-편집 후 확인: `grep -n "4분기\|fallback\|TXT·MD·CSV" _workspace/01-architecture.md` 가 **아무것도 출력하지 않아야** 한다. 출력이 있으면 위 표 편집 중 빠뜨린 행이 있는 것이다.
+편집 후 확인 — **두 방향 모두** 봐야 한다. 부정 게이트만 두면 Excel/CSV 편집을 통째로 건너뛰어도 통과한다:
+
+```bash
+# (1) 부정 — 옛 서술이 남아 있으면 안 된다. 출력 0줄이어야 한다.
+grep -n "4분기\|fallback\|TXT·MD·CSV" _workspace/01-architecture.md
+# (2) 긍정 — 새 서술이 실제로 들어갔어야 한다. 각각 1줄 이상 나와야 한다.
+grep -n "Excel(xlsx/xlsm/xls) 과 CSV" _workspace/01-architecture.md
+grep -n "csv_to_xlsx" _workspace/01-architecture.md
+grep -n "| HTML/HTM |" _workspace/01-architecture.md
+```
 
 - [ ] **Step 2: `_workspace/02-changes.md` 에 절 추가**
 
@@ -1262,11 +1320,13 @@ csv 는 엑셀 레인으로 옮긴다. xml 을 평문 레인에 편입한다.
  2026-08-11 markup-lane 에서 html 이 형변환 API 밖으로 나오고 csv 가 엑셀 레인으로 이동(markitdown 재검토 후 재차 기각).
 ```
 
-그리고 Phase 진행표의 마지막 행 뒤에 한 행 추가(형식은 그 표의 기존 행과 동일하게 `| 구분 | 내용 | 상태 |` 컬럼 수를 맞춘다):
+그리고 **Phase 2 진행표**(3컬럼 표가 파일에 여러 개 있다 — 고칠 것은 `| **2e** | compose 정리(excel-parser·document-parser·redis 제거) …` 행으로 **끝나는** 표다) 의 마지막 행 뒤에 한 행 추가:
 
 ```
 | **markup-lane** | html→`parsers/html`(형변환 미경유), csv→엑셀 레인(openpyxl 고정), xml→text 편입 | ✅ 완료 (브랜치 `feat/markup-lane`) |
 ```
+
+편집 후 확인: `grep -n "markup-lane" _workspace/03-dev-progress.md` 가 2줄(W6 비고 + 이 행) 나와야 한다.
 
 - [ ] **Step 4: `docs/kb-pipeline-process-definition.md` 갱신 (편집 5곳)**
 
@@ -1301,7 +1361,16 @@ CSV 는 2026-08-11 편입 — 헤더 행에 서식을 준 xlsx 로 메모리 합
 - (구 **DOCX** → `docx` kordoc 레인은 2026-08-06 제거됐다. DOCX 는 위 변환 API 경로를 탄다.)
 ```
 
-편집 후 확인: `grep -n "4분기\|fallback\|TXT·MD·CSV" docs/kb-pipeline-process-definition.md` 가 **아무것도 출력하지 않아야** 한다.
+편집 후 확인 — **두 방향 모두**:
+
+```bash
+# (1) 부정 — 출력 0줄
+grep -n "4분기\|fallback\|TXT·MD·CSV" docs/kb-pipeline-process-definition.md
+# (2) 긍정 — 각각 1줄 이상
+grep -n "csv_to_xlsx" docs/kb-pipeline-process-definition.md
+grep -n "TXT·MD·JSON·LOG·XML" docs/kb-pipeline-process-definition.md
+grep -n "HTML/HTM" docs/kb-pipeline-process-definition.md
+```
 
 - [ ] **Step 5: `deferred.md` 생성**
 
@@ -1366,6 +1435,15 @@ CSV 는 2026-08-11 편입 — 헤더 행에 서식을 준 xlsx 로 메모리 합
   `<pre>` 를 ``` 펜스로 내보내는데 `hybrid_to_blocks` 에 fence 분기가 없어 본문이
   사라진다(실측). html 레인만의 문제가 아니라 `.md` text 레인 공통이라 blockify 본체
   수정이 필요하다 — 이번 html 범위를 넘는다.
+- **D49 html 의 상대·원격 `<img src="logo.png">`** (2026-08-11, markup-lane) —
+  `_strip_data_uri_images` 는 data-URI 만 다루므로 상대경로 이미지는 해소 불가능한
+  `img_path` 를 가진 모달 블록으로 남는다. `KBP_MODAL_ENRICH` 기본값이 0 이라 지금은
+  payload 통과일 뿐 무해하지만, html 레인에 모달 강화를 켜면 실제 실패가 된다.
+  그때 alt 대체 또는 이미지 fetch 를 정한다.
+- **D50 `decode_text` 가 `<meta charset>` 을 스니핑하지 않는다** (2026-08-11, markup-lane) —
+  BOM/utf-8/cp949 밖 인코딩(shift_jis, iso-8859-1)의 html 은 크게 실패하거나 cp949
+  모지바케가 된다. 기존 text 레인과 동일 동작이라 **회귀는 아니다**. 비한국어 html 이
+  입력으로 들어오기 시작하면 필요해진다.
 - **D48 `verify-bundle.sh:179` 의 이미지 선택 구멍** (2026-08-11, markup-lane) —
   `grep -m1` 이 스토어에 남은 **옛** `kbp-parse-svc` 를 집을 수 있다(같은 사고가 이미
   기록돼 있다: "옛 이미지가 가드를 속인다"). 이번 Task 6 Step 5 에서 선택된 ref 를 눈으로
@@ -1394,7 +1472,7 @@ git commit -m "docs: 구조화 텍스트 레인 반영 — 라우팅 표/청킹 
 (v2 까지 두 라운드 연속으로 "계획서 코드 vs 계획서 테스트" 불일치가 잡혔기 때문이다).
 
 - Task 1 + Task 4 코드 → 자체 테스트 **21/21 통과**(textdecode 7 + csv_to_xlsx 14).
-- Task 2 코드 → 자체 테스트 **15/15 통과**(v4 의 `_pick_target` + head 제거 포함).
+- Task 2 코드 → 자체 테스트 **16/16 통과**(v4 의 `_pick_target`, v6 의 메타태그-only 제거 포함).
 - Task 4 산출 xlsx 를 **실제 엑셀 레인에 통과**시켜 회귀 없음 확인 — 정상/수식셀/숫자많음
   3종 모두 `gate.ok=True`, `=1+1` 이 청크 텍스트에 보존(`사번: 1001, 수식: =1+1`).
 
