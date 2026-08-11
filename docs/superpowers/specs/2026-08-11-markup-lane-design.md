@@ -141,6 +141,13 @@ csv 를 **메모리상 xlsx 로 합성**해 기존 openpyxl 백엔드에 넘긴�
 엑셀 레인이 xlsx 에 대해 이미 같은 방어를 하고 있다(`parsers/excel/__init__.py`
 `_fetch_rag_chunks` 주석).
 
+**백엔드는 `openpyxl` 로 고정한다.** 기본값 `EXCEL_PARSER_BACKEND=auto` 는 "전결" 키워드
+(Tier1)나 계층 지배도(Tier1.5)가 있을 때만 openpyxl 을 쓰고 **그 외에는 kordoc 으로
+떨어진다**(`backends/auto_backend.py:88-150`). csv 유래 평면 표는 둘 다 아니므로 auto 로
+두면 kordoc CLI 왕복을 타는데, csv 에는 병합셀·다중시트·수식이 없어 kordoc 의 렌더 충실도
+이점이 전혀 없고 node 프로세스 비용만 든다. 실측에서도 auto 로 두면
+`'excel_parser_*.md' 를 찾을 수 없습니다` 로 실패했다(호스트에 `KORDOC_BIN` 미설정 시).
+
 디코딩 사다리는 4.2 와 동일. 구분자는 콤마 고정(비목표).
 
 게이트는 정상 통과함을 실측했다 — 정상/단일열/헤더만/빈값많음 4형태 모두 `gate.ok=True`,
@@ -179,7 +186,8 @@ csv 의 청킹 소유가 facade `/chunk` → 엑셀 레인으로 이동한다. �
 - **V2** html 이 형변환 API 를 타지 않음 — `needs_convert("a.html") is False`
 - **V3** 표 여러 개·중첩 표 html → 표 개수 일치, 중첩 표가 이중 계산되지 않음
 - **V4** csv → 청크 텍스트에 `사번: 1001` 형태(열레터 `A:` 가 아님)
-- **V5** csv 청크에 임시파일 stem 이 새지 않음
+- **V5** csv 청크에 임시파일 stem 이 새지 않음(시트명·`titles_context` 가 원본 stem)
+- **V5b** csv 가 kordoc 이 아니라 openpyxl 백엔드로 감(`KORDOC_BIN` 없이도 성공)
 - **V6** cp949 csv/html 이 mojibake 없이 디코딩
 - **V7** `xml` 이 `not a PDF` 로 죽지 않음
 - **V8** `test_no_markitdown.py` 통과 유지
