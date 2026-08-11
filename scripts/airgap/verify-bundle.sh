@@ -109,6 +109,19 @@ check_env() {
     echo "    ${RED}  → 주소를 채우거나, 안 쓸 거면 KBP_GATE_OCR_LANE=vl 로 명시적으로 끌 것.${RST}"
     miss=1
   fi
+  # ── paddle_gw 페이지 게이트(2026-08-11) ───────────────────────────────────
+  # 게이트를 끄면 GW 가 완전히 붕괴시킨 페이지(무한루프·한자 폭발·빈 출력)가 **그대로
+  # 색인된다**. 파싱은 "성공"으로 보이므로 배포 후에도 드러나지 않는다.
+  if [ "$(val KBP_GATE_OCR_LANE "$envf")" = "paddle_gw" ] && [ "$(val KBP_GW_GATE "$envf")" = "0" ]; then
+    echo "  ${YEL}! KBP_GATE_OCR_LANE=paddle_gw 인데 KBP_GW_GATE=0 — 붕괴 페이지가 그대로 색인된다.${RST}"
+    echo "    ${YEL}  → 의도한 것인지 확인. quarantine 을 끄면 오염 텍스트가 검색에 노출된다.${RST}"
+  fi
+  # 퇴화 필터 되돌림 손잡이. `none` 이면 R3/R4 까지 HARD 가 되어 **정상 법인등기부 표가
+  # 다시 삭제된다**(실측: 죽림 p18 / 장현 p52, 사람 대조 USABLE). 빈 값은 정상(기본값 적용).
+  if [ "$(val KBP_DEGEN_SOFT_RULES "$envf")" = "none" ]; then
+    echo "  ${YEL}! KBP_DEGEN_SOFT_RULES=none — 퇴화 안전화가 꺼져 정상 등기부 표가 삭제될 수 있다.${RST}"
+    echo "    ${YEL}  → 되돌림용 값이다. 상시 운영이면 비우거나 R3,R4 로 되돌릴 것.${RST}"
+  fi
   # ── 야간 커뮤니티 배치(A1) ────────────────────────────────────────────────
   # 컨테이너 기본 TZ 는 UTC 다. 야간 배치를 켜놓고 TZ 를 안 주면 KBP_COMMUNITY_BUILD_AT
   # =03:00 이 **KST 정오**에 열려 목적(주간 LLM 부하 회피)이 정확히 뒤집힌다.

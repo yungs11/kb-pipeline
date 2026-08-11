@@ -224,22 +224,182 @@ def test_paddle_gw_diagram_vl_failure_keeps_gateway_blocks(monkeypatch):
     assert any("게이트웨이 조각" in (b.get("text") or "") for b in res.pages[0]["blocks"])
 
 
+_DEGEN = "기계음 손상완을 잡고 " * 60
+
+
 def test_parse_filters_degenerate_vl_blocks(monkeypatch):
-    """어느 레인이든 parse() 출구에서 VL 퇴화(무한반복) 블록이 제거된다."""
-    degen = "기계음 손상완을 잡고 " * 60
+    """odl 레인은 **블록 단위** 제거 그대로 — 정상 블록은 남는다(무영향 회귀 앵커).
+
+    2026-08-11: paddle_gw 레인만 페이지 단위 quarantine 게이트가 붙었다. 다른 레인의
+    기존 계약(퇴화 블록만 제거, 페이지는 유지)은 바뀌지 않아야 한다.
+    """
     monkeypatch.setattr(pdf_parser, "_safe_decide_route",
-                        lambda b: RouteDecision(lane="paddle_gw"))
-    import parse_service.parsers.pdf.paddle_gw as pg
-    monkeypatch.setattr(pg, "run_paddle_gateway", lambda fb, fn: [
-        {"page_number": 1, "blocks": [
-            {"type": "text", "text": "정상 본문 텍스트입니다.", "page_idx": 1},
-            {"type": "text", "text": degen, "page_idx": 1},
-        ]},
-    ])
+                        lambda b: RouteDecision(lane="odl"))
+    monkeypatch.setattr(pdf_parser, "_odl_lane", lambda fb, fn, *, ocr_url, diagram_pages: (
+        RouteResult(kind="pages", chunk_needed=True, pages=[
+            {"page_number": 1, "blocks": [
+                {"type": "text", "text": "정상 본문 텍스트입니다.", "page_idx": 1},
+                {"type": "text", "text": _DEGEN, "page_idx": 1},
+            ]},
+        ])))
     res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
     texts = [b.get("text", "") for b in res.pages[0]["blocks"]]
     assert any("정상 본문" in t for t in texts), "정상 블록 유지"
     assert not any("기계음 손상완" in t for t in texts), "퇴화 블록 제거"
+    assert res.page_verdicts is None, "paddle_gw 아닌 레인은 판정을 만들지 않는다"
+
+
+#: 반복이 없는 정상 본문(문장을 그대로 N회 반복하면 ttr 이 떨어져 T3 에 걸린다).
+_HEALTHY = ("원고는 피고와 2021년 3월 체결한 분양계약에 따라 계약금 일억원을 지급하였다. "
+            "그런데 피고는 준공예정일을 도과하고도 소유권이전등기 절차를 이행하지 아니하였다. "
+            "이에 원고는 계약해제 의사를 표시하고 기지급금 반환을 구하는 바이다.")
+
+
+def _gw(monkeypatch, pages, *, diagram_pages=(), ink=0.30):
+    monkeypatch.setattr(pdf_parser, "_safe_decide_route",
+                        lambda b: RouteDecision(lane="paddle_gw",
+                                                diagram_pages=tuple(diagram_pages)))
+    import parse_service.parsers.pdf.paddle_gw as pg
+    monkeypatch.setattr(pg, "run_paddle_gateway", lambda fb, fn: pages)
+    monkeypatch.setattr(pdf_parser, "_supplement_diagram_pages",
+                        lambda *a, **kw: None)
+    import parse_service.parsers.pdf.page_verdict as pv
+    monkeypatch.setattr(pv, "page_ink", lambda fb, p: ink)
+    return pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+
+
+def test_gw_lane_quarantines_collapsed_page(monkeypatch):
+    """paddle_gw: HARD 퇴화로 대부분이 사라진 페이지는 **페이지 통째 quarantine**.
+
+    blocks 가 비어 색인에서 실제로 빠지고(★4), 사유가 page_verdicts 에 남는다.
+    """
+    res = _gw(monkeypatch, [
+        {"page_number": 1, "status": "ok", "blocks": [
+            {"type": "text", "text": "정상 본문 텍스트입니다.", "page_idx": 1},
+            {"type": "text", "text": _DEGEN, "page_idx": 1},
+        ]},
+    ])
+    assert res.pages[0]["blocks"] == [], "quarantine 페이지는 blocks 가 비어야 한다"
+    v = res.page_verdicts[0]
+    assert v["verdict"] == "quarantine" and v["state"] == "quarantined_failure"
+    assert v["reason"].startswith("퇴화 붕괴")
+    assert v["signals"]["hard_rules"] and v["signals"]["chars_after"] < v["signals"]["chars_before"]
+
+
+def test_gw_lane_keeps_healthy_page(monkeypatch):
+    """정상 페이지는 ACCEPT_GW + blocks 보존(PageState.OK 앵커)."""
+    res = _gw(monkeypatch, [
+        {"page_number": 1, "status": "ok", "blocks": [
+            {"type": "text", "text": _HEALTHY, "page_idx": 1},
+        ]},
+    ])
+    assert res.pages[0]["blocks"], "정상 페이지 blocks 보존"
+    assert res.page_verdicts[0]["verdict"] == "accept_gw"
+    assert res.page_verdicts[0]["state"] == "ok"
+
+
+def test_gw_lane_engine_error_is_not_quarantine(monkeypatch):
+    """게이트웨이 오류 페이지는 ENGINE_ERROR — quarantine 판정과 분리된다.
+
+    저잉크여도 EMPTY_SKIPPED 로 새면 안 된다(판정 우선순위 앵커).
+    """
+    import parse_service.parsers.pdf.page_verdict as pv
+    monkeypatch.setattr(pv, "page_ink", lambda fb, p: 0.001)
+    monkeypatch.setattr(pdf_parser, "_safe_decide_route",
+                        lambda b: RouteDecision(lane="paddle_gw"))
+    import parse_service.parsers.pdf.paddle_gw as pg
+    monkeypatch.setattr(pg, "run_paddle_gateway", lambda fb, fn: [
+        {"page_number": 1, "status": "ok", "blocks": [
+            {"type": "text", "text": _HEALTHY, "page_idx": 1}]},
+        {"page_number": 2, "status": "error", "error": "TimeoutError: poll", "blocks": []},
+    ])
+    monkeypatch.setattr(pdf_parser, "_supplement_diagram_pages", lambda *a, **kw: None)
+    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    v2 = res.page_verdicts[1]
+    assert v2["verdict"] == "engine_error" and v2["state"] == "engine_error"
+    assert not v2["reason"].startswith("빈 페이지")
+
+
+def test_gw_lane_blank_page_is_skipped_not_quarantined(monkeypatch):
+    """저잉크 빈 페이지는 EMPTY_SKIPPED — **blocks 를 보존**하고 실패로 세지 않는다."""
+    res = _gw(monkeypatch, [
+        {"page_number": 1, "status": "ok",
+         "blocks": [{"type": "text", "text": "표지", "page_idx": 1}]},
+    ], ink=0.008)
+    v = res.page_verdicts[0]
+    assert v["state"] == "empty_skipped" and v["verdict"] == "accept_gw"
+    assert res.pages[0]["blocks"], "EMPTY_SKIPPED 는 색인에서 빼지 않는다"
+
+
+def test_gw_lane_empty_with_ink_is_quarantined(monkeypatch):
+    """잉크는 있는데 텍스트가 거의 없으면 OCR 실패 → quarantine."""
+    res = _gw(monkeypatch, [
+        {"page_number": 1, "status": "ok",
+         "blocks": [{"type": "text", "text": "표지", "page_idx": 1}]},
+    ])
+    assert res.page_verdicts[0]["state"] == "quarantined_failure"
+    assert res.pages[0]["blocks"] == []
+
+
+def test_gw_lane_ink_unknown_preserves_page(monkeypatch):
+    """ink 측정 실패(None)면 EMPTY 를 hard fail 로 보지 않는다 — 보존 우선."""
+    res = _gw(monkeypatch, [
+        {"page_number": 1, "status": "ok",
+         "blocks": [{"type": "text", "text": "표지", "page_idx": 1}]},
+    ], ink=None)
+    assert res.page_verdicts[0]["state"] == "ok"
+    assert res.pages[0]["blocks"], "판정 불가면 보존"
+
+
+def test_gw_lane_diagram_page_short_vl_is_accepted(monkeypatch):
+    """diagram 페이지는 행 4 **대신** 4'(chars_after == 0) 를 적용한다.
+
+    VL 이 성공했지만 간결하게(40자) 응답한 도면 페이지가 EMPTY 로 격리되면 안 된다.
+    """
+    res = _gw(monkeypatch, [
+        {"page_number": 1, "status": "ok", "blocks": [
+            {"type": "text", "text": "START→검토→승인→END 순서로 진행한다", "page_idx": 1}]},
+    ], diagram_pages=(1,))
+    assert res.page_verdicts[0]["state"] == "ok", "diagram + 짧은 VL 서술은 통과"
+    assert res.pages[0]["blocks"]
+
+
+def test_gw_lane_diagram_page_zero_chars_is_quarantined(monkeypatch):
+    """diagram 페이지라도 VL 이 0자면 quarantine."""
+    res = _gw(monkeypatch, [
+        {"page_number": 1, "status": "ok", "blocks": []},
+        {"page_number": 2, "status": "ok",
+         "blocks": [{"type": "text", "text": _HEALTHY, "page_idx": 2}]},
+    ], diagram_pages=(1,))
+    assert res.page_verdicts[0]["state"] == "quarantined_failure"
+    assert res.page_verdicts[1]["state"] == "ok"
+
+
+def test_gw_gate_off_switch(monkeypatch):
+    """KBP_GW_GATE=0 이면 전 페이지 ACCEPT_GW 이고 blocks 를 건드리지 않는다."""
+    monkeypatch.setenv("KBP_GW_GATE", "0")
+    res = _gw(monkeypatch, [
+        {"page_number": 1, "status": "ok", "blocks": [
+            {"type": "text", "text": "정상 본문 텍스트입니다.", "page_idx": 1},
+            {"type": "text", "text": _DEGEN, "page_idx": 1},
+        ]},
+    ])
+    assert all(v["verdict"] == "accept_gw" for v in res.page_verdicts)
+    # 게이트는 껐지만 parse() 출구의 전역 degen 필터는 그대로 — 퇴화 블록만 빠진다.
+    texts = [b.get("text", "") for b in res.pages[0]["blocks"]]
+    assert any("정상 본문" in t for t in texts)
+
+
+def test_gw_lane_never_returns_escalate_vl(monkeypatch):
+    """v1 정책 앵커 — ESCALATE_VL 은 contract 로만 존재하고 발화하지 않는다."""
+    res = _gw(monkeypatch, [
+        {"page_number": 1, "status": "ok", "blocks": [
+            {"type": "text", "text": _HEALTHY, "page_idx": 1}]},
+        {"page_number": 2, "status": "error", "error": "boom", "blocks": []},
+        {"page_number": 3, "status": "ok", "blocks": [
+            {"type": "text", "text": _DEGEN, "page_idx": 1}]},
+    ])
+    assert all(v["verdict"] != "escalate_vl" for v in res.page_verdicts)
 
 
 def _psig(page_number, bucket, **kw):

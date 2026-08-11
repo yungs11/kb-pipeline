@@ -142,23 +142,32 @@ def run_paddle_gateway(pdf_bytes: bytes, filename: str) -> list[dict]:
         return []
     max_workers = max(1, int(os.environ.get("KBP_VL_MAX_CONCURRENT", "3")))
 
-    def one(rp, probe: bool = False) -> tuple[int, list]:
+    def one(rp, probe: bool = False) -> tuple[int, list, str, str]:
+        """(page_number, blocks, status, error).
+
+        status 를 싣는 이유(2026-08-11): `blocks == []` 하나가 **세 가지 전혀 다른 사건**을
+        합치고 있었다 — ① 게이트웨이 일시 장애·타임아웃·5xx(아래 except 가 삼킨다)
+        ② 진짜 빈 간지 ③ md 는 왔는데 블록화 0. ①을 하류에서 terminal quarantine 으로
+        확정하면 **부분 장애 한 번에 정상 스캔 페이지가 영구히 색인에서 빠지고 그 사실이
+        "붕괴 페이지" 로 기록된다.** 판정(quarantine)과 사고(engine error)를 가른다.
+        """
         name = f"page-{rp.page_number}.jpeg"
         try:
             md = _post_page(rp.jpeg, name)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             if probe:
                 raise  # 첫 페이지 실패 = 게이트웨이 불능 → 레인 포기(즉시 폴백)
             log.exception("paddle_gw page %d failed (%s)", rp.page_number, filename)
-            return rp.page_number, []
+            return rp.page_number, [], "error", f"{type(exc).__name__}: {str(exc)[:200]}"
         md = _strip_gateway_image_refs(md)   # imgs/ 죽은 참조 제거(UI 404 방지)
         blocks = hybrid_to_blocks(md, page_idx=rp.page_number)
-        return rp.page_number, blocks
+        return rp.page_number, blocks, "ok", ""
 
     results = [one(rendered[0], probe=True)]   # 프로브 — 실패 시 여기서 raise
     if len(rendered) > 1:
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
             results += list(ex.map(one, rendered[1:]))
 
-    return [{"page_number": n, "blocks": blocks}
-            for n, blocks in sorted(results, key=lambda t: t[0])]
+    # status/error 는 추가 키다 — 모르는 소비자는 무시한다(blocks 계약 불변).
+    return [{"page_number": n, "blocks": blocks, "status": status, "error": err}
+            for n, blocks, status, err in sorted(results, key=lambda t: t[0])]

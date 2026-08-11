@@ -359,6 +359,10 @@ def run_parse(file_bytes: bytes, filename: str, *,
         "page_count": page_count,
         "pages": image_pages,
         "page_spans": page_spans,
+        # paddle_gw 레인 페이지 판정(additive). 그 외 레인은 None — facade 는 모르는
+        # 키를 무시하므로 하위호환이다. **색인 제외는 여기서 하지 않는다** — 게이트가
+        # 이미 quarantine 페이지의 blocks 를 비워서 위 concat 에 안 잡힌다.
+        "page_verdicts": getattr(rr, "page_verdicts", None),
         # 모니터링(P2, additive): 파서 단계 분해 — parse(opendataloader/OCR) vs
         # modal_enrich(표/이미지 LLM) vs render_upload. modal_llm 에 표 N개×LLM 분해.
         "timing_metrics": {

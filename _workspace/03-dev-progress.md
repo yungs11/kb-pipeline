@@ -763,3 +763,53 @@ dev/airgap compose config 양쪽 보간 성공.
 로더(`scripts/lib/load-dev-env.sh`)는 **CLI > `.env` > 레거시** 순이고 **빈 값을 "없음"
 으로 취급**한다 — 이게 없으면 템플릿에서 복사한 `.env` 의 `KEY=` 가 레거시 파일의 실 키를
 덮어써 기동이 죽는다(실측).
+
+## GW 페이지 quarantine + degen 안전화 — 완료 (2026-08-11)
+
+plan `~/.claude/plans/v1-gw-hardfail-quarantine.md` v7 (ultracode 6라운드 READY).
+상세 결정: `_workspace/02-changes.md`, 미결: `docs/superpowers/specs/2026-08-11-v1-gw-quarantine-deferred.md`
+
+### 신규/변경
+
+| 파일 | 내용 |
+|---|---|
+| `parse_service/parsers/degen_filter.py` | detect→decide→mutate 분리. `Severity`/`BlockAssessment`/`PageAssessment`, `assess_page`(순수)/`apply_assessment`(HARD 만). R3/R4 → SOFT |
+| `parse_service/parsers/pdf/page_verdict.py` **(신규)** | `Verdict`/`PageState`/`PageVerdict`, `apply_gw_page_gate`(2-phase), `page_ink`(dpi100 dark-fraction, numpy 미사용) |
+| `parse_service/parsers/pdf/paddle_gw.py` | 페이지에 `status: ok\|error` + `error` 부여(`one()` 4-tuple) |
+| `parse_service/parsers/pdf/__init__.py` | `_apply_gw_gate` — supplement **뒤**에 게이트, 실패 시 None(가용성) |
+| `parse_service/parsers/__init__.py` | `RouteResult.page_verdicts` |
+| `parse_service/app.py` | 응답에 `page_verdicts`(additive) |
+| `parse_service/parsers/ocr/vl_api.py` | `_DEFAULT_MODEL_NAME` 제거 → `_require_model_name()` |
+| `scripts/dev/replay_gw_gate.py` **(신규)** | 게이트웨이 비의존 오프라인 리플레이(V3/V4) |
+| `parse_service/tests/{conftest,test_vl_api,test_gw_page_verdict}.py` **(신규)** | +`fixtures/degen_fp_registry_janghyeon_p52_table0.html` |
+| env 7곳 + `verify-bundle.sh` | 신설 11개 선언 + 가드 2종 |
+
+### 검증 결과
+
+| | 항목 | 결과 |
+|---|---|---|
+| V1 | `pytest parse_service/tests` | ✅ 통과 |
+| V2 | 전체 회귀(parse_service+kb_pipeline+service) | ✅ **647 passed / 3 skipped / 0 failed** |
+| V3 | degen 안전화 오프라인 재현 | ✅ 등기부 2건 보존(1,740→1,740 · 1,168→1,168) |
+| V4 | 게이트 오프라인 재현 | ✅ quarantine 3 / recall 3/11 / **observed FP 0/49** |
+| V5 | 실제 게이트웨이 3p `/parse` | ✅ `page_verdicts` 실림, `EMPTY_SKIPPED`(ink .0078) blocks 보존 |
+| V6 | 탈출구 2종 | ✅ `KBP_GW_GATE=0` → quarantine 0 / `KBP_DEGEN_SOFT_RULES=none` → 구동작 복원 (compose 경유 확인) |
+| V7 | 폐쇄망 가드 | ✅ 신설 가드 2종 발화, 정상 env 에선 무음 |
+| V8 | `MODEL_NAME` 미설정 | ✅ `RuntimeError` — 암묵 실행 없음 |
+| V9 | env 선언 전수 | ✅ 12개 키 × 7곳 = 전부 |
+
+### 구현 중 발견해 고친 것 (계획서로는 못 닫혔던 것)
+
+1. **빈 문자열이 `none` 과 같게 동작**했다 — 빈 값에 "전 규칙 HARD"(삭제 증가)를 배정하면
+   실수로 비웠을 때 안전화가 조용히 풀린다. 빈 값 = 미설정 = 기본값으로 고침.
+2. **env 값의 인라인 주석이 값으로 새어 들어갔다** — compose 는 걷어내지만 순진한 파서는
+   먹는다(V5 1차에서 실제로 겪음). repo 관례대로 주석을 윗줄로 옮김.
+3. **리플레이(300dpi)와 프로덕션(`KBP_PADDLE_GW_DPI=150`) 입력이 다르다** — V4 수치를
+   프로덕션 예측치로 인용하면 안 된다(D17).
+
+### 남은 것
+
+- v1.1: SOFT RISK trigger(D4) — 연구 질문이 `"GW unusable 을 어떻게 잡지?"` 에서
+  `"GW 가 충분히 생성했는데 조용히 틀린 페이지를 어떻게 찾지?"` 로 바뀌었다.
+  target label 은 `VL_ROUTE = VL rescued GW`.
+- 미검증: CJK 임계·문서 가드(국한문혼용 표본 0건, D12), `EMPTY`/`ENGINE_ERROR` 독립 발화(D15/D7)

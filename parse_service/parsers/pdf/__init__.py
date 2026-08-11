@@ -84,6 +84,23 @@ def parse(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteResult:
     return res
 
 
+def _apply_gw_gate(pages: list, file_bytes: bytes, decision, filename: str) -> list | None:
+    """paddle_gw 레인 게이트 — 붕괴 페이지를 quarantine(blocks 비움)하고 판정을 돌려준다.
+
+    게이트 실패가 파싱을 깨면 안 된다(가용성) — 예외면 None 을 돌려 기존 동작 그대로 둔다.
+    """
+    try:
+        from parse_service.parsers.pdf.page_verdict import apply_gw_page_gate
+        verdicts = apply_gw_page_gate(
+            pages, file_bytes,
+            diagram_pages=tuple(getattr(decision, "diagram_pages", ()) or ()),
+        )
+        return [v.to_dict() for v in verdicts]
+    except Exception:  # noqa: BLE001
+        log.exception("paddle_gw 게이트 실패 — 판정 없이 진행 (%s)", filename)
+        return None
+
+
 def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteResult:
     """문서수준 게이트 → ODL / vl(차트多) / paddle_gw(스캔) — 실패·빈결과 시 ODL/VL 폴백.
 
@@ -125,7 +142,14 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
             # 다이어그램 페이지는 VL 서술로 **교체** — 게이트웨이 OCR 조각/죽은 이미지참조 제거.
             _supplement_diagram_pages(pages, file_bytes,
                                       decision.diagram_pages, ocr_url, replace=True)
-            result = RouteResult(kind="pages", chunk_needed=True, pages=pages)
+            # 게이트는 **supplement 뒤**에 둔다(2026-08-11). `_supplement_diagram_pages` 의
+            # replace 분기는 기존 blocks 가 비어 있어도 VL 서술로 페이지를 채우는 **현존
+            # 유일한 복구 경로**이고, EMPTY 조건("잉크는 많은데 텍스트가 없음")은 정확히
+            # 도면 페이지를 겨냥한다 — 게이트를 앞에 두면 지금 정상 복구되던 도면 페이지가
+            # 영구 빈 페이지가 된다. quarantine 은 종결 판정이라 ODL 폴백으로 새지 않는다.
+            verdicts = _apply_gw_gate(pages, file_bytes, decision, filename)
+            result = RouteResult(kind="pages", chunk_needed=True, pages=pages,
+                                 page_verdicts=verdicts)
         else:
             if pages is not None:
                 log.warning("paddle_gw 빈 결과 — ODL/VL 폴백 (%s)", filename)

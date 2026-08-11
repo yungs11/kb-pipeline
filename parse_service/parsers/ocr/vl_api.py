@@ -2,7 +2,7 @@
 
 원본의 call_vl_api_with_base64 경로만 이식(multimodal/batch 제외).
 치환(plan 이식 규칙 1): core.config/get_config_value → env 직독
-- MODEL_API_URL / MODEL_API_KEY / MODEL_NAME(기본 qwen/qwen3-vl-235b-a22b-instruct)
+- MODEL_API_URL / MODEL_API_KEY / MODEL_NAME(**필수 — 기본값 없음**)
 - VL_MAX_TOKENS(기본 2000) / USE_GUIDED_JSON(기본 "1") / GUIDED_JSON_MODE(기본 extra_body)
 - VL_MODEL_TIMEOUT(기본 600)
 
@@ -29,7 +29,21 @@ _HTTP_RETRY_COUNT = 1           # 일시적 오류 시 최대 재시도 횟수
 _HTTP_RETRY_DELAY = 1.0         # 재시도 전 대기 (초)
 _RETRYABLE_STATUS_CODES = {429, 502, 503, 504}  # 재시도 대상 상태코드
 
-_DEFAULT_MODEL_NAME = "qwen/qwen3-vl-235b-a22b-instruct"
+def _require_model_name() -> str:
+    """VL 모델명. **암묵 기본값을 두지 않는다.**
+
+    2026-08 실사고: 호스트 dev 에 `MODEL_NAME` 이 없어 코드 기본값(235b)으로 조용히 떨어졌고,
+    compose 는 122b 라 **측정 전체가 다른 모델로 돌았다**. production-critical 한 모델명에
+    implicit default 를 두는 것 자체가 재발 조건이므로 미설정이면 즉시 실패시킨다.
+    (`.env.example`·`scripts/parse-svc.env.example` 에도 선언이 없던 configuration
+    contract 부재가 근본 원인이었다 — 그쪽도 함께 채웠다.)
+    """
+    name = (os.environ.get("MODEL_NAME") or "").strip()
+    if not name:
+        raise RuntimeError(
+            "MODEL_NAME 미설정 — VL 모델명을 명시하세요(예: qwen/qwen3.5-122b-a10b). "
+            "암묵 기본값은 두지 않습니다.")
+    return name
 
 # =============================================================================
 # Guided JSON Schema — OCR 응답 구조 (인퍼런스 엔진 레벨 강제용)
@@ -163,7 +177,7 @@ def _apply_guided_json(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def _build_payload(base64_image: str, user_prompt: str, system_prompt: str) -> Dict[str, Any]:
     """Vision-Language 모델 API 호출 페이로드를 구성합니다."""
-    model_name = os.environ.get("MODEL_NAME", _DEFAULT_MODEL_NAME)
+    model_name = _require_model_name()
     max_tokens = os.environ.get("VL_MAX_TOKENS", "2000")
 
     payload = {
@@ -242,7 +256,7 @@ async def _request_vl_api(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], floa
     """
     model_api_url = os.environ.get("MODEL_API_URL", "")
     model_api_key = os.environ.get("MODEL_API_KEY", "")
-    model_name = os.environ.get("MODEL_NAME", _DEFAULT_MODEL_NAME)
+    model_name = _require_model_name()
 
     headers = {
         "Authorization": f"Bearer {model_api_key}",
