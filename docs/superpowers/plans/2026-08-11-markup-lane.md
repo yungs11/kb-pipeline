@@ -1,4 +1,4 @@
-<!-- plan-version: v3 -->
+<!-- plan-version: v4 -->
 <!-- ultracode-validation: PENDING -->
 
 # 구조화 텍스트 레인 Implementation Plan
@@ -378,6 +378,33 @@ def test_fragment_without_body_tag():
     assert any(b["type"] == "table" for b in blocks)
 
 
+def test_table_after_body_close_is_not_lost():
+    """bs4 html.parser 는 브라우저와 달리 body 밖 노드를 body 안으로 옮기지 않는다.
+    `soup.find("body")` 만 쓰면 이 표가 경고 없이 사라진다(실측 tables=0)."""
+    raw = ("<html><body><p>안쪽</p></body>"
+           "<table><tr><td>바깥표</td></tr></table></html>").encode("utf-8")
+    tables = [b for b in _blocks(raw) if b["type"] == "table"]
+    assert len(tables) == 1
+    assert "바깥표" in tables[0]["table_body"]
+
+
+def test_table_before_body_open_is_not_lost():
+    raw = ("<html><table><tr><td>먼저표</td></tr></table>"
+           "<body><p>안쪽</p></body></html>").encode("utf-8")
+    tables = [b for b in _blocks(raw) if b["type"] == "table"]
+    assert len(tables) == 1
+    assert "먼저표" in tables[0]["table_body"]
+
+
+def test_title_does_not_leak_into_text():
+    """<head> 를 떼지 않으면 _pick_target 이 soup 전체를 고를 때 <title> 이 본문에 섞인다."""
+    raw = ("<html><head><title>문서제목ZZZ</title></head>"
+           "<body><p>본문</p></body></html>").encode("utf-8")
+    joined = " ".join(b.get("text", "") for b in _blocks(raw))
+    assert "문서제목ZZZ" not in joined
+    assert "본문" in joined
+
+
 def test_empty_html_raises():
     with pytest.raises(ParserError):
         _html.parse(b"<html><body>   </body></html>", "a.html")
@@ -446,6 +473,25 @@ def _extract_tables(target, sentinel_fmt: str) -> list[str]:
     return tables
 
 
+def _pick_target(soup):
+    """변환 대상 노드를 고른다. **`<body>` 만 쓰면 안 된다.**
+
+    bs4 의 html.parser 는 브라우저와 달리 body 밖 노드를 body 안으로 재부모화하지
+    않는다. `<html><body><p>가</p></body><table>…</table></html>` 에서
+    ``soup.find("body")`` 는 그 표를 보지 못하고, 표가 **경고 없이 사라진다**(실측:
+    수정 전 tables=0 → 수정 후 tables=1). 조용한 데이터 손실이라 status=ok 로 끝난다.
+
+    그래서 body 의 형제로 남은 내용이 있으면 soup 전체를 대상으로 삼는다. `<head>` 는
+    호출부에서 미리 제거하므로 `<title>` 이 본문에 섞이지 않는다.
+    """
+    body = soup.find("body")
+    if body is None:
+        return soup
+    root = body.parent or soup
+    outside = "".join(str(c) for c in root.children if c is not body).strip()
+    return soup if outside else body
+
+
 def _strip_data_uri_images(target) -> None:
     """data-URI <img> 를 alt 텍스트로 바꾼다.
 
@@ -464,9 +510,11 @@ def parse(file_bytes: bytes, filename: str, *, ocr_url: str | None = None) -> Ro
     """html/htm → 단일 페이지 blocks. ocr_url 은 router 계약상 받되 쓰지 않는다."""
     text = decode_text(file_bytes, filename)
     soup = BeautifulSoup(text, "html.parser")
-    for tag in soup(["script", "style"]):
+    # head 도 제거한다 — <title>/<meta> 가 본문 텍스트로 섞이는 것을 막는다.
+    # (_pick_target 이 soup 전체를 고를 수 있으므로 반드시 그 앞에서 떼어낸다.)
+    for tag in soup(["script", "style", "head"]):
         tag.extract()
-    target = soup.find("body") or soup
+    target = _pick_target(soup)
     _strip_data_uri_images(target)
 
     # sentinel 은 호출마다 유일해야 한다. 고정 문자열이면 본문에 같은 글자가 있을 때
@@ -501,7 +549,7 @@ def parse(file_bytes: bytes, filename: str, *, ocr_url: str | None = None) -> Ro
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `PYTHONPATH=$PWD /Users/xxx/workspace/8.kb-pipeline/.venv-kb/bin/python -m pytest parse_service/tests/test_parser_html.py -q`
-Expected: PASS (12 tests)
+Expected: PASS (15 tests)
 
 - [ ] **Step 6: Commit**
 
@@ -1161,12 +1209,16 @@ git commit -m "feat(airgap): html 왕복 스모크 — markdownify 누락과 표
 | 그 외(미지 확장자) | `pdf` | — | — | — | `domain_of` 가 pdf 로 보내고 `app.py:269-271` 의 `%PDF` 가드가 `not a PDF (and not convertible)` 로 거절한다. 별도 폴백 파서 없음 |
 ```
 
-같은 파일의 Excel 서술(`:208` 부근, "Excel(xlsx/xlsm/xls)은 …") 뒤에 한 줄 추가:
+같은 파일의 **§8 Excel 절**(현재 `:208`, "Excel(xlsx/xlsm/xls)은 parse-svc `parsers/excel` 이 vendored…" 로 시작하는 문단) 끝에 한 줄 추가한다. **주의: "Excel(xlsx/xlsm/xls)은" 이라는 문자열은 이 파일에 두 곳(§3 도입부 `:50`, §8 `:208`)에 있다.** 고칠 곳은 **§8** 이다(vendored·`excel_parser_rag` 를 언급하는 쪽):
 
 ```markdown
 - **csv 의 청킹 소유는 엑셀 레인**(2026-08-11) — csv 는 메모리상 xlsx 로 합성돼
   `chunk_needed=False` 로 자체 청킹된다. facade `/chunk` 를 타지 않는다.
 ```
+
+§3 도입부(`:50`)의 다른 한 곳도 함께 고친다 — `Excel(xlsx/xlsm/xls)은 \`chunk_needed=False\` 로 자체청킹 청크를 그대로 반환한다.` 를 `Excel(xlsx/xlsm/xls) 과 CSV 는 \`chunk_needed=False\` 로 자체청킹 청크를 그대로 반환한다.` 로.
+
+편집 후 확인: `grep -n "4분기\|fallback\|TXT·MD·CSV" _workspace/01-architecture.md` 가 **아무것도 출력하지 않아야** 한다. 출력이 있으면 위 표 편집 중 빠뜨린 행이 있는 것이다.
 
 - [ ] **Step 2: `_workspace/02-changes.md` 에 절 추가**
 
@@ -1315,7 +1367,9 @@ git commit -m "docs: 구조화 텍스트 레인 반영 — 라우팅 표/청킹 
 (v2 까지 두 라운드 연속으로 "계획서 코드 vs 계획서 테스트" 불일치가 잡혔기 때문이다).
 
 - Task 1 + Task 4 코드 → 자체 테스트 **21/21 통과**(textdecode 7 + csv_to_xlsx 14).
-- Task 2 코드 → 자체 테스트 **12/12 통과**.
+- Task 2 코드 → 자체 테스트 **15/15 통과**(v4 의 `_pick_target` + head 제거 포함).
+- Task 4 산출 xlsx 를 **실제 엑셀 레인에 통과**시켜 회귀 없음 확인 — 정상/수식셀/숫자많음
+  3종 모두 `gate.ok=True`, `=1+1` 이 청크 텍스트에 보존(`사번: 1001, 수식: =1+1`).
 
 따라서 Task 1·2·4 의 `Expected: PASS (N tests)` 는 실측된 수치다. 구현 시 코드를 그대로
 옮기면 통과해야 하며, 통과하지 않으면 **옮기는 과정에서 달라진 것**이다.
