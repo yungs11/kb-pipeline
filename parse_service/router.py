@@ -34,24 +34,24 @@ def _excel_parse(fb, fn, *, ocr_url, excel_url):
 def _text_parse(fb, fn, **_):
     """평문 → 단일 페이지 blocks. 변환도 파서도 거치지 않는다."""
     from kb_pipeline.blockify import hybrid_to_blocks
-    # BOM 이 있을 때만 utf-16 을 시도한다. **순서가 중요하다** — utf-16 을 무조건 앞에 두면
-    # cp949 한국어가 U+FFFD 없이 '성공'해 mojibake 가 임베딩까지 간다.
-    #   실측: "규정가나".encode("cp949").decode("utf-16") == '풱꓁ꆰꪳ'
-    cands = (("utf-16",) if fb[:2] in (b"\xff\xfe", b"\xfe\xff") else ()) + ("utf-8-sig", "cp949")
-    for enc in cands:
-        try:
-            md = fb.decode(enc)
-            break
-        except UnicodeDecodeError:
-            continue
-    else:
-        # errors="replace" 금지 — U+FFFD 범벅이 '성공한 쓰레기'로 임베딩까지 간다.
-        raise ParserError(f"decode failed ({'/'.join(cands)}): {fn}")
+    from parse_service.tools.textdecode import decode_text
+    md = decode_text(fb, fn)
     if not md.strip():
         raise ParserError(f"empty text file: {fn}")
+    blocks = hybrid_to_blocks(md, page_idx=1)
+    # 빈 블록 가드 — 본문이 있는데 블록이 0개면 조용한 빈 적재가 된다. XML 편입으로 이
+    # 경로가 실제로 열린다: `<?xml …?><root><item id="1"/></root>` 같은 속성 전용 export 는
+    # 텍스트 노드가 없어 blocks=0 인데, run_parse 는 예외 없이 enriched_content="" 로 200 을
+    # 돌려주고 facade `/chunk` 에도 빈 본문 가드가 없다. 편입 전에는 `%PDF` 가드가
+    # parse_failed 로 크게 죽었으므로, 가드가 없으면 "큰 실패 → 조용한 성공" 으로 실패
+    # 유형이 나빠진다. `parsers/html` 도 같은 가드를 갖는다(레인 간 대칭).
+    #   부수효과(의도됨): 코드펜스만 있는 .md, 주석만 있는 파일, '---' 만 있는 파일처럼
+    #   지금까지 조용히 빈 결과를 내던 입력도 이제 parse_failed 로 크게 실패한다.
+    #   (코드펜스가 0 블록인 근본 원인은 blockify 에 fence 분기가 없는 것 — deferred D47.)
+    if not blocks:
+        raise ParserError(f"no blocks from text file: {fn}")
     return RouteResult(kind="pages", chunk_needed=True,
-                       pages=[{"page_number": 1,
-                               "blocks": hybrid_to_blocks(md, page_idx=1)}])
+                       pages=[{"page_number": 1, "blocks": blocks}])
 
 
 _PARSERS = {"pdf": _pdf_parse, "excel": _excel_parse,
