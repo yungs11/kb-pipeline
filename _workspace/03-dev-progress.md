@@ -30,7 +30,7 @@
 | **W3** | Community 배치 | ✅ merged | `kb_pipeline/community.py` — Louvain + qwen 리포트 + `global_query`. 순수 Python(edgequake 불변). 라이브: 커뮤니티 60/리포트 15 |
 | **W4** | 정합성/RLS | ◐ 하드닝 과제 | 앱레벨 격리 검증됨. DB레벨 FORCE RLS 는 superuser 롤 우회로 무력(아래 §4) |
 | **W5** | Search 머지 | ✅ 라이브러리 + ✅ 명시 mode 배선 / ✗ 자동 라우터 | `kb_pipeline/search.py`. facade `/search` 가 `mode=local\|global` 을 받고 global 은 `global_search` 직결(동시성 DB 슬롯 + 전용 LLM 타임아웃). kb 챗·프론트 토글까지 배선(B). `route()` 자동 라우팅은 **의도적 미배선** — 명시 토글로 대체 |
-| **W6** | 파서 라우팅 | ◐ 권고 반영 | markitdown 병합표 손실 → 병합 중요 pptx/DOCX 구조파서 라우팅(02-changes §4) |
+| **W6** | 파서 라우팅 | ◐ 권고 반영 | markitdown 병합표 손실 → 병합 중요 pptx/DOCX 구조파서 라우팅(02-changes §4). 2026-08-11 markup-lane 에서 html 이 형변환 API 밖으로 나오고 csv 가 엑셀 레인으로 이동(markitdown 재검토 후 재차 기각) |
 
 ---
 
@@ -159,6 +159,8 @@ plan: `docs/superpowers/plans/2026-07-02-parser-consolidation-phase2.md` (v3 REA
 | **2c** | document-parser OCR(pptx+이미지) in-process 흡수 | ✅ 완료 (Task10~11, `7a0f980`+`ee39a66`) — vl_api/elements_parser/image_utils/pdf_converter/prompts 이식(config→env 는 httpx 직접, PDF 렌더는 PyMuPDF 직접), `ocr_file_to_elements`+`ocr_elements_sync` 진입, pdf 스캔페이지 OCR 도 in-process. document-parser stop 상태에서 png/pptx /parse 200+enriched 정상. 스택검증 발견 수정 2건: ① AsyncClient 루프 재바인드(asyncio.run per-call → "Event loop is closed") ② 순수텍스트 figure→text 재분류(blockify figure→image 매핑이 markdown 을 버려 enriched 빈 문자열 — 구 HTTP 경로에도 있던 잠재 결함). compose parse-svc 에 MODEL_API_URL/KEY·GOTENBERG_URL·GUIDED_JSON_MODE=response_format 추가 |
 | **2d** | markitdown 완전 제거 + docx/폴백=kordoc + facade 파싱코드 삭제(/ingest/submit·status 제거) | ✅ 완료 (Task12~14, `13c8dc0`+`a8f9818`+`f3e73f3`) — ① `tools/kordoc.py`(CLI 래퍼)+`parsers/docx`(kordoc 네이티브, 병합표 `<table>` 보존), router docx=kordoc·fallback=kordoc, markitdown 폴백 제거. ② `parse_service/parsing.py` 삭제, `_safe_basename`→`tools.safe_basename`, blockify `PARSER_ROUTING`/`recommended_parser` 삭제(W6 측정은 역사 기록 유지), requirements markitdown 제거, 재유입 가드 `test_no_markitdown`. ③ facade `service/parsing.py`·`excel_parser_client.py`·`ingest.py` 삭제, `/ingest/submit`·`/ingest/status` 제거(`/ingest` orchestration 유지), Dockerfile.facade JRE 제거. kb-backend `/ingest/submit\|status` 참조 0건 확인 후 진행 |
 | **2e** | compose 정리(excel-parser·document-parser·redis 제거) + Dockerfile 런타임 + E2E | ✅ 완료 (Task15~17, `fddbd2a`+`ee840dd`+문서커밋) — ① Dockerfile.parse-svc 에 node/kordoc(`npm i -g kordoc`) 런타임(이미지 검증 kordoc 3.8.3/java21/fitz). ② compose 에서 excel-parser·document-parser·redis 서비스+redis_data 볼륨 삭제, parse-svc `EXCEL_PARSER_BACKEND` override 제거(이미지 기본 auto)+`KBP_VL_MAX_CONCURRENT`, depends_on=gotenberg+minio, facade/adaptive_chunk 의 OCR/EXCEL URL 제거, `.env.example`·override.yml 정리. 스택 down/build/up 전 서비스 healthy(excel-parser/document-parser/redis 부재). ③ E2E: 확장자별 단독 indexed 검증(xlsx=excel_rag_parser·webp=recursive_1100·pdf=9청크·docx=kordoc `<table>` 보존). **다형식 동시적재+검색 완주는 OpenRouter LLM 처리량 지연으로 미완**(범위 밖 — 크레딧 여유 시 재확인). |
+
+| **markup-lane** | html→`parsers/html`(형변환 미경유), csv→엑셀 레인(openpyxl 고정), xml→text 편입 | ✅ 완료 (브랜치 `feat/markup-lane`) — plan v7 READY(ultracode 6라운드). 신규 의존성 `markdownify` 1개, env 변경 없음. `verify-bundle.sh` html 왕복 스모크 추가 후 **실제 이미지로 실행 확인**(`✓ html 왕복 성공 — html_blocks=2`). 회귀 700 passed/3 skipped. 남은 한계는 `deferred.md` D39~D50 |
 
 **Phase 2 파서 일원화 종료(2026-07-03)**: 파싱 fleet 이 parse-svc 단일 이미지 in-process 로 통합(java+node/kordoc+PyMuPDF). 외부 excel-parser/document-parser/redis 제거, markitdown 완전 제거(office→PDF)만 잔존. 상세는 02-changes §7.
 

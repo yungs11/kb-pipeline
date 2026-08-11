@@ -47,20 +47,21 @@
 
 ## 3. parser (parse-svc, :19001) — Parse + Blockify + Modal Enrich
 
-`parse_service/app.py`. 한 번의 `POST /parse` 안에서 FRONT 3단계를 연속 수행해 **enriched_content + 모달 스팬 + 페이지 스팬**을 산출한다. **Phase 2 파서 일원화 완료**: Excel·docx·OCR(pptx/이미지/스캔) 파싱이 전부 parse-svc **in-process** 다(외부 excel-parser :18055 / document-parser :18050 HTTP 미경유). Excel(xlsx/xlsm/xls)은 `chunk_needed=False` 로 자체청킹 청크를 그대로 반환한다.
+`parse_service/app.py`. 한 번의 `POST /parse` 안에서 FRONT 3단계를 연속 수행해 **enriched_content + 모달 스팬 + 페이지 스팬**을 산출한다. **Phase 2 파서 일원화 완료**: Excel·docx·OCR(pptx/이미지/스캔) 파싱이 전부 parse-svc **in-process** 다(외부 excel-parser :18055 / document-parser :18050 HTTP 미경유). Excel(xlsx/xlsm/xls) 과 CSV 는 `chunk_needed=False` 로 자체청킹 청크를 그대로 반환한다.
 
-### 3.1 Parse — 확장자별 파서 라우팅 (`parse_service/router.py`, 4분기 · 폴백 없음)
+### 3.1 Parse — 확장자별 파서 라우팅 (`parse_service/router.py`, 5분기 · 폴백 없음)
 
 라우팅 소유는 `parse_service/router.py`(구 `kb_pipeline.blockify.PARSER_ROUTING`/`recommended_parser` 는 Phase 2d 에서 삭제). markitdown 은 코드·requirements 에서 완전 제거(재유입 가드 `parse_service/tests/test_no_markitdown.py`).
 
 | 확장자 | 도메인 | 파서(in-process) | `<table>` HTML | `chunk_needed` | 비고 |
 |--------|--------|------------------|----------------|----------------|------|
 | PDF | `pdf` | **문서수준 게이트**(triage) → 순수텍스트=**OpenDataLoader**(`markdown_with_html=True`) / 스캔·혼합=**MinerU**(hybrid-http-client) | ✅ (06=70개, pipe=0) | True | JRE 21 의존(ODL). 문서당 .md 1개 → `<<<ODL_PAGE_BREAK>>>` sentinel 로 페이지 복원. 게이트: `parse_service/parsers/pdf/gate.py` (triage 버킷 집계). MinerU 는 지연 import(로컬 미설치 허용), 실패 시 ODL/VL 폴백 |
-| XLSX/XLSM/XLS | `excel` | **excel_parser_rag**(vendored, `auto`→전결 openpyxl / 그 외 kordoc) | ✅ | **False** | LLM 없이 parse+chunk 결합 → native 청크. `chunk_strategy=excel_rag_parser` |
-| DOCX·HWP·HWPX·DOC·PPT·PPTX·HTML | `pdf` | **원격 변환 API → PDF → ODL/GW/VL** | ✅ | True | `run_parse` 가 변환 후 `.pdf` 이름으로 PDF 레인에 넣는다(2026-08-06) |
+| XLSX/XLSM/XLS/**CSV** | `excel` | **excel_parser_rag**(vendored, `auto`→전결 openpyxl / 그 외 kordoc) | ✅ | **False** | LLM 없이 parse+chunk 결합 → native 청크. `chunk_strategy=excel_rag_parser`. csv 는 헤더 서식을 준 xlsx 로 메모리 합성해 **openpyxl 고정**(2026-08-11, `parsers/excel/csv_to_xlsx.py`) |
+| DOCX·HWP·HWPX·DOC·PPT·PPTX | `pdf` | **원격 변환 API → PDF → ODL/GW/VL** | ✅ | True | `run_parse` 가 변환 후 `.pdf` 이름으로 PDF 레인에 넣는다(2026-08-06). html 은 2026-08-11 이 경로에서 빠졌다 |
+| **HTML/HTM** | `html` | **`parsers/html`**(bs4 + markdownify, 형변환 API 미경유) | ✅ (원본 `<table>` 보존) | True | 최상위 표를 nonce sentinel 로 빼고 나머지만 markdown 화 후 복원. data-URI `<img>` 는 alt 로 대체(2026-08-11) |
 | 단일 이미지 | `ocr` | **in-process VL OCR**(`parsers/ocr`) | ✅ + elements[] | True | 이미지→base64 → **PAGE_HYBRID**(전사 + 시각 서술) VL 호출. `IMAGE_EXTS`={png,jpg,jpeg,gif,bmp,tif,tiff,webp} |
-| TXT·MD·CSV·JSON | `text` | 그대로 블록화(utf-8-sig/utf-16/cp949) | — | True | 변환·파서 없음. `page_count=1` |
-| 그 외(폴백) | `fallback` | **kordoc** CLI | ✅ | True | 미지 확장자(hwpx 등)는 kordoc 로(구 markitdown 폴백 제거) |
+| TXT·MD·JSON·LOG·XML | `text` | 그대로 블록화(`tools/textdecode.py`) | — | True | 변환·파서 없음. `page_count=1`. BOM utf-32/utf-16 → utf-8-sig → cp949. XML 은 2026-08-11 편입. 블록 0개면 `parse_failed`(조용한 빈 적재 금지) |
+| 그 외(미지 확장자) | `pdf` | — | — | — | `domain_of` 가 pdf 로 보내고 `app.py` 의 `%PDF` 가드가 `not a PDF (and not convertible)` 로 거절한다. 별도 폴백 파서 없음 |
 | 스캔/혼합 PDF | (pdf 내부, MinerU 레인) | **MinerU** hybrid (PaddleOCR 로컬 layout + **VLM 원격**) | ✅ | True | 게이트가 `OCR_NEEDED` 하나라도 있으면 `parse_method='ocr'` 강제(스캔 텍스트 유실 방지), 스캔 없는 텍스트+이미지 혼합만 `'auto'`. content_list→`elements_to_blocks`. VLM=`MINERU_VLM_SERVER_URL`(별도 GPU). 미설정/실패/빈결과 시 **ODL/in-process VL 폴백**(가용성). 배포서버 전용(`docs/mineru-deploy-notes.md`) |
 | 스캔 PDF 폴백 | (pdf 내부) | **in-process VL OCR** | ✅ | True | MinerU 미가동(로컬/실패) 시 폴백. 글자 거의 없는 페이지만 렌더 → VL OCR 보충(best-effort 비치명) |
 
@@ -206,6 +207,8 @@ Rust, `crates/edgequake-pipeline`. passthrough 로 facade 청크를 받아 추�
 ## 8. Excel 전용 경로 — excel_parser_rag (in-process, Phase 2b)
 
 Excel(xlsx/xlsm/xls)은 parse-svc `parsers/excel` 이 vendored **excel_parser_rag** 패키지를 **in-process** 로 직접 호출해(구 excel-parser :18055 HTTP 제거) **LLM 없이** parse+chunk 를 함께 수행하고 native 청크를 `chunk_needed=False` 로 반환한다(`chunk_strategy=excel_rag_parser`). 백엔드는 `EXCEL_PARSER_BACKEND`(이미지 기본 `auto`): 전결 문서 → openpyxl, 그 외 → kordoc(.md). kordoc CLI 는 parse-svc 이미지에 `npm install -g kordoc` 로 내장(`KORDOC_BIN`). 표는 `<table>` HTML 보존.
+
+- **csv 의 청킹 소유는 엑셀 레인**(2026-08-11) — csv 는 헤더 행에 서식(볼드+채우기)을 준 xlsx 로 메모리 합성돼(`parse_service/parsers/excel/csv_to_xlsx.py`) `chunk_needed=False` 로 자체 청킹된다. facade `/chunk` 를 타지 않는다. 백엔드는 **openpyxl 고정** — `auto` 는 전결 키워드나 계층 지배도가 없으면 kordoc 으로 떨어지는데 csv 유래 평면 표는 둘 다 아니고, `KORDOC_BIN` 없는 환경에선 실패한다. 헤더 서식이 없으면 `header_detector` 의 style gate 에 걸려 청크가 `사번: 1001` 대신 `A: 1001` 로 퇴화한다. **한계**: 첫 컬럼 헤더가 계층 spine 용어(`항목`·`구분`·`품명` 등)를 포함하면 그 열의 키 이름이 `A:` 로 떨어진다(값은 청크 경로에 보존) — `deferred.md` D45.
 
 > Phase 2e 로 외부 excel-parser/document-parser/redis 컨테이너는 compose 에서 제거됨 — 파싱 fleet 은 parse-svc 단일 이미지(java+node/kordoc+PyMuPDF)로 통합. office/hwp→PDF 는 원격 변환 API(2026-08-06, gotenberg 제거).
 
