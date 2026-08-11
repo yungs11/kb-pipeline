@@ -244,10 +244,44 @@ print("OK chunks=%d gate_ok=%s" % (n, (gs or {}).get("ok")))
     *) echo "  ${RED}✗ 엑셀 파싱 왕복 실패 — 이미지가 healthy 로 떠도 xlsx 적재가 깨진다:${RST}"
        echo "$xout" | tail -6 | sed 's/^/    /'; return 1 ;;
   esac
+  # ★ html 레인은 2026-08-11 형변환 API 밖으로 나왔다(parsers/html + markdownify).
+  #   markdownify 가 이미지에 빠지면 html 적재만 조용히 죽는다 — requirements.txt 에
+  #   넣었어도 `pip install .` 이 건너뛰는 전례가 있었다(kb 이미지 문서 추출기 누락).
+  #   import 존재만이 아니라 **병합셀 표가 <table> 로 살아 나오는지**까지 확인한다.
+  echo "== html 파싱 왕복 스모크(markdownify + 표 보존) =="
+  local HTML_PY='
+import sys
+from parse_service.parsers.html import parse as hparse
+raw = b"<html><body><h1>T</h1><table><tr><th rowspan=\"2\">a</th><th colspan=\"2\">b</th></tr><tr><td>1</td><td>2</td></tr></table></body></html>"
+rr = hparse(raw, "smoke.html")
+blocks = (rr.pages or [{}])[0].get("blocks") or []
+tables = [b for b in blocks if b.get("type") == "table"]
+if not tables:
+    print("NO_TABLE_BLOCK: %d blocks" % len(blocks)); sys.exit(1)
+body = tables[0].get("table_body") or ""
+if "rowspan" not in body or "colspan" not in body:
+    print("MERGE_LOST: %s" % body[:120]); sys.exit(1)
+print("OK html_blocks=%d" % len(blocks))
+'
+  local hout
+  if [ -n "$TIMEOUT_BIN" ]; then
+    hout="$("$TIMEOUT_BIN" "${IMPORTS_CHECK_TIMEOUT:-120}" "$ENGINE" run --rm -w /app -e PYTHONPATH=/app \
+      --entrypoint python "$ref" -c "$HTML_PY" 2>&1)"
+  else
+    hout="$("$ENGINE" run --rm -w /app -e PYTHONPATH=/app --entrypoint python "$ref" -c "$HTML_PY" 2>&1)"
+  fi
+  case "$hout" in
+    *OK\ html_blocks=*) echo "  ${GRN}✓ html 왕복 성공 — ${hout##*OK }${RST}" ;;
+    *NO_TABLE_BLOCK:*|*MERGE_LOST:*) echo "  ${RED}✗ html 표 보존 실패 — pipe 평탄화 회귀다:${RST}"
+       echo "$hout" | tail -4 | sed 's/^/    /'; return 1 ;;
+    *) echo "  ${RED}✗ html 파싱 왕복 실패 — markdownify 누락 또는 parsers/html import 실패:${RST}"
+       echo "$hout" | tail -6 | sed 's/^/    /'; return 1 ;;
+  esac
   # ⚠️ 파일변환(한컴) API 는 이미지 안 도구가 아니라 온프렘 HTTP 엔드포인트라 여기서
   # 도달성을 못 확인한다 — check_env() 의 KBP_FILECONVERT_URL 값 존재 확인이 유일한
-  # 사전 방어선이다. docx/hwp/ppt/html 파싱은 그 서비스가 실제로 응답해야 성공한다
+  # 사전 방어선이다. docx/hwp/ppt 파싱은 그 서비스가 실제로 응답해야 성공한다
   # (A6 — 구 kordoc docx 폴백은 제거됨, 지금은 이 경로가 유일하다).
+  # (html 은 2026-08-11 이 경로에서 빠졌다 — parsers/html 이 형변환 없이 처리한다.)
 }
 
 # --parse-only 를 어디에 붙여도 받는다(순서 무관):  --env .env --parse-only  /  --parse-only --env .env
