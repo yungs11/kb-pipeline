@@ -68,3 +68,73 @@ def test_empty_chunks_returns_gate_summary(monkeypatch):
     monkeypatch.setattr(excel_parser, "_fetch_rag_chunks", lambda fb, fn, excel_url: ([], {"sheets": []}))
     res = excel_parser.parse(b"PK", "a.xlsx", excel_url="http://x")
     assert res.kind == "chunks" and res.chunks == [] and res.gate_summary is not None
+
+
+def test_csv_routes_to_excel_lane():
+    from parse_service import router
+    from parse_service.tools import fileconvert
+
+    assert router.domain_of("a.csv") == "excel"
+    # 두 집합이 함께 바뀌어야 한다 — 하나만 바꾸면 pdf 도메인으로 떨어져
+    # app.py 의 %PDF 가드가 모든 csv 를 거부한다.
+    assert "csv" not in fileconvert.TEXT_EXTS
+    assert fileconvert.needs_convert("a.csv") is False
+
+
+def test_csv_yields_header_keyed_record_chunks(monkeypatch):
+    """csv 청크는 `사번: 1001` 이어야 한다. `A: 1001` 이면 헤더 감지가 실패한 것."""
+    # auto 는 전결 키워드/계층 지배도가 없으면 kordoc 으로 떨어진다 → csv 는 openpyxl 고정.
+    # env 를 auto 로 두고도 성공해야 그 고정이 실제로 걸린 것이다.
+    monkeypatch.setenv("EXCEL_PARSER_BACKEND", "auto")
+    monkeypatch.delenv("KORDOC_BIN", raising=False)
+
+    raw = "사번,성명,부서\n1001,김철수,전략기획부\n1002,이영희,리스크관리부\n".encode("utf-8")
+    rr = excel_parser.parse(raw, "인사현황.csv")
+
+    assert rr.kind == "chunks" and rr.chunk_needed is False
+    assert rr.gate_summary is not None and rr.gate_summary.get("ok") is True
+    joined = "\n".join(c["text"] for c in rr.chunks)
+    assert "사번: 1001, 성명: 김철수, 부서: 전략기획부" in joined
+    assert "A: 1001" not in joined
+
+
+def test_csv_chunks_do_not_leak_tempfile_stem():
+    raw = "사번,성명\n1001,김철수\n".encode("utf-8")
+    rr = excel_parser.parse(raw, "인사현황.csv")
+    joined = "\n".join(c["text"] for c in rr.chunks)
+    assert "excel_parser_" not in joined
+    assert "인사현황" in joined
+
+
+def test_csv_formula_cell_survives_into_chunks():
+    """= 로 시작하는 셀이 수식으로 승격되면 data_only 읽기에서 None 이 되어
+    청크에서 조용히 사라진다(실측). 레인 왕복까지 보존되는지 본다."""
+    raw = "사번,수식\n1001,=1+1\n".encode("utf-8")
+    rr = excel_parser.parse(raw, "인사현황.csv")
+    assert "=1+1" in "\n".join(c["text"] for c in rr.chunks)
+
+
+def test_xlsx_still_honours_backend_env(monkeypatch):
+    """csv 고정이 xlsx 경로의 EXCEL_PARSER_BACKEND 존중을 깨뜨리지 않았는지."""
+    seen = {}
+
+    class _FakeBackend:
+        def parse(self, path, config):
+            seen["backend"] = config.backend
+            return [], {}
+
+    monkeypatch.setenv("EXCEL_PARSER_BACKEND", "kordoc")
+    monkeypatch.setattr(
+        "parse_service.parsers.excel.excel_parser_rag.backends.get_backend",
+        lambda name: _FakeBackend())
+    monkeypatch.setattr(
+        "parse_service.parsers.excel.excel_parser_rag.gate.compute_gate_summary",
+        lambda p, c: {"ok": True, "sheets": []})
+
+    import io as _io
+    from openpyxl import Workbook
+    wb = Workbook(); wb.active.append(["a", "b"])
+    buf = _io.BytesIO(); wb.save(buf)
+
+    excel_parser.parse(buf.getvalue(), "a.xlsx")
+    assert seen["backend"] == "kordoc"

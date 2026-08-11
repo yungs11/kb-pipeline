@@ -11,7 +11,8 @@ from pathlib import Path
 
 from parse_service.parsers import RouteResult, ParserError
 
-EXCEL_EXTS = {"xlsx", "xlsm", "xls"}
+#: csv 는 2026-08-11 편입 — 메모리상 xlsx 로 합성해 같은 백엔드로 흘린다(`csv_to_xlsx`).
+EXCEL_EXTS = {"xlsx", "xlsm", "xls", "csv"}
 
 
 def normalize_rag_chunk(rc: dict, index: int) -> dict | None:
@@ -59,9 +60,20 @@ def _fetch_rag_chunks(file_bytes: bytes, filename: str, excel_url: str | None = 
     # document_title로 명시한다. basename 정규화는 내부 직접 호출에도 경로 문자열이
     # 제목으로 섞이지 않게 하는 방어선이다.
     safe_filename = Path((filename or "upload.xlsx").replace("\x00", "")).name or "upload.xlsx"
-    suffix = Path(safe_filename).suffix.lower() or ".xlsx"
+    is_csv = Path(safe_filename).suffix.lower() == ".csv"
+    if is_csv:
+        # csv → xlsx 합성. document_title 은 아래에서 원본 stem 을 그대로 쓰므로
+        # 파일명은 바꾸지 않고 바이트와 suffix 만 갈아끼운다.
+        from parse_service.parsers.excel.csv_to_xlsx import csv_bytes_to_xlsx
+        file_bytes = csv_bytes_to_xlsx(file_bytes, safe_filename)
+    suffix = ".xlsx" if is_csv else (Path(safe_filename).suffix.lower() or ".xlsx")
     cfg_kwargs: dict = {
-        "backend": os.environ.get("EXCEL_PARSER_BACKEND", "auto"),
+        # csv 는 백엔드를 openpyxl 로 고정한다. 기본 `auto` 는 "전결" 키워드(Tier1)나
+        # 계층 지배도(Tier1.5)가 있을 때만 openpyxl 을 쓰고 그 외에는 kordoc 으로
+        # 떨어지는데(backends/auto_backend.py), csv 유래 평면 표는 둘 다 아니다.
+        # csv 에는 병합셀·다중시트·수식이 없어 kordoc 의 렌더 충실도 이점이 없고,
+        # KORDOC_BIN 이 없는 환경에선 아예 실패한다(실측).
+        "backend": "openpyxl" if is_csv else os.environ.get("EXCEL_PARSER_BACKEND", "auto"),
         "document_title": Path(safe_filename).stem,
     }
     if os.environ.get("KORDOC_BIN"):

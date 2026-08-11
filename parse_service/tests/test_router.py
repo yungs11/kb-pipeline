@@ -12,7 +12,8 @@ from parse_service import router
     ("A.HWP", "pdf"),        # 대소문자 무시
     ("a.xlsx", "excel"), ("a.xls", "excel"),
     ("a.png", "ocr"), ("a.jpeg", "ocr"),
-    ("a.txt", "text"), ("a.csv", "text"), ("a.md", "text"), ("a.xml", "text"),
+    ("a.csv", "excel"),      # 2026-08-11 엑셀 레인으로 이동(행 레코드 청크)
+    ("a.txt", "text"), ("a.md", "text"), ("a.xml", "text"),
     ("a.html", "html"), ("A.HTM", "html"),   # 형변환 API 미경유(2026-08-11)
     ("upload", "pdf"),       # 확장자 없음 → pdf 도메인(%PDF 가드는 run_parse 에)
 ])

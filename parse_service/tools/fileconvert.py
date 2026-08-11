@@ -30,9 +30,12 @@ _transport = None
 CONVERTIBLE_EXTS = {"hwp", "hwpx", "doc", "docx", "ppt", "pptx"}
 
 #: 변환도 파싱도 불필요한 평문. 그대로 블록화한다(router 의 text 도메인).
-#: xml 은 2026-08-11 편입 — 그 전엔 어느 집합에도 없어 pdf 도메인으로 떨어졌고
-#: `app.py` 의 `%PDF` 가드에서 `not a PDF (and not convertible)` 로 죽었다.
-TEXT_EXTS = {"txt", "md", "markdown", "csv", "json", "log", "xml"}
+#: csv 는 2026-08-11 엑셀 레인으로 이동(행 레코드 청크). xml 은 같은 날 편입 —
+#: 그 전엔 어느 집합에도 없어 pdf 도메인으로 떨어졌고 `app.py` 의 `%PDF`
+#: 가드에서 `not a PDF (and not convertible)` 로 죽었다.
+#: **csv 를 여기서 빼는 것과 `EXCEL_EXTS` 에 넣는 것은 한 커밋이어야 한다** —
+#: 쪼개면 사이 커밋에서 csv 가 pdf 도메인으로 떨어져 모든 csv 업로드가 거부된다.
+TEXT_EXTS = {"txt", "md", "markdown", "json", "log", "xml"}
 
 
 def ext_of(filename: str) -> str:
