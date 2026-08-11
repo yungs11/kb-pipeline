@@ -11,6 +11,7 @@ class RouteResult:
     pages: list | None = None    # PageDoc[] = [{"page_number", "blocks"}]
     chunks: list | None = None   # facade 청크 스키마 [{"chunk_index","text","titles_context","pages"}]
     gate_summary: dict | None = None  # excel-gate 요약 (엑셀 경로만 채움; 그 외 None)
+    page_verdicts: list | None = None  # paddle_gw 페이지 판정 (그 레인만 채움; 그 외 None)
 
 
 class ParserError(Exception):

@@ -1,21 +1,49 @@
-"""VL 퇴화(무한반복) 블록 필터 — 통계 신호로 검출·제거.
+"""퇴화(무한반복) 블록 — **증거 생성기**. 삭제는 확실한 것(HARD)에만 한다.
 
-VLM(qwen/PaddleOCR-VL/게이트웨이)이 어려운 페이지(밀집 양식/저품질 스캔)에서 같은 구절을
-무한 반복 생성하는 퇴화(degenerate loop)가 관측됨(2026-07-15, 소유권 문서 양식 페이지:
-"기계음 손상완을 잡고"×수십 등). LLM 없이 두 가지 싼 신호로 검출:
+VLM(qwen/PaddleOCR-VL/게이트웨이)이 어려운 페이지에서 같은 구절을 무한 반복 생성하는
+퇴화(degenerate loop)가 관측됨(2026-07-15). LLM 없이 싼 통계 신호로 검출한다.
 
-  ① 지배 구절 반복 — 단어 5-gram 중 최빈 구절이 과다 반복 + 텍스트 대부분을 차지
-  ② 압축률 — zlib 압축비. 정상 한국어 ~0.4-0.6, 반복 루프 <0.15
+**2026-08-11 재설계 — detect → decide → mutate 분리.**
+이전 버전은 판정 즉시 블록을 삭제했고, 그 결과 **정상 법인등기부 표가 R4(TTR)에 걸려
+production 에서 삭제되고 있었다**(실측: 죽림현대 p18 1,526자 / 시흥 장현지구 p52 1,673자,
+둘 다 사람 대조 USABLE). 등기부 표는 같은 날짜·등기원인·문구 반복이 **정상**이라 lexical
+diversity 가 원래 낮다. 낮은 TTR 은 "루프일 수도 있음"이라는 **약한 feature** 이지
+"삭제해도 됨"이라는 근거가 아니다.
 
-짧은 텍스트(<200자)는 판정 보류(정상 반복과 구분 불가 — 오검 방지 우선).
-v1 은 text 계열 블록만 검사(표는 셀 값 반복이 정당할 수 있어 제외).
-임계값은 실관측 퇴화 3종 + 정상 한국어 2종 픽스처로 고정(test_degen_filter).
+  검색 recall 이 목표라면 **false quarantine 보다 silent deletion 이 더 나쁘다.**
+
+그래서 규칙을 두 등급으로 나눈다.
+
+  HARD (삭제/격리 근거)   표 R1(압축비) · R2(지배 셀값) · 텍스트 T1/T2/T3
+  SOFT (관측만, 삭제 금지) 표 R3(산재반복) · R4(단어 다양성)
+
+근거(regression set 9/9, 2026-08-11 실측): **R3·R4 가 단독으로 잡는 TP 가 하나도 없다** —
+R3/R4 를 넣게 만든 픽스처(`SCATTER`/`LOW_TTR`)조차 R1 이 잡는다. 반면 R4 는 실측 FP 2건의
+**단독 원인**이다. 텍스트 규칙은 60p 에서 TP 5 / observed FP 0 이라 손대지 않는다.
+
+env:
+  KBP_DEGEN_COMPRESS_MAX  표 R1 임계(기본 0.16). **호출 시점에 읽는다** — 모듈 상수로 두면
+                          import 시 1회 고정돼 monkeypatch 도 폐쇄망 재기동도 안 먹는다.
+                          텍스트 T1 은 `_COMPRESS_MAX` 를 그대로 쓴다(무변경 원칙).
+  KBP_DEGEN_SOFT_RULES    SOFT 로 강등할 규칙(기본 "R3,R4"). 값이 **"none"** 이면 전 규칙
+                          HARD = 구동작 복원(되돌림 손잡이). 빈 문자열은 in-process 전용 —
+                          compose 의 `${VAR:-default}` 가 빈 값에도 기본값을 대입하므로
+                          폐쇄망에서는 센티널로 쓸 수 없다.
+
+불변식(회귀 방지 — 어기면 지금 살아남는 블록이 새로 삭제된다):
+  A. `_TABLE_MIN_CELLS=20` 게이트는 R2/R3/R4 에 그대로 유지한다(R1 만 셀 수 무관).
+  B. R1 은 `len(joined) >= _MIN_LEN(200)` 일 때만 comp 를 계산하고 그 외 **comp=1.0 고정**.
+     이 값이 R3(`comp < 0.36`)의 입력이다.
 """
 from __future__ import annotations
 
 import logging
+import os
+import re
 import zlib
 from collections import Counter
+from dataclasses import dataclass, field
+from enum import Enum
 
 log = logging.getLogger("kb_pipeline.parse_service.parsers.degen_filter")
 
@@ -30,121 +58,261 @@ _SHORT_MIN = 60           # 짧은 루프 판정 하한(이 미만은 완전 보
 _SHORT_G3_COVER = 0.5     # 60-200자: 3-gram 지배 점유율(실관측 퇴화 0.71 vs 정상 최대 0.21)
 _SHORT_TTR_MAX = 0.45     # 60-200자: 단어 다양성 하한(실관측 퇴화 0.33 vs 정상 최저 0.73)
 
+_CELL_RE = re.compile(r"<t[dh][^>]*>(.*?)</t[dh]>", re.S | re.I)
+_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"\s+")
 
-def is_degenerate_text(text: str) -> bool:
-    """VL 퇴화 반복 텍스트인지 판정. 확신 없으면 False(오검 방지 우선)."""
+_TABLE_MIN_CELLS = 20        # 이보다 작은 표는 판정 보류(정상 소형 표 오검 방지)
+_TABLE_DOMINANT_RATIO = 0.6  # 동일 셀 값이 전체(유의미 셀)의 이 비율 이상 = 퇴화
+_TABLE_CELL_MIN_LEN = 2      # 'O'/'X'/숫자 등 1글자 체크셀은 정당한 반복 → 분모·분자에서 제외
+
+_DEFAULT_SOFT_RULES = "R3,R4"
+
+
+class Severity(str, Enum):
+    NONE = "none"
+    SOFT = "soft"    # 애매 — 관측만 한다. **절대 삭제하지 않는다.**
+    HARD = "hard"    # 확실 — 삭제/격리 근거
+
+
+@dataclass(frozen=True)
+class BlockAssessment:
+    """블록 1개의 판정 근거. 무엇이 왜 몇 자였는지 전부 보존한다."""
+    index: int
+    kind: str                                   # "text" | "table"
+    severity: Severity
+    rules: tuple[str, ...] = ()                 # ("R1","R4") — 걸린 규칙 전부
+    chars: int = 0                              # 원래 몇 자였는지(태그·공백 제외)
+    stats: dict = field(default_factory=dict)   # comp / dom / ttr / top5 실측값
+
+    @property
+    def is_hard(self) -> bool:
+        return self.severity is Severity.HARD
+
+
+@dataclass(frozen=True)
+class PageAssessment:
+    page_number: object
+    blocks: tuple[BlockAssessment, ...] = ()
+    chars_before: int = 0
+    chars_hard: int = 0
+    chars_soft: int = 0
+
+    @property
+    def hard_blocks(self) -> tuple[BlockAssessment, ...]:
+        return tuple(b for b in self.blocks if b.is_hard)
+
+    @property
+    def soft_blocks(self) -> tuple[BlockAssessment, ...]:
+        return tuple(b for b in self.blocks if b.severity is Severity.SOFT)
+
+
+def _table_compress_max() -> float:
+    """표 R1 임계 — **호출 시점에** env 를 읽는다(모듈 상수 고정 금지)."""
+    raw = os.environ.get("KBP_DEGEN_COMPRESS_MAX")
+    if not raw:
+        return _COMPRESS_MAX
+    try:
+        return float(raw)
+    except ValueError:
+        log.warning("KBP_DEGEN_COMPRESS_MAX=%r 파싱 실패 — 기본값 %s 사용", raw, _COMPRESS_MAX)
+        return _COMPRESS_MAX
+
+
+def _soft_rules() -> frozenset[str]:
+    """SOFT 로 강등할 규칙 집합.
+
+    `none` **만** 센티널이다(= 공집합 = 전 규칙 HARD = 구동작 복원).
+    미설정과 **빈 값은 기본값(R3,R4)** 으로 본다 — 두 이유로 그래야 한다.
+      ① compose 의 `${VAR:-R3,R4}` 가 빈 값에도 기본값을 대입하므로, in-process 만
+         빈 값을 "전 규칙 HARD" 로 읽으면 호스트와 컨테이너 동작이 갈린다(실측 확인).
+      ② 빈 값에 "삭제가 늘어나는 쪽"을 배정하면 실수로 비웠을 때 안전화가 조용히 풀린다.
+         애매하면 보존이 원칙이다.
+    """
+    raw = (os.environ.get("KBP_DEGEN_SOFT_RULES") or "").strip()
+    if not raw:
+        raw = _DEFAULT_SOFT_RULES
+    if raw.lower() == "none":
+        return frozenset()
+    return frozenset(r.strip().upper() for r in raw.split(",") if r.strip())
+
+
+def _severity_for(rules: tuple[str, ...]) -> Severity:
+    """규칙 하나라도 HARD 면 HARD. 전부 SOFT 목록에 있으면 SOFT."""
+    if not rules:
+        return Severity.NONE
+    soft = _soft_rules()
+    return Severity.SOFT if all(r in soft for r in rules) else Severity.HARD
+
+
+def visible_chars(text: str) -> int:
+    """태그·공백을 뺀 문자 수. `chars` 의 단일 정의 — 구현자가 고르면 안 된다.
+
+    마크업 포함으로 세면 화성 p86 의 잔존율이 0.177 대신 0.116 이 되어 gate 임계가
+    조용히 달라진다(v3 이 "17,425자 보존"으로 5.4배 과장했던 것도 같은 원인).
+    """
+    if not text:
+        return 0
+    return len(_WS_RE.sub("", _TAG_RE.sub("", text)))
+
+
+def _block_body(block: dict) -> tuple[str, str]:
+    """(kind, 판정 대상 문자열)."""
+    if (block or {}).get("type") == "table":
+        return "table", (block.get("table_body") or "")
+    return "text", ((block or {}).get("text") or "")
+
+
+# ─────────────────────────────────────────────────────────── 규칙 판정(순수)
+
+def assess_text_rules(text: str) -> tuple[tuple[str, ...], dict]:
+    """텍스트 블록에서 발화한 규칙과 실측 통계. 삭제하지 않는다."""
+    stats: dict = {}
     if not text or len(text) < _SHORT_MIN:
-        return False
+        return (), stats
     words = text.split()
 
-    # 짧은 텍스트(60-200자): 강한 신호만 — 3-gram 지배 or 극저 다양성.
-    # 실관측(2026-07-15): '완성의 협력을 위한'×5(79자, top3=0.71, ttr=0.33)가 <200 보류로 통과했었음.
+    # T3: 짧은 텍스트(60-200자) — 강한 신호만(3-gram 지배 or 극저 다양성).
     if len(text) < _MIN_LEN:
         n = len(words)
         if n >= 9:
             g3 = Counter(tuple(words[i:i + 3]) for i in range(n - 2))
             top3 = g3.most_common(1)[0][1] * 3 / n
             ttr = len(set(words)) / n
+            stats.update(top3=round(top3, 4), ttr=round(ttr, 4), short=True)
             if top3 >= _SHORT_G3_COVER or ttr <= _SHORT_TTR_MAX:
-                return True
-        return False
+                return ("T3",), stats
+        return (), stats
 
-    # ① 압축률 — 반복 루프는 극단적으로 잘 압축됨.
+    hits: list[str] = []
     raw = text.encode("utf-8")
-    ratio = len(zlib.compress(raw, 6)) / len(raw)
-    if ratio < _COMPRESS_MAX:
-        return True
+    comp = len(zlib.compress(raw, 6)) / len(raw)
+    stats["comp"] = round(comp, 4)
+    if comp < _COMPRESS_MAX:            # T1 — 텍스트 임계는 env 화하지 않는다(무변경 원칙)
+        hits.append("T1")
 
-    # ② 지배 구절(단어 5-gram) 과다 반복.
-    if len(words) >= _NGRAM * 6:
+    if len(words) >= _NGRAM * 6:        # T2 — 지배 구절(단어 5-gram) 과다 반복
         grams = Counter(tuple(words[i:i + _NGRAM]) for i in range(len(words) - _NGRAM + 1))
         top_count = grams.most_common(1)[0][1]
-        if top_count >= _NGRAM_MIN_COUNT and (top_count * _NGRAM) / len(words) >= _NGRAM_MIN_COVER:
-            return True
+        cover = (top_count * _NGRAM) / len(words)
+        stats.update(top5_count=top_count, top5_cover=round(cover, 4))
+        if top_count >= _NGRAM_MIN_COUNT and cover >= _NGRAM_MIN_COVER:
+            hits.append("T2")
 
-    return False
-
-
-_CELL_RE = None  # lazy compile
-
-_TABLE_MIN_CELLS = 20        # 이보다 작은 표는 판정 보류(정상 소형 표 오검 방지)
-_TABLE_DOMINANT_RATIO = 0.6  # 동일 셀 값이 전체(유의미 셀)의 이 비율 이상 = 퇴화
-_TABLE_CELL_MIN_LEN = 2      # 'O'/'X'/숫자 등 1글자 체크셀은 정당한 반복 → 분모·분자에서 제외
+    return tuple(hits), stats
 
 
-def is_degenerate_table(table_body: str) -> bool:
-    """표 퇴화 판정 — 실관측(2026-07-15 소유권 양식페이지) 임계 보정 v3.
+def assess_table_rules(table_body: str) -> tuple[tuple[str, ...], dict]:
+    """표 블록에서 발화한 규칙과 실측 통계. 삭제하지 않는다.
 
-    실측 분포: 정상표 dom≤0.17·comp≥0.39 / 퇴화표 ① 거대반복셀형 comp=0.03(셀2개,
-    '손을'×수십 2490자) ② 산재반복형 dom=0.43·comp=0.34('송개왕' 60셀). 세 규칙:
-      R1 셀 연결 텍스트 압축비 < 0.16 (텍스트와 동일 — 거대반복셀형; 셀 수 무관)
-      R2 지배 셀값 ≥ 0.6 (동일 값이 표를 지배; 20셀+)
-      R3 dom ≥ 0.35 AND comp < 0.36 (산재반복형; 정상 최악 0.17/0.39 와 마진)
-    체크리스트(O/X)·숫자(2글자 미만 셀)는 dom 계산에서 제외(정당한 반복 오검 방지).
+    R1 셀 연결 텍스트 압축비 < KBP_DEGEN_COMPRESS_MAX (셀 수 무관)
+    R2 지배 셀값 ≥ 0.6                      (유의미셀 20+)
+    R3 dom ≥ 0.35 AND comp < 0.36           (유의미셀 20+)
+    R4 단어 다양성 ttr ≤ 0.45                (유의미셀 20+, 단어 30+)
     """
-    global _CELL_RE
+    stats: dict = {}
     if not table_body:
-        return False
-    if _CELL_RE is None:
-        import re
-        _CELL_RE = re.compile(r"<t[dh][^>]*>(.*?)</t[dh]>", re.S | re.I)
-    import re as _re
-    cells = [_re.sub(r"<[^>]+>", "", c).strip() for c in _CELL_RE.findall(table_body)]
+        return (), stats
+    cells = [_TAG_RE.sub("", c).strip() for c in _CELL_RE.findall(table_body)]
     joined = " ".join(c for c in cells if c)
+    stats.update(cells=len(cells), joined=len(joined))
 
-    # R1: 셀 연결 텍스트 압축비 — 거대 반복셀(예: '손을'×수십)은 셀 수와 무관하게 잡힘.
+    hits: list[str] = []
+    # 불변식 B — joined 가 짧으면 comp 를 계산하지 않고 1.0 으로 고정한다(R3 의 입력).
     if len(joined) >= _MIN_LEN:
         raw = joined.encode("utf-8")
         comp = len(zlib.compress(raw, 6)) / len(raw)
-        if comp < _COMPRESS_MAX:
-            return True
+        if comp < _table_compress_max():
+            hits.append("R1")
     else:
         comp = 1.0
+    stats["comp"] = round(comp, 4)
 
     meaningful = [c for c in cells if len(c) >= _TABLE_CELL_MIN_LEN]
+    stats["meaningful"] = len(meaningful)
+    # 불변식 A — 소형 표에서는 R2/R3/R4 를 평가하지 않는다(정상 소형 반복표 보호).
     if len(meaningful) < _TABLE_MIN_CELLS:
-        return False
+        return tuple(hits), stats
+
     dom = Counter(meaningful).most_common(1)[0][1] / len(meaningful)
-    # R2: 지배 셀값
+    stats["dom"] = round(dom, 4)
     if dom >= _TABLE_DOMINANT_RATIO:
-        return True
-    # R3: 산재 반복형 — 중간 dom 이지만 압축비도 낮음(정상표는 dom≤0.17 or comp≥0.39)
+        hits.append("R2")
     if dom >= 0.35 and comp < 0.36:
-        return True
-    # R4: 단어 다양성 — rowspan 병합 등으로 dom 이 낮아도 같은 단어 변주가 표를 채움.
-    #     실관측(2026-07-15 2차): 퇴화표 ttr=0.35 vs 정상표 최저 0.69.
+        hits.append("R3")
+
     words = joined.split()
     if len(words) >= 30:
         ttr = len(set(words)) / len(words)
+        stats.update(words=len(words), ttr=round(ttr, 4))
         if ttr <= 0.45:
-            return True
-    return False
+            hits.append("R4")
+
+    return tuple(hits), stats
+
+
+# ─────────────────────────────────────────────── 하위호환 진입점(시그니처 불변)
+
+def is_degenerate_text(text: str) -> bool:
+    """퇴화 텍스트인지. 확신 없으면 False(오검 방지 우선)."""
+    return bool(assess_text_rules(text)[0])
+
+
+def is_degenerate_table(table_body: str) -> bool:
+    """퇴화 표인지(SOFT 규칙 포함 — 판정 자체는 그대로다).
+
+    **삭제 여부는 이걸로 정하지 않는다** — `filter_degenerate_pages` 는 HARD 만 지운다.
+    """
+    return bool(assess_table_rules(table_body)[0])
+
+
+# ────────────────────────────────────────────────── detect → decide → mutate
+
+def assess_page(page: dict) -> PageAssessment:
+    """**순수 함수 — `page` 를 변경하지 않는다.** 판정 근거만 만든다."""
+    blocks = (page or {}).get("blocks") or []
+    out: list[BlockAssessment] = []
+    total = hard = soft = 0
+    for i, b in enumerate(blocks):
+        kind, body = _block_body(b)
+        rules, stats = (assess_table_rules(body) if kind == "table"
+                        else assess_text_rules(body))
+        n = visible_chars(body)
+        sev = _severity_for(rules)
+        total += n
+        if sev is Severity.HARD:
+            hard += n
+        elif sev is Severity.SOFT:
+            soft += n
+        out.append(BlockAssessment(index=i, kind=kind, severity=sev,
+                                   rules=rules, chars=n, stats=stats))
+    return PageAssessment(page_number=(page or {}).get("page_number"),
+                          blocks=tuple(out), chars_before=total,
+                          chars_hard=hard, chars_soft=soft)
+
+
+def apply_assessment(page: dict, assessment: PageAssessment) -> int:
+    """**HARD 만** 제거(제자리). 제거 수 반환. SOFT 는 보존하고 관측 로그만 남긴다."""
+    blocks = (page or {}).get("blocks") or []
+    drop = {b.index for b in assessment.hard_blocks}
+    for b in assessment.soft_blocks:
+        log.info("degen SOFT 관측(보존) page=%s idx=%d kind=%s rules=%s chars=%d %s",
+                 assessment.page_number, b.index, b.kind, ",".join(b.rules), b.chars, b.stats)
+    for b in assessment.hard_blocks:
+        log.warning("degenerate block removed page=%s idx=%d kind=%s rules=%s chars=%d %s",
+                    assessment.page_number, b.index, b.kind, ",".join(b.rules), b.chars, b.stats)
+    if drop:
+        page["blocks"] = [b for i, b in enumerate(blocks) if i not in drop]
+    return len(drop)
 
 
 def filter_degenerate_pages(pages: list) -> int:
-    """pages[{page_number, blocks}] 에서 퇴화 블록 제거(제자리). 제거 수 반환.
+    """pages[{page_number, blocks}] 에서 **HARD 퇴화 블록만** 제거(제자리). 제거 수 반환.
 
-    text 계열 = is_degenerate_text(반복/압축비), table = is_degenerate_table(지배 셀 값).
+    시그니처·반환형은 이전과 같다. 동작 변화는 **"SOFT 만 걸린 블록을 더 이상 삭제하지
+    않는다"** 뿐이다(호출부: pdf/__init__.py, ocr/__init__.py — 무변경).
     """
     removed = 0
     for page in pages or []:
-        blocks = page.get("blocks") or []
-        kept = []
-        for b in blocks:
-            if b.get("type") == "table":
-                if is_degenerate_table(b.get("table_body") or ""):
-                    removed += 1
-                    log.warning("degenerate VL table removed (page %s): %r...",
-                                page.get("page_number"), (b.get("table_body") or "")[:60])
-                    continue
-                kept.append(b)
-                continue
-            if is_degenerate_text(b.get("text") or ""):
-                removed += 1
-                log.warning("degenerate VL block removed (page %s, %d chars): %r...",
-                            page.get("page_number"), len(b.get("text") or ""),
-                            (b.get("text") or "")[:60])
-                continue
-            kept.append(b)
-        page["blocks"] = kept
+        removed += apply_assessment(page, assess_page(page))
     return removed

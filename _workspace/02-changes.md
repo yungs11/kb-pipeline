@@ -839,6 +839,172 @@ D33 이 원래 "범위 밖" 근거로 든 *naive datetime 사용처가 없다* �
 바꾸면 `test_container_tz_does_not_move_the_window` 와 override 테스트가 빨강.
 가드 5경로 실행 확인(무설정 통과 / KST 통과 / UTC 경고 / TZ 경고 / 마감<=창 차단).
 
+## GW 페이지 quarantine + degen 안전화 (2026-08-11, plan v7 READY)
+
+짝 문서: `docs/superpowers/specs/2026-08-11-v1-gw-quarantine-deferred.md` (D1~D17)
+실측 근거: `~/Downloads/kbp-parser-compare/V1_DECISION.md`
+
+### 결정 1 — VL escalation 을 **v1 에서 뺐다** (설계 반전)
+
+원래 v1 은 `GW-first → hard-risk 면 VL 로 교체` 였다. 실측이 이를 **반증**했다.
+
+`GW_HARD_RISK` 가 실제로 고르는 페이지에서만 조건부 분포를 잡으면:
+
+| | rescue | 실패(빈출력/절단/**날조**) | Fisher p |
+|---|---|---|---|
+| gate 발화 (n=5) | **0** | 5 (**날조 2**, 빈출력 1, 부분 2) | **0.021** |
+| gate 통과 (n=8) | 6 | 2 | |
+
+**확인된 rescue 6건은 전부 gate 가 놓친 페이지에서, 확인된 날조 2건은 전부 gate 가 잡은
+페이지에서** 나왔다. 완전한 역상관이다.
+
+원인: hard gate 는 loop/degen/CJK 에 발화하는데 그건 **페이지 자체가 어렵다**는 뜻이고,
+VL 도 같은 페이지에서 빈 출력·절단·날조를 낸다. 즉 현재 trigger 는 **"VL 이 도움이 되는
+페이지" 의 반대**를 고른다. 이대로 구현하면 GPU 를 써서 날조를 유입시킨다.
+
+```
+                        GW 결과
+        ┌──────────────────┼──────────────────┐
+     HEALTHY           SOFT ERROR          HARD FAIL
+   (제대로 읽음)   (그럴듯한데 조용히 틀림)  (loop/CJK/붕괴)
+        │                  │                   │
+     GW 채택          VL 가치 ↑            VL 가치 ↓
+                     (v1.1 대상)           QUARANTINE
+```
+
+**VL 은 GW 최악의 실패를 구하는 fallback 이 아니라, GW 의 "그럴듯한 오독" 을 교정하는
+high-cost alternative parser 다.** VL 을 기각한 게 아니라 **hard-fail 을 VL trigger 로
+쓰는 것**을 기각했다. `Verdict.ESCALATE_VL` 은 contract 로만 두고 execution path 를
+만들지 않았다(v1.1 에서 SOFT_RISK trigger 가 검증되면 조건 한 줄).
+
+### 결정 2 — `degen_filter` 를 "삭제 함수" → "증거 생성기" 로 (must-fix)
+
+**정상 법인등기부 표가 R4(TTR)에 걸려 production 에서 삭제되고 있었다** — 실측 죽림 p18
+1,526자 / 장현 p52 1,673자, 둘 다 사람 대조 USABLE. 등기부는 같은 날짜·문구 반복이 정상이라
+lexical diversity 가 원래 낮다.
+
+규칙별 귀속(regression set 9/9): **R3·R4 가 단독으로 잡는 TP 가 하나도 없다** — R3/R4 를
+넣게 만든 픽스처(`SCATTER`/`LOW_TTR`)조차 R1 이 잡는다. 반면 R4 는 실측 FP 2건의 단독 원인.
+
+→ `detect → decide → mutate` 분리. `assess_page`(순수) / `apply_assessment`(HARD 만 제거).
+**HARD** = 표 R1·R2 + 텍스트 T1/T2/T3, **SOFT** = 표 R3·R4(관측만, 절대 삭제 금지).
+
+**검색 recall 이 목표라면 false quarantine 보다 silent deletion 이 더 나쁘다.**
+
+### 결정 3 — 게이트를 `_supplement_diagram_pages` **뒤**에 둔다
+
+`pdf/__init__.py:274-279` 의 `replace=True` 분기는 기존 blocks 가 비어 있어도 VL 서술로
+페이지를 채우는 **현존 유일한 복구 경로**다. 게다가 EMPTY 조건("잉크는 많은데 텍스트 없음")은
+정확히 도면 페이지를 겨냥한다 — 앞에 두면 지금 정상 복구되던 도면 페이지가 영구 빈 페이지가
+된다. 대신 diagram 페이지는 `chars_after == 0` 일 때만 EMPTY 로 본다(VL 성공-단문 보호).
+
+### 결정 4 — mutation 은 **2-phase**
+
+phase 1 판정만(문서 단위 CJK 가드 되돌림 + ink 등 실패 가능 연산 전부) → phase 2 순수 대입.
+단일 패스면 CJK 가드가 `ACCEPT_GW` 로 되돌리는 시점에 blocks 가 이미 비어 있어
+**`verdict == ACCEPT_GW` 인데 `blocks == []`** 가 된다(국한문혼용 문서 전체 소실).
+
+### 상태 모델
+
+| PageState | blocks | 운영지표 |
+|---|---|---|
+| `OK` | 보존 | — |
+| `QUARANTINED_FAILURE` | **비움** | 실패 |
+| `ENGINE_ERROR` | 비움 | **별도 카운터**(판정 아님, 재시도 대상) |
+| `EMPTY_SKIPPED` | **보존(색인 유지)** | 실패 아님 |
+
+`EMPTY_SKIPPED` 를 색인에서 빼지 않는 이유: 실측에서 이 상태가 된 2건이 **둘 다 USABLE 라벨
+페이지**였다(43자/35자, 저잉크). 빼면 게이트가 스스로 원칙을 위반한다.
+`ENGINE_ERROR` 분리 이유: `blocks == []` 하나가 ①게이트웨이 일시 장애 ②진짜 빈 간지
+③블록화 0 을 합치고 있었다 — ①을 terminal quarantine 하면 부분 장애 한 번에 정상 페이지가
+영구히 빠지고 "붕괴 페이지" 로 기록된다.
+
+### 실측 (오프라인 리플레이, `scripts/dev/replay_gw_gate.py`)
+
+```
+60p (라벨 USABLE 49 / UNUSABLE 11, 300dpi 입력)
+  quarantine 3   recall 3/11   observed FP 0/49
+  등기부 표 2건 보존(1,740→1,740 / 1,168→1,168)
+```
+
+> **"FPR 0%" 가 아니라 "현재 regression set 에서 observed FP 0/49"** 다. 49페이지는
+> production distribution 을 증명하지 않는다. `EMPTY`·`ENGINE_ERROR`·**CJK 문서 가드**는
+> 이 60p 에서 독립 발화 0 = **미검증**이다. 프로덕션 기본 dpi 는 150 이라 이 수치를 예측치로
+> 인용하면 안 된다(D17).
+
+**대가**: GW bad 의 약 73% 를 못 잡는다. precision-first 의 의도된 결과이자 known limitation.
+
+### `MODEL_NAME` — configuration contract
+
+`vl_api._DEFAULT_MODEL_NAME`(235b) 제거 → 미설정이면 `RuntimeError`.
+근본 원인은 오타가 아니라 **`.env.example`·`scripts/parse-svc.env.example` 에 선언 자체가
+없던 configuration contract 부재**였다(호스트 dev 가 코드 기본값 235b 로 조용히 새서 측정
+전체가 다른 모델로 돌았다). 6곳 + `sync-parse-svc-env.sh` KEYS 에 채웠고
+`docker-compose.yml` 의 `:-` 를 `:?` 로 바꿨다.
+
+### 폐쇄망
+
+신설 env 11개(`KBP_GW_*` 9 + `KBP_DEGEN_*` 2)를 **7곳 전부** 선언. `verify-bundle.sh` 에
+가드 2종 추가(`paddle_gw` 인데 `KBP_GW_GATE=0` / `KBP_DEGEN_SOFT_RULES=none`).
+
+함정 둘을 실측으로 확인했다:
+- **`docker-compose.airgap.yml` 에는 `:-` 만 쓴다** — `verify-bundle.sh:66-86` 이 `${VAR:?}`
+  를 자동으로 필수키로 파생하므로 선택값에 `:?` 를 쓰면 현장 `.env` 가 전부 빨간 줄이 된다.
+- **빈 값은 센티널이 될 수 없다** — compose 의 `${VAR:-기본값}` 이 빈 값에도 기본값을 대입한다
+  (실측). 그래서 되돌림 손잡이는 `KBP_DEGEN_SOFT_RULES=none` 이고, 빈 값은 기본값으로 읽는다.
+- **env 값에 인라인 주석을 붙이지 않는다** — compose 는 걷어내지만 순진한 파서가 값으로 읽는다
+  (실제로 이번에 겪었다). repo 관례대로 주석은 윗줄에 둔다.
+
+---
+
+## 엑셀 게이트 룰 사전 동기화 + 번들 소스 출처 가드 (2026-08-11)
+
+> 계기: dev `kbp-doc_guard` 컨테이너가 **7/1 이미지**로 25시간째 돌고 있었다. sibling 소스는
+> 7/21 인데 `docker compose up -d` 는 기존 이미지를 재빌드하지 않아 조용히 뒤처졌다.
+> 그걸 파다가 두 번째 어긋남이 드러났다 — **판정과 문구가 다른 레포에 살아 어휘가 갈라졌다.**
+
+### 룰의 원천은 kb-pipeline 이다 (doc_guard 는 번역만)
+
+2026-06-29 게이트 이동(§6) 이후, 판정 기준이 "이 파일이 이상한가" → **"우리 파서가 제대로
+뽑았는가"** 로 바뀌었다. `header_leak`·`empty_header`·`unclear_header` 는 **파서의 추출 결과를
+봐야만** 판정 가능하므로 룰이 파서 옆으로 갔다.
+
+```
+parse_service/parsers/excel/excel_parser_rag/gate/excel_gate.py   ← 판정(원천, 6코드)
+        ↓ gate_summary
+doc_guard/app/excel_gate_policy.py                                 ← RULE_NAMES/FIX_HINT 번역만
+```
+
+**대가**: 원천이 코드를 추가해도 번역 사전이 자동으로 안 따라온다. 실제로 갈라져 있었다.
+
+| 코드 | excel_gate.py | doc_guard(수정 전) | 조치 |
+|---|---|---|---|
+| `unmerged_table_banners` | ✅ emit (`:304`) | ❌ 없음 | **추가** — 현장에서 영문 코드가 그대로 노출되고 안내가 빈칸이던 실발화 버그 |
+| `side_by_side` | ❌ | ✅ | 제거(죽은 룰) |
+| `ambiguous_hierarchy` | ❌ | ✅ | 제거(죽은 룰) |
+
+doc_guard `40fde0f` 로 정렬 — 사전 = kb 6코드 + `gate_error`(doc_guard 내부 합성). 테스트 동기화
+포함, 65 passed. dev 이미지 재빌드·기동 확인(healthz ok).
+
+**폐쇄망은 영향 없었다** — `kbp-doc_guard:airgap` 은 8/10 00:35 빌드로 소스와 동일했다(dev 만
+7/1 에 멈춰 있었다). 다만 `unmerged_table_banners` 갭은 현장에도 있으므로 다음 번들에 반영된다
+(즉시 재빌드는 보류 — 발화 빈도가 낮다).
+
+### 번들 소스 출처 가드 — `build-bundle.sh`
+
+`docker build` 는 브랜치가 아니라 **워킹트리**를 굽는다. 8/10 번들은 doc_guard 가
+`feat/conflicting-code-mapping` 에 체크아웃된 채로 나갔다(이번엔 main 과 diff 0 이라 결과는
+같았다). **`verify-bundle.sh` 는 배포 시점 가드라 이걸 못 잡는다 — 브랜치는 빌드 시점에만
+알 수 있다.**
+
+- `EXPECT_BRANCH` 표에 **컨텍스트별 기대 브랜치를 선언**하고 불일치면 빌드 중단
+  (`ALLOW_SOURCE_DRIFT=1` 로 우회). 전부 `main` 을 요구하지 않는다 — kb-pipeline·edgequake·
+  adaptive_chunk 는 상시 feature 브랜치라, main 강제는 매번 override 를 부르고 **그러면
+  가드가 죽는다**. 브랜치를 바꿀 때 표를 함께 고치는 것이 "무엇으로 배포하는가"의 선언이다.
+- **미커밋 변경은 차단하지 않고 경고**만 한다(개발기는 상시 dirty). 대신 기록에 남긴다.
+- 번들에 `BUILD-PROVENANCE.txt` 를 넣는다 — 레포별 `branch@commit +uncommitted`.
+  현장에서 "지금 도는 게 어느 버전이냐"를 이미지 안을 뒤지지 않고 답할 유일한 근거다.
+
 ## 구조화 텍스트 레인 — html/csv/xml (2026-08-11)
 
 **결정**: html/htm 을 한컴 형변환 API 대상에서 제외하고 `parsers/html` 이 직접 처리한다.

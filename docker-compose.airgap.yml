@@ -289,6 +289,19 @@ services:
       KBP_GATE_VL_RATIO: ${KBP_GATE_VL_RATIO:-0.5}
       KBP_GATE_VL_LANE: ${KBP_GATE_VL_LANE:-vl}
       KBP_GATE_OCR_LANE: ${KBP_GATE_OCR_LANE:-paddle_gw}
+      # paddle_gw 페이지 게이트(2026-08-11). **`:?` 금지** — verify-bundle.sh 가 `:?` 를
+      # 자동으로 필수키로 파생하므로, 선택값에 쓰면 기존 현장 .env 가 전부 빨간 줄이 된다.
+      KBP_GW_GATE: ${KBP_GW_GATE:-1}
+      KBP_GW_MIN_CHARS: ${KBP_GW_MIN_CHARS:-50}
+      KBP_GW_BLANK_INK_MAX: ${KBP_GW_BLANK_INK_MAX:-0.05}
+      KBP_GW_CJK_MIN: ${KBP_GW_CJK_MIN:-30}
+      KBP_GW_CJK_RATIO: ${KBP_GW_CJK_RATIO:-0.50}
+      KBP_GW_CJK_DOC_RATIO: ${KBP_GW_CJK_DOC_RATIO:-0.30}
+      KBP_GW_CJK_DOC_MIN_PAGES: ${KBP_GW_CJK_DOC_MIN_PAGES:-3}
+      KBP_GW_DEGEN_SURVIVE_RATIO: ${KBP_GW_DEGEN_SURVIVE_RATIO:-0.5}
+      KBP_GW_DEGEN_MIN_CHARS: ${KBP_GW_DEGEN_MIN_CHARS:-500}
+      KBP_DEGEN_COMPRESS_MAX: ${KBP_DEGEN_COMPRESS_MAX:-0.16}
+      KBP_DEGEN_SOFT_RULES: ${KBP_DEGEN_SOFT_RULES:-R3,R4}
       # ── 스캔 PDF OCR 게이트웨이(paddle_gw 레인) ────────────────────────────
       # ⚠️ 위 KBP_GATE_OCR_LANE 이 paddle_gw 인데 이 URL 이 비어 있으면, 스캔 문서가
       # paddle_gw 로 보내진 뒤 "KBP_PADDLE_OCR_GATEWAY_URL 미설정" RuntimeError 로
