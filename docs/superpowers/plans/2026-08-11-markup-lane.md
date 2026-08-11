@@ -1,4 +1,4 @@
-<!-- plan-version: v2 -->
+<!-- plan-version: v3 -->
 <!-- ultracode-validation: PENDING -->
 
 # 구조화 텍스트 레인 Implementation Plan
@@ -95,15 +95,32 @@ def test_utf16_only_with_bom():
     assert decode_text("규정가나".encode("cp949"), "a.txt") != "풱꓁ꆰꪳ"
 
 
-def test_utf32_not_silently_mojibake():
+def test_utf32_with_bom_not_silently_mojibake():
     """UTF-32-LE BOM(ff fe 00 00)은 utf-16 BOM(ff fe)으로 시작한다.
 
     2바이트만 보고 utf-16 을 태우면 예외 없이 NUL 섞인 mojibake 가 나온다
     (실측: "규정".encode("utf-32").decode("utf-16") == '\\x00규\\x00정\\x00').
     errors="replace" 를 금지한 것과 같은 실패 유형이라 같은 강도로 막는다.
+
+    **탐지 대상은 BOM 이 있는 UTF-32 뿐이다** — "utf-32" 코덱은 BOM 을 붙이지만
+    "utf-32-be"/"utf-32-le" 는 붙이지 않는다. BOM 없는 UTF-32 는 아래 테스트에서
+    '조용한 mojibake 대신 명시적 실패' 로 끝나는 것을 계약으로 한다.
     """
-    assert decode_text("규정".encode("utf-32"), "a.txt") == "규정"
-    assert decode_text("규정".encode("utf-32-be"), "a.txt") == "규정"
+    import codecs
+
+    assert decode_text("규정".encode("utf-32"), "a.txt") == "규정"          # BOM 포함(LE)
+    assert decode_text(codecs.BOM_UTF32_BE + "규정".encode("utf-32-be"),
+                       "a.txt") == "규정"
+
+
+def test_bomless_utf32_fails_loudly():
+    """BOM 없는 UTF-32 는 판별 근거가 없다. 조용한 쓰레기 대신 ParserError 로 끝난다.
+
+    실측: "규정".encode("utf-32-be") == b'\\x00\\x00\\xad\\xdc…' — 4바이트 BOM 판정에
+    걸리지 않고 utf-8-sig·cp949 도 모두 UnicodeDecodeError 다.
+    """
+    with pytest.raises(ParserError):
+        decode_text("규정".encode("utf-32-be"), "a.txt")
 
 
 def test_undecodable_raises_parser_error():
@@ -162,7 +179,7 @@ def decode_text(file_bytes: bytes, filename: str) -> str:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `PYTHONPATH=$PWD /Users/xxx/workspace/8.kb-pipeline/.venv-kb/bin/python -m pytest parse_service/tests/test_tools_textdecode.py -q`
-Expected: PASS (6 tests)
+Expected: PASS (7 tests)
 
 - [ ] **Step 5: `_text_parse` 를 헬퍼로 전환**
 
@@ -405,6 +422,10 @@ HTML_EXTS = {"html", "htm"}
 #: 표 **내부**의 빈 줄을 접는다. markdown-it 의 html_block 은 빈 줄에서 끝나므로
 #: (CommonMark type 6), 표 안에 빈 줄이 남으면 table_body 가 거기서 잘리고 나머지
 #: 마크업이 raw 텍스트 블록으로 샌다(실측). bs4 는 텍스트 노드 안의 \n\n 을 접지 않는다.
+#:
+#: **허용된 손실**: 셀 안 <pre>/<code> 의 의미 있는 빈 줄도 함께 접힌다
+#: (실측: <pre>a\n\nb</pre> → <pre>a\nb</pre>). 접지 않으면 표 블록 자체가 깨지므로
+#: (표 전체 손실 vs 빈 줄 하나 손실) 접는 쪽을 택했다.
 _BLANK_LINES = re.compile(r"\n[ \t]*\n+")
 
 
@@ -692,8 +713,16 @@ def test_sheet_title_illegal_chars_sanitized():
     """`현황[최종].csv` 같은 국내 실무 파일명이 지금은 text 레인으로 문제없이 통과한다.
     openpyxl 은 [ ] : * ? / \\ 를 시트명에서 거부하므로(ValueError → ParserError →
     문서 전체 parse_failed) 정규화하지 않으면 순수 회귀다."""
-    ws = _load(b"a\n1\n", "현황[최종]:2026/3분기*.csv").active
+    ws = _load(b"a\n1\n", "현황[최종]:2026*3분기?.csv").active
     assert ws.title == "현황_최종__2026_3분기_"
+
+
+def test_sheet_title_uses_basename_only():
+    """POSIX 에서 `/` 는 진짜 경로 구분자다 — Path.stem 이 디렉터리를 떼는 게 맞고,
+    실제 레인도 `safe_filename` 으로 basename 을 먼저 취한다. 백슬래시가 든
+    윈도우식 이름만 정규화 대상으로 남는다."""
+    assert _load(b"a\n1\n", "/tmp/sub/현황.csv").active.title == "현황"
+    assert _load(b"a\n1\n", "C:\\\\dir\\\\현황.csv").active.title.endswith("현황")
 
 
 def test_illegal_control_chars_stripped():
@@ -713,6 +742,22 @@ def test_quoted_newline_cell_preserved():
     """csv.reader 에 넘기는 StringIO 는 newline='' 이어야 인용 셀 안의 개행이 보존된다."""
     ws = _load(b'a,b\n1,"\xea\xb0\x80\n\xeb\x82\x98"\n').active
     assert ws["B2"].value == "가\n나"
+
+
+def test_leading_equals_cell_is_not_a_formula():
+    """`=` 로 시작하는 셀을 그대로 넣으면 openpyxl 이 수식 셀(data_type='f')로 만든다.
+    엑셀 레인은 `data_only=True` 로 읽으므로 캐시된 계산값이 없는 그 셀은 **None** 이
+    되어 청크에서 통째로 사라지고 게이트는 ok=True 로 통과시킨다 — 조용한 데이터 손실이
+    적재까지 간다(실측). CSV 인젝션 방어도 겸한다."""
+    ws = _load(b"a,b\n1,=1+1\n").active
+    assert ws["B2"].data_type == "s"
+    assert ws["B2"].value == "=1+1"
+
+
+def test_dotfile_name_yields_usable_sheet_title():
+    """`.csv` 는 Path.stem 이 '.csv' 다(확장자 없는 은닉파일 취급). 빈 시트명이 되어
+    'Sheet1' 로 떨어지지 않는다는 것을 고정한다."""
+    assert _load(b"a\n1\n", ".csv").active.title == ".csv"
 
 
 def test_pipe_in_cell_survives():
@@ -760,6 +805,12 @@ title 대입에서 ValueError, 셀의 제어문자는 append 에서 IllegalChara
 둘 다 excel/__init__.py 의 `except Exception` 을 타고 ParserError 로 승격돼 **문서 전체가
 parse_failed** 가 된다 — `현황[최종].csv` 같은 파일명은 지금 text 레인으로 잘 통과하므로
 막지 않으면 순수 회귀다.
+
+**모든 문자열 셀의 data_type 을 's' 로 고정한다.** 안 하면 ``=`` 로 시작하는 셀이 수식
+셀(``data_type='f'``)이 되는데, 엑셀 레인은 ``data_only=True`` 로 읽으므로 캐시된 계산값이
+없는 그 셀은 **None** 이 되어 청크에서 통째로 사라진다. 게이트는 ok=True 로 통과시켜
+**조용한 데이터 손실이 적재까지 간다**(실측: ``[['사번','수식'],['1001',None],…]``).
+csv 는 애초에 전부 텍스트라 고정에 부작용이 없고, CSV 인젝션 방어도 겸한다.
 """
 from __future__ import annotations
 
@@ -797,9 +848,13 @@ def csv_bytes_to_xlsx(file_bytes: bytes, filename: str) -> bytes:
     wb = Workbook()
     ws = wb.active
     ws.title = _sheet_title(filename)
-    for row in rows:
-        ws.append([ILLEGAL_CHARACTERS_RE.sub("", c) if isinstance(c, str) else c
-                   for c in row])
+    for r_idx, row in enumerate(rows, start=1):
+        for c_idx, value in enumerate(row, start=1):
+            cell = ws.cell(row=r_idx, column=c_idx,
+                           value=ILLEGAL_CHARACTERS_RE.sub("", value or ""))
+            # 수식 승격 차단 — 위 docstring 참조. append() 대신 cell() 을 쓰는 이유가
+            # 이것이다(append 로는 대입 직후 data_type 을 잡을 지점이 없다).
+            cell.data_type = "s"
 
     header_font = Font(bold=True)
     header_fill = PatternFill("solid", fgColor="DDDDDD")
@@ -815,7 +870,7 @@ def csv_bytes_to_xlsx(file_bytes: bytes, filename: str) -> bytes:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `PYTHONPATH=$PWD /Users/xxx/workspace/8.kb-pipeline/.venv-kb/bin/python -m pytest parse_service/tests/test_csv_to_xlsx.py -q`
-Expected: PASS (11 tests)
+Expected: PASS (14 tests)
 
 - [ ] **Step 5: Commit**
 
@@ -1053,9 +1108,13 @@ Expected: 성공. 실패하면 **여기서 멈추고** 원인(대개 requirement
 - [ ] **Step 5: 가드 실제 실행**
 
 Run: `bash scripts/airgap/verify-bundle.sh --imports`
-Expected: 출력에 `✓ html 왕복 성공 — html_blocks=2` 가 포함된다. `✗ html 파싱 왕복 실패` 가 나오면 `markdownify` 가 이미지에 없는 것이다 — `requirements.txt` 추가가 Task 2 Step 1 에서 누락됐는지 확인한다.
+Expected: 출력에 `✓ html 왕복 성공 — html_blocks=2` 가 포함된다.
 
-빌드·실행이 불가능한 환경(docker/podman 부재)이면 **중단하지 말고** 아래 `## 구현 후 검증` 절에 "V9 미검증 — 사유"를 적고 다음 Task 로 간다. 조용히 통과시키지 않는다.
+**선택된 이미지 ref 를 눈으로 확인한다** — `verify-bundle.sh:179` 의 `grep -m1` 이 스토어에
+남은 **옛** `kbp-parse-svc` 를 집을 수 있다(같은 사고 기록 있음). 로그의 `($ref)` 가 방금
+빌드한 태그인지 보고, 아니면 옛 이미지를 지우고 다시 돌린다. `✗ html 파싱 왕복 실패` 가 나오면 `markdownify` 가 이미지에 없는 것이다 — `requirements.txt` 추가가 Task 2 Step 1 에서 누락됐는지 확인한다.
+
+빌드·실행이 불가능한 환경(docker/podman 부재, 네트워크 차단으로 apt·npm 실패 등 — 이 이미지는 `apt-get` + `npm install -g kordoc` 를 하므로 수 분~십수 분과 네트워크가 필요하다)이면 **중단하지 말고** 아래 `## 구현 후 검증` 절에 "V9 미검증 — 사유"를 적고 다음 Task 로 간다. 조용히 통과시키지 않는다.
 
 - [ ] **Step 6: Commit**
 
@@ -1152,22 +1211,40 @@ csv 는 엑셀 레인으로 옮긴다. xml 을 평문 레인에 편입한다.
 | **markup-lane** | html→`parsers/html`(형변환 미경유), csv→엑셀 레인(openpyxl 고정), xml→text 편입 | ✅ 완료 (브랜치 `feat/markup-lane`) |
 ```
 
-- [ ] **Step 4: `docs/kb-pipeline-process-definition.md` 갱신**
+- [ ] **Step 4: `docs/kb-pipeline-process-definition.md` 갱신 (편집 5곳)**
 
-`:89` 의 "라우팅 소유는 `parse_service/router.py`… markitdown 은 코드·requirements 에서 완전 제거(재유입 가드 …)" 문장 뒤에 추가:
+**라인 번호가 아니라 문자열 앵커로 찾는다** — 앞 Step 들의 편집으로 줄이 밀린다. 아래 다섯 곳을 모두 고쳐야 한다. 하나라도 빼면 같은 절 안에서 서로 모순되는 서술이 남는다.
+
+(a) 헤딩 `#### 4.1.1 입력 포맷별 파서 라우팅 (\`parse_service/router.py\`, 4분기 · 폴백 없음)` 에서 `4분기` → `5분기`.
+
+(b) `- **XLSX/XLSM/XLS(Excel)** → \`excel\`:` 로 시작하는 줄의 확장자 목록에 CSV 를 넣고 문장 끝에 추가:
 
 ```markdown
-2026-08-11 markup-lane 에서 markitdown 을 재검토했으나 같은 사유(병합표 손실)로 재차 기각했다 — 가드 유지. html 은 `parsers/html`(markdownify + `<table>` 보존)이 형변환 없이 처리한다.
+CSV 는 2026-08-11 편입 — 헤더 행에 서식을 준 xlsx 로 메모리 합성해 **openpyxl 고정**으로 흘린다(`parsers/excel/csv_to_xlsx.py`).
 ```
 
-`:96` 의 `- **그 외(폴백, 예: hwpx)** → \`fallback\`: **kordoc** CLI(구 markitdown 폴백 제거).` 를 교체:
+(c) `- **HWP·HWPX·DOC·DOCX·PPT·PPTX·HTML** → \`pdf\`:` 줄에서 `·HTML` 을 뺀다.
+
+(d) `- **TXT·MD·CSV·JSON** → \`text\`:` 줄을 교체:
+
+```markdown
+- **TXT·MD·JSON·LOG·XML** → `text`: 변환·파서 없이 그대로 블록화(BOM utf-32/utf-16 → utf-8-sig → cp949, `tools/textdecode.py`). XML 은 2026-08-11 편입(그 전엔 `pdf` 도메인 오분류로 `%PDF` 가드에서 실패).
+```
+
+(e) `- **그 외(폴백, 예: hwpx)** → \`fallback\`: **kordoc** CLI(구 markitdown 폴백 제거).` 를 교체:
 
 ```markdown
 - **HTML/HTM** → `html`: `parse_service/parsers/html`(bs4 + markdownify, 최상위 `<table>` 은 원문 HTML 보존). 형변환 API 미경유(2026-08-11).
 - **그 외(미지 확장자)** → `pdf` 도메인으로 가서 `app.py` 의 `%PDF` 가드가 거절한다. 별도 폴백 파서는 없다.
 ```
 
-같은 파일에서 형변환 API 대상 목록에 `html` 이 있으면 뺀다(`grep -n "HTML\|html" docs/kb-pipeline-process-definition.md` 로 확인 후 해당 줄만 수정).
+그리고 `- **DOCX** → \`docx\`: **kordoc** CLI…` 줄은 **이번 변경과 무관한 기존 drift** 다(docx 레인은 2026-08-06 제거됐고 (c) 줄이 이미 DOCX 를 변환 API 로 보낸다 — 같은 문서 안에서 모순). 지우고 한 줄로 대체한다:
+
+```markdown
+- (구 **DOCX** → `docx` kordoc 레인은 2026-08-06 제거됐다. DOCX 는 위 변환 API 경로를 탄다.)
+```
+
+편집 후 확인: `grep -n "4분기\|fallback\|TXT·MD·CSV" docs/kb-pipeline-process-definition.md` 가 **아무것도 출력하지 않아야** 한다.
 
 - [ ] **Step 5: `deferred.md` 생성**
 
@@ -1199,6 +1276,21 @@ csv 는 엑셀 레인으로 옮긴다. xml 을 평문 레인에 편입한다.
 - **D44 xml/html 업로드 allowlist(kb-backend 측)** (2026-08-11, markup-lane) —
   이 리포에는 업로드 allowlist 가 없다(`grep` 확인). 상위 kb-backend 가 확장자를 막고
   있으면 사용자 관점의 "xml 실패 해소"가 미완일 수 있다. 별도 리포라 이번 범위 밖.
+- **D45 단일열 csv 가 열레터로 퇴화** (2026-08-11, markup-lane) — `header_detector` 의
+  `strong` 판정이 `m["filled"] >= 2` 를 요구해 1열짜리 표는 헤더를 못 잡고 `A:` 로
+  떨어진다(실측). 휴리스틱 변경은 엑셀 레인 본체 수정이라 범위 밖. 단일열 csv 가 실제로
+  들어오면 그때 다룬다.
+- **D46 헤더 없는 csv 의 첫 행이 컬럼명으로 소비됨** (2026-08-11, markup-lane) —
+  `csv_to_xlsx` 는 **첫 행을 헤더로 간주**한다(csv 포맷 관례). 헤더 없는 파일이면 첫
+  데이터 행이 컬럼명이 된다. 헤더 유무 감지 휴리스틱은 범위 밖.
+- **D47 blockify 에 코드펜스 분기 없음** (2026-08-11, markup-lane) — markdownify 가
+  `<pre>` 를 ``` 펜스로 내보내는데 `hybrid_to_blocks` 에 fence 분기가 없어 본문이
+  사라진다(실측). html 레인만의 문제가 아니라 `.md` text 레인 공통이라 blockify 본체
+  수정이 필요하다 — 이번 html 범위를 넘는다.
+- **D48 `verify-bundle.sh:179` 의 이미지 선택 구멍** (2026-08-11, markup-lane) —
+  `grep -m1` 이 스토어에 남은 **옛** `kbp-parse-svc` 를 집을 수 있다(같은 사고가 이미
+  기록돼 있다: "옛 이미지가 가드를 속인다"). 이번 Task 6 Step 5 에서 선택된 ref 를 눈으로
+  확인하는 것으로 완화하고, 번들 출처 확인은 별건으로 남긴다.
 ```
 
 - [ ] **Step 6: `todo_list.md` 확인**
@@ -1217,11 +1309,20 @@ git commit -m "docs: 구조화 텍스트 레인 반영 — 라우팅 표/청킹 
 
 ---
 
+## 계획 단계에서 이미 실행해 확인한 것
+
+계획서 코드가 계획서 테스트를 통과하는지를 **스크래치패드에서 실제로 돌려** 확인했다
+(v2 까지 두 라운드 연속으로 "계획서 코드 vs 계획서 테스트" 불일치가 잡혔기 때문이다).
+
+- Task 1 + Task 4 코드 → 자체 테스트 **21/21 통과**(textdecode 7 + csv_to_xlsx 14).
+- Task 2 코드 → 자체 테스트 **12/12 통과**.
+
+따라서 Task 1·2·4 의 `Expected: PASS (N tests)` 는 실측된 수치다. 구현 시 코드를 그대로
+옮기면 통과해야 하며, 통과하지 않으면 **옮기는 과정에서 달라진 것**이다.
+
 ## 구현 후 검증
 
 계획서에서 100번 읽는 것보다 한 번 돌리는 게 확실한 항목들. 구현 중 실측으로 닫고 증거(테스트·실행 로그)를 남긴다.
-
-- [ ] `markdownify` 1.2.2 의 `MarkdownConverter(heading_style="ATX").convert_soup(...)` 시그니처 — Task 2 테스트가 곧바로 드러낸다.
 - [ ] `_fetch_rag_chunks` 편집 후 실제 라인 번호(계획서의 `:61-66` 은 편집으로 밀린다) — 문자열 앵커로 편집한다.
 - [ ] `verify-bundle.sh` 의 `local` 선언이 함수 안에 있는지(bash 문법) — `bash -n` 으로 확인.
 - [ ] **V9 폐쇄망 가드 실제 실행** — Task 6 Step 5 의 `✓ html 왕복 성공` 로그. 실행 못 했으면 **여기에 사유를 적는다**(미검증을 검증된 것처럼 두지 않는다).
