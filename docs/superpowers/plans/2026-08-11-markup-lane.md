@@ -1,4 +1,4 @@
-<!-- plan-version: v6 -->
+<!-- plan-version: v7 -->
 <!-- ultracode-validation: PENDING -->
 
 # 구조화 텍스트 레인 Implementation Plan
@@ -408,11 +408,29 @@ def test_table_before_body_open_is_not_lost():
 
 
 def test_title_does_not_leak_into_text():
-    """<title>/<meta> 를 떼지 않으면 _pick_target 이 soup 전체를 고를 때 본문에 섞인다."""
+    """soup 전체를 변환하므로 <title>/<meta> 를 떼지 않으면 본문에 섞인다."""
     raw = ("<html><head><title>문서제목ZZZ</title></head>"
            "<body><p>본문</p></body></html>").encode("utf-8")
     joined = " ".join(b.get("text", "") for b in _blocks(raw))
     assert "문서제목ZZZ" not in joined
+    assert "본문" in joined
+
+
+def test_xhtml_prolog_does_not_leak_into_text():
+    """XHTML prolog 는 ProcessingInstruction 이고 markdownify 가 텍스트로 렌더한다 —
+    지우지 않으면 `xml version="1.0" encoding="UTF-8"?` 가 본문 블록이 된다(실측)."""
+    raw = ('<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE html>\n'
+           '<html><head><title>T</title></head>'
+           '<body><p>본문있음</p></body></html>').encode("utf-8")
+    joined = " ".join(b.get("text", "") for b in _blocks(raw))
+    assert "xml version" not in joined
+    assert "본문있음" in joined
+
+
+def test_comment_does_not_leak_into_text():
+    raw = "<html><body><!-- 숨은주석ZZZ --><p>본문</p></body></html>".encode("utf-8")
+    joined = " ".join(b.get("text", "") for b in _blocks(raw))
+    assert "숨은주석ZZZ" not in joined
     assert "본문" in joined
 
 
@@ -464,6 +482,7 @@ import re
 import uuid
 
 from bs4 import BeautifulSoup, NavigableString
+from bs4.element import Comment, Declaration, Doctype, ProcessingInstruction
 from markdownify import MarkdownConverter
 
 from parse_service.parsers import RouteResult, ParserError
@@ -499,24 +518,24 @@ def _extract_tables(target, sentinel_fmt: str) -> list[str]:
     return tables
 
 
-def _pick_target(soup):
-    """변환 대상 노드를 고른다. **`<body>` 만 쓰면 안 된다.**
+#: 본문이 아닌 태그. **`<head>` 를 통째로 지우면 안 된다** — `</head>` 가 생략된 html
+#: (HTML5 가 허용하고 실무에서 흔하다)에서 bs4 는 브라우저와 달리 head 를 자동으로 닫지
+#: 않고 `<body>` 를 head 자식으로 중첩시킨다. 그 상태에서 head 를 extract 하면 본문·표가
+#: 통째로 사라진다(실측: `<html></html>` 만 남는다). 그래서 head **안의 태그**만 지운다.
+_DROP_TAGS = ("script", "style", "title", "meta", "link", "base")
 
-    bs4 의 html.parser 는 브라우저와 달리 body 밖 노드를 body 안으로 재부모화하지
-    않는다. `<html><body><p>가</p></body><table>…</table></html>` 에서
-    ``soup.find("body")`` 는 그 표를 보지 못하고, 표가 **경고 없이 사라진다**(실측:
-    수정 전 tables=0 → 수정 후 tables=1). 조용한 데이터 손실이라 status=ok 로 끝난다.
+#: 본문이 아닌 문자열 노드. XHTML prolog(`<?xml version="1.0"?>`)는
+#: ProcessingInstruction 인데 markdownify 가 **텍스트로 렌더한다** — 지우지 않으면
+#: `xml version="1.0" encoding="UTF-8"?` 가 본문 블록으로 적재된다(실측).
+#: Comment/Doctype 은 markdownify 가 건너뛰지만, 판정을 한곳에 모아 둔다.
+_DROP_STRINGS = (Comment, Declaration, Doctype, ProcessingInstruction)
 
-    그래서 body 의 형제로 남은 내용이 있으면 soup 전체를 대상으로 삼는다. `<title>`·
-    `<meta>` 는 호출부에서 미리 제거하므로 본문에 섞이지 않는다(`<head>` 엘리먼트 자체는
-    남는데, 비어 있어 markdownify 에 무해하다).
-    """
-    body = soup.find("body")
-    if body is None:
-        return soup
-    root = body.parent or soup
-    outside = "".join(str(c) for c in root.children if c is not body).strip()
-    return soup if outside else body
+
+def _strip_non_content(soup) -> None:
+    for tag in soup(_DROP_TAGS):
+        tag.extract()
+    for node in soup.find_all(string=lambda s: isinstance(s, _DROP_STRINGS)):
+        node.extract()
 
 
 def _strip_data_uri_images(target) -> None:
@@ -537,15 +556,14 @@ def parse(file_bytes: bytes, filename: str, *, ocr_url: str | None = None) -> Ro
     """html/htm → 단일 페이지 blocks. ocr_url 은 router 계약상 받되 쓰지 않는다."""
     text = decode_text(file_bytes, filename)
     soup = BeautifulSoup(text, "html.parser")
-    # <title>/<meta> 가 본문 텍스트로 섞이는 것을 막는다. **<head> 를 통째로 지우면 안
-    # 된다** — `</head>` 가 생략된 html(HTML5 가 허용하고 실무에서 흔하다)에서 bs4 는
-    # 브라우저와 달리 head 를 자동으로 닫지 않고 <body> 를 head 자식으로 중첩시킨다.
-    # 그 상태에서 head.extract() 하면 본문·표가 통째로 사라진다(실측: '<html></html>' 만
-    # 남는다). 그래서 head 전용 메타 태그만 골라 지운다. 남는 빈 <head> 는 무해하다.
-    # (_pick_target 이 soup 전체를 고를 수 있으므로 반드시 그 앞에서 떼어낸다.)
-    for tag in soup(["script", "style", "title", "meta", "link", "base"]):
-        tag.extract()
-    target = _pick_target(soup)
+    # **대상 노드를 고르지 않는다 — soup 전체를 쓴다.** `<body>` 로 스코핑하려던 초안은
+    # 세 번 연속 결함을 냈다: ① body 밖 <table> 소실(bs4 는 브라우저와 달리 body 밖 노드를
+    # 재부모화하지 않는다), ② `</head>` 생략 시 head 제거가 본문 전멸, ③ 빈 <head> 때문에
+    # "body 밖에 내용 있음" 판정이 상시 참이 되어 XHTML prolog 누출. 전부 **분기 자체**에서
+    # 나왔다. 분기를 없애고 "본문 아닌 노드를 떼어낸다"로 바꾸면 셋 다 사라진다 —
+    # 남는 빈 <head> 는 렌더할 것이 없어 출력에 영향이 없다(실측 9종 케이스 전부 정상).
+    _strip_non_content(soup)
+    target = soup
     _strip_data_uri_images(target)
 
     # sentinel 은 호출마다 유일해야 한다. 고정 문자열이면 본문에 같은 글자가 있을 때
@@ -580,7 +598,7 @@ def parse(file_bytes: bytes, filename: str, *, ocr_url: str | None = None) -> Ro
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `PYTHONPATH=$PWD /Users/xxx/workspace/8.kb-pipeline/.venv-kb/bin/python -m pytest parse_service/tests/test_parser_html.py -q`
-Expected: PASS (16 tests)
+Expected: PASS (18 tests)
 
 - [ ] **Step 6: Commit**
 
@@ -1273,9 +1291,12 @@ git commit -m "feat(airgap): html 왕복 스모크 — markdownify 누락과 표
 # (1) 부정 — 옛 서술이 남아 있으면 안 된다. 출력 0줄이어야 한다.
 grep -n "4분기\|fallback\|TXT·MD·CSV" _workspace/01-architecture.md
 # (2) 긍정 — 새 서술이 실제로 들어갔어야 한다. 각각 1줄 이상 나와야 한다.
-grep -n "Excel(xlsx/xlsm/xls) 과 CSV" _workspace/01-architecture.md
-grep -n "csv_to_xlsx" _workspace/01-architecture.md
-grep -n "| HTML/HTM |" _workspace/01-architecture.md
+#     (문자열은 위 편집 지시에 실제로 등장하는 것만 쓴다 — 없는 문자열을 게이트로 걸면
+#      편집을 다 해도 영원히 빨간불이라 실행자가 게이트를 무시하게 된다.)
+grep -n "Excel(xlsx/xlsm/xls) 과 CSV" _workspace/01-architecture.md   # §3 도입부 편집
+grep -n "csv 의 청킹 소유는 엑셀 레인" _workspace/01-architecture.md    # §8 편집
+grep -n "openpyxl 고정" _workspace/01-architecture.md                  # 라우팅 표 Excel 행
+grep -n "| HTML/HTM |" _workspace/01-architecture.md                  # 라우팅 표 html 행
 ```
 
 - [ ] **Step 2: `_workspace/02-changes.md` 에 절 추가**
@@ -1361,11 +1382,19 @@ CSV 는 2026-08-11 편입 — 헤더 행에 서식을 준 xlsx 로 메모리 합
 - (구 **DOCX** → `docx` kordoc 레인은 2026-08-06 제거됐다. DOCX 는 위 변환 API 경로를 탄다.)
 ```
 
+**같은 파일의 §4.1.1 밖에도 옛 서술이 세 줄 있다. 함께 고친다** — 안 고치면 편집 직후 문서가 자기모순 상태로 커밋된다(부정 게이트에도 안 걸린다).
+
+(f) `:39` 서비스 표의 parse-svc 행 — `hwp·doc·docx·ppt·pptx·html=**원격 변환 API→PDF**` 에서 `·html` 을 뺀다.
+
+(g) `:61` — `Excel(xlsx/xlsm/xls)은 parse-svc 가 vendored excel_parser_rag 로` → `Excel(xlsx/xlsm/xls) 과 CSV 는 parse-svc 가 vendored excel_parser_rag 로`.
+
+(h) `:83` 처리 설명 — `hwp·doc·docx·ppt·pptx·html 은 **원격 변환 API 로 PDF 화**` 에서 `·html` 을 빼고, `평문(txt·md·csv)은 그대로 블록화한다.` → `평문(txt·md·json·log·xml)은 그대로 블록화하고, html 은 \`parsers/html\` 이 형변환 없이 처리한다.`
+
 편집 후 확인 — **두 방향 모두**:
 
 ```bash
 # (1) 부정 — 출력 0줄
-grep -n "4분기\|fallback\|TXT·MD·CSV" docs/kb-pipeline-process-definition.md
+grep -n "4분기\|fallback\|TXT·MD·CSV\|pptx·html\|평문(txt·md·csv)" docs/kb-pipeline-process-definition.md
 # (2) 긍정 — 각각 1줄 이상
 grep -n "csv_to_xlsx" docs/kb-pipeline-process-definition.md
 grep -n "TXT·MD·JSON·LOG·XML" docs/kb-pipeline-process-definition.md
@@ -1472,7 +1501,9 @@ git commit -m "docs: 구조화 텍스트 레인 반영 — 라우팅 표/청킹 
 (v2 까지 두 라운드 연속으로 "계획서 코드 vs 계획서 테스트" 불일치가 잡혔기 때문이다).
 
 - Task 1 + Task 4 코드 → 자체 테스트 **21/21 통과**(textdecode 7 + csv_to_xlsx 14).
-- Task 2 코드 → 자체 테스트 **16/16 통과**(v4 의 `_pick_target`, v6 의 메타태그-only 제거 포함).
+- Task 2 코드 → 자체 테스트 **18/18 통과**(v7 의 분기 없는 `_strip_non_content` 설계).
+  추가로 html 형태 9종(정상/body밖표/body앞표/`</head>`생략/XHTML prolog/doctype/주석/
+  body없음/body 2개)을 훑어 전부 기대대로 나옴을 확인했다.
 - Task 4 산출 xlsx 를 **실제 엑셀 레인에 통과**시켜 회귀 없음 확인 — 정상/수식셀/숫자많음
   3종 모두 `gate.ok=True`, `=1+1` 이 청크 텍스트에 보존(`사번: 1001, 수식: =1+1`).
 
