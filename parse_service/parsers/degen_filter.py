@@ -165,8 +165,37 @@ def _block_body(block: dict) -> tuple[str, str]:
 
 # ─────────────────────────────────────────────────────────── 규칙 판정(순수)
 
+_LEADER_RUN = re.compile(r"[.·…]{4,}")
+_LEADER_SPACED = re.compile(r"(?:[.·]\s){3,}[.·]?")
+
+
+def normalize_for_measure(text: str) -> str:
+    """목차 leader dot(`. . . .` / `……` / `····`)을 공백으로 접는다 — **판정 입력 전용**.
+
+    2026-08-11: degen 필터가 정상 내용을 지우는 **세 번째 사례**였다(등기부 표 2건에 이어).
+    점선은 의미 없는 조판 장식인데 압축비(T1)·5-gram 지배(T2) 규칙에 반복으로 걸려
+    **목차 페이지가 통째로 삭제**된다(실측: 실제형 목차 928자 → T2 발화 / arXiv p5 4002자·
+    p6 2527자가 빈 페이지).
+
+    **반환값은 판정에만 쓰고 블록 내용에는 쓰지 않는다** — 점선은 원문에 그대로 남는다.
+    정규식은 점 사이에 공백 이외의 글자가 오면 매치가 끊겨 정상 문장("가. 나. 다.")을 먹지
+    않는다. 진짜 퇴화는 정규화 후에도 잡힌다(실측: 루프·구절반복 모두 T1,T2 유지).
+
+    표(`assess_table_rules`)에는 적용하지 않는다 — 표 셀의 점선은 성격이 다르고 근거가 없다.
+    """
+    if not text:
+        return text
+    return _LEADER_SPACED.sub(" ", _LEADER_RUN.sub(" ", text))
+
+
 def assess_text_rules(text: str) -> tuple[tuple[str, ...], dict]:
-    """텍스트 블록에서 발화한 규칙과 실측 통계. 삭제하지 않는다."""
+    """텍스트 블록에서 발화한 규칙과 실측 통계. 삭제하지 않는다.
+
+    ⚠️ **이 함수의 소비자는 둘이다** — `parse()` 출구의 `filter_degenerate_pages` 와
+    `pdf/page_verdict.py` 의 GW quarantine 게이트(`assess_page` 경유). 아래 정규화는
+    양쪽 판정을 동시에 느슨하게 만든다(HARD 제거 감소 → 잔존율 상승 → DEGEN_COLLAPSE 감소).
+    """
+    text = normalize_for_measure(text)
     stats: dict = {}
     if not text or len(text) < _SHORT_MIN:
         return (), stats

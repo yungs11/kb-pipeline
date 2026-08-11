@@ -1004,3 +1004,99 @@ doc_guard `40fde0f` 로 정렬 — 사전 = kb 6코드 + `gate_error`(doc_guard 
 - **미커밋 변경은 차단하지 않고 경고**만 한다(개발기는 상시 dirty). 대신 기록에 남긴다.
 - 번들에 `BUILD-PROVENANCE.txt` 를 넣는다 — 레포별 `branch@commit +uncommitted`.
   현장에서 "지금 도는 게 어느 버전이냐"를 이미지 안을 뒤지지 않고 답할 유일한 근거다.
+
+## Phase 1 — scan-lane 독립 버그 5건 (2026-08-11, plan v4 READY)
+
+`feat/paddle-gw-scan-lane` 머지를 **단계로 쪼갠 첫 단계**다. 그 머지는 독립적인 6가지를
+묶고 있어 검증이 얽혔다(ultracode 2라운드에서 must-fix 12→7, 그 과정에서 내 수정 둘이
+서로 모순). Phase 1 은 **구조를 전혀 건드리지 않는 버그 수정만** 담는다.
+
+| Phase | 내용 | 상태 |
+|---|---|---|
+| **1** | **독립 버그 5건** | **이 커밋** |
+| 2 | 페이지수준 라우팅 + v1 게이트 재배치 + 가로형 vl 레인 | 보류(`merge-paddle-scan-lane.md` v2, must-fix 7건 유효) |
+| 3 | layout hybrid 활성화 | 발화 문서 4건 확보(다산 p44 image 0.382 등) |
+| 4 | env 정리 + `KBP_GATE_OCR_LANE` 탈출구 교체 | 폐쇄망 마이그레이션 필요 |
+
+### 1. ODL 예외 계약 복구 — 배포 차단급
+
+`_odl_convert` 가 `opendataloader_pdf.convert` 를 try 없이 불러 `subprocess.CalledProcessError`
+가 `ToolError` 계약을 뚫고 나왔다. `_odl_lane` 의 `except ToolError` 가 못 잡아 **`parse()`
+전체가 500 으로 죽는다**(실측 재현). **`import` 도 try 안**에 넣은 것이 핵심 —
+`opendataloader-pdf` 는 `requirements.txt` 에만 있고 `pyproject.toml` dependencies 엔 없어
+`pip install .` 이미지에서 **`ImportError` 가 가장 잦은 실패 경로**다(PyMuPDF/docx/openpyxl 과
+동일한 폐쇄망 재발 패턴).
+
+> scan-lane 은 재작성된 `_parse_routed` 에 `except Exception` 을 둬 살아남았을 뿐 **근본 원인은
+> 안 고쳤다.** 도구 경계에서 바꾸면 어느 호출부든 동일하게 `ParserError` 로 승격된다.
+
+### 2. `max_tokens` 배선 — `*` keyword-only 로 문법 강제
+
+전면 VL 전사가 기본 2000 에서 절단된다(scan-lane 실측: 8000 으로 복구). 배선만 하고
+Phase 2 가 쓴다. **positional 금지를 규약이 아니라 `*` 문법으로 막았다** — positional 4번째
+인자는 `TypeError` 가 되는데 그게 `ocr/__init__.py` 의 `except Exception`(페이지 실패 비치명)에
+삼켜져 **전 페이지가 조용히 빈 결과**가 되는 경로였다.
+
+### 3. `KBP_VL_BLOCK_PROVIDERS` — 신규 방어 이식
+
+OpenRouter 의 DeepInfra 가 **이미지를 조용히 버리고** 텍스트만으로 환각한다(실측
+`prompt_tokens=42`). 거부가 아니라 조용한 환각이라 상류 검출이 불가능하다.
+
+**값 의미 셋 — `or` 를 쓰면 안 된다**(빈 값이 기본값으로 되돌아간다):
+
+| 값 | 의미 | 근거 |
+|---|---|---|
+| 미설정 | DeepInfra 차단 | 안전한 기본 |
+| 빈 문자열 | 끄기 | `docker-compose.yml` 이 **단일 대시** `${VAR-DeepInfra}` 라 빈 값을 보존한다(실측: `${A-x}` → `""` vs `${B:-x}` → `x`) |
+| `none`/`off` | 끄기 | `sync-parse-svc-env.sh` 가 빈 값을 버려 호스트 경로에서는 키가 안 실리고 기본값이 부활한다 |
+
+**키마다 compose 문법을 확인해야 한다** — `KBP_DEGEN_SOFT_RULES` 는 `:-` 라 `none` 만
+센티널이지만 이 키는 단일 대시라 둘 다 통한다. 한 규칙을 복사하면 안 된다.
+
+**env 값이 환경별로 다르다**: dev(`.env.example`·`parse-svc.env.example`)는 **`DeepInfra`** —
+OpenRouter 를 경유하므로 이 방어가 필요한 유일한 환경이다. airgap/parse-only 는 `none`.
+
+### 4. `prompts.py` 깨진 중복 정의 삭제
+
+`build_page_hybrid_prompts()` 가 **호출 즉시 `NameError: _PAGE_HYBRID_EXTRA`** 였다(`:754`
+별칭을 `:762-764` 재정의가 덮음). 호출자가 0이라 무증상이었지만 Phase 2 배선이 쓰면 터진다.
+
+### 5. degen leader dot 정규화 — 정상 삭제 **세 번째** 사례
+
+목차의 leader dot(`. . . .` / `……` / `····`)은 의미 없는 조판 장식인데 압축비(T1)·5-gram
+지배(T2)에 반복으로 걸려 **목차 페이지가 통째로 삭제**된다. **블록 내용은 바꾸지 않고 판정
+입력만 정규화**한다(`normalize_for_measure`).
+
+**오탐은 경로 의존적이다**(V5 에서 밝혀짐):
+
+| 경로 | 블록 형태 | 결과 |
+|---|---|---|
+| ODL | 목차를 **줄 단위**로 분할 | 블록당 4단어라 T3 평가 자체가 안 됨 — 오탐 없음 |
+| PyMuPDF 네이티브 텍스트 폴백(`rp.text`) | **페이지 전체가 한 블록** | 압축비 0.073 → T1 발화 → **페이지 통째 삭제** |
+
+scan-lane 이 관측한 arXiv p5 4002자·p6 2527자가 후자다. 저쪽은 폴백 경로에만
+`_strip_leader_dots` 를 넣었는데, **판정 입구에 넣으면 상위 호환**이다(ODL 경로는 줄 분할이라
+애초에 안 걸리고, Phase 2 가 그 우회 함수를 따로 들고 올 필요가 없다).
+
+> ⚠️ **이 정규화의 소비자는 둘이다** — `parse()` 출구의 `filter_degenerate_pages` 와
+> **v1 GW quarantine 게이트**(`page_verdict.apply_gw_page_gate` → `assess_page`).
+> V3/V4 리플레이로 게이트 판정이 **하나도 안 움직임**을 확인했다(60p 코퍼스에 목차 페이지 없음).
+
+### 검증
+
+| | 결과 |
+|---|---|
+| V1 `parse_service/tests` | **300 passed**(baseline 275 → +25, 감소 0) |
+| V2 전체 회귀 | **672 passed / 3 skipped / 0 failed** |
+| V3 등기부 표 보존 | 1,740→1,740 · 1,168→1,168 |
+| V4 게이트 판정 **무변경** | quarantine 3 / recall 3/11 / **observed FP 0/49** |
+| V4a·b | Java 부재 → `ParserError` / 모듈 부재 → `ToolError` |
+| V5 목차 보존 | **수정 전 삭제(blocks 0) → 수정 후 보존(blocks 1)**, 실제 파이프라인 |
+| V6 env | dev=`DeepInfra` / airgap=`none` / 빈 값(sync 폐기) 전부 의도대로 |
+
+**V5 한계 명시** — 접근 가능한 문서군(매뉴얼·규정 17 + 소송 원본 59 + test_doc)에 leader dot
+목차 페이지가 **하나도 없어** 합성 목차 PDF 를 썼다. 파이프라인은 실제(ODL 실행 포함)이고
+수정 전/후 대조로 fix 가 load-bearing 함을 보였다. 실문서 근거는 scan-lane 의 arXiv 실측.
+
+**코퍼스 이동** — `~/Downloads/kbp-parser-compare` → `~/workspace/9.kbp-parser-compare`(주제별
+재구성). `replay_gw_gate.py` 가 신·구 구조를 모두 받는다.

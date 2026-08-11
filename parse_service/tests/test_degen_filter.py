@@ -316,3 +316,57 @@ def test_soft_observation_is_logged(caplog):
     assert rec, "SOFT 보존 사실이 로그에 남아야 한다"
     msg = rec[0].getMessage()
     assert "R4" in msg and "comp" in msg and "ttr" in msg
+
+
+# ── 2026-08-11 Phase 1 §6: 목차 leader dot 정규화 ────────────────────────────
+#
+# degen 필터가 정상 내용을 지우는 **세 번째** 사례였다(위 등기부 표 2건에 이어).
+# 점선은 의미 없는 조판 장식인데 압축비(T1)·5-gram 지배(T2)에 반복으로 걸린다.
+
+from parse_service.parsers.degen_filter import normalize_for_measure
+
+_TOC_TITLES = ["총칙", "용어의 정의", "적용 범위", "우발비용의 개념", "사전점검 대상 사업",
+               "점검 시기 및 주기", "점검 항목과 기준", "현장 실사 절차", "보고서 작성 요령",
+               "이견 조정 및 재점검", "결과의 활용", "기록의 보존", "위임 및 준용", "부칙"]
+
+
+def _toc(sep: str) -> str:
+    return "\n".join(f"제{i}조 {t} {sep} {i * 5}"
+                     for i, t in enumerate(_TOC_TITLES, 1))
+
+
+@pytest.mark.parametrize("sep,name", [("." * 50, "연속점선"), (". " * 25, "공백점선"),
+                                      ("·" * 40, "중간점"), ("…" * 12, "말줄임표")])
+def test_toc_leader_dots_not_deleted(sep, name):
+    """★ 핵심 앵커 — 목차 페이지가 통째로 삭제되면 안 된다."""
+    page = _page({"type": "text", "text": _toc(sep), "page_idx": 1})
+    assert filter_degenerate_pages([page]) == 0, f"{name} 목차가 삭제됐다"
+    assert len(page["blocks"]) == 1
+
+
+def test_normalization_keeps_true_degeneration():
+    """정규화가 진짜 퇴화를 죽이지 않는다 — TP 보존 앵커."""
+    assert is_degenerate_text(DEGEN_LOOP)
+    assert is_degenerate_text(DEGEN_PHRASE)
+
+
+def test_normalization_does_not_touch_block_content():
+    """판정 입력만 정규화한다 — **블록 원문에는 점선이 그대로 남는다.**"""
+    toc = _toc("." * 50)
+    page = _page({"type": "text", "text": toc, "page_idx": 1})
+    filter_degenerate_pages([page])
+    assert page["blocks"][0]["text"] == toc
+    assert "." * 50 in page["blocks"][0]["text"]
+
+
+def test_normalize_keeps_normal_sentences():
+    """점 사이에 공백 이외의 글자가 오면 매치가 끊긴다 — 항목 나열을 먹지 않는다."""
+    for t in ("가. 나. 다. 라. 마.", "제1항. 제2항. 제3항.", "1. 총칙 2. 정의 3. 범위"):
+        assert normalize_for_measure(t) == t
+
+
+def test_normalization_not_applied_to_tables():
+    """표 셀의 점선은 목차와 성격이 다르고 실측 근거가 없다 — 적용하지 않는다."""
+    body = "<table>" + "".join(f"<tr><td>항목{i} {'.' * 30}</td></tr>" for i in range(30)) + "</table>"
+    _, stats = assess_table_rules(body)
+    assert "." * 30 in body and stats["joined"] > 0   # 원문 그대로 측정됨

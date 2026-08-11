@@ -137,14 +137,17 @@ async def close_http_client():
 async def call_vl_api_with_base64(
     base64_image: str,
     user_prompt: str,
-    system_prompt: str
+    system_prompt: str,
+    *,
+    max_tokens: int | None = None,
 ) -> Tuple[str, float]:
     """base64 이미지로 Vision-Language 모델 API를 호출합니다.
 
     Returns:
         (모델 응답 문자열, 호출 소요 시간(초)) 튜플
     """
-    payload = _build_payload(base64_image, user_prompt, system_prompt)
+    payload = _build_payload(base64_image, user_prompt, system_prompt,
+                             max_tokens=max_tokens)
     response_json, elapsed_time = await _request_vl_api(payload)
     return _extract_result(response_json), elapsed_time
 
@@ -175,10 +178,21 @@ def _apply_guided_json(payload: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
-def _build_payload(base64_image: str, user_prompt: str, system_prompt: str) -> Dict[str, Any]:
-    """Vision-Language 모델 API 호출 페이로드를 구성합니다."""
+def _build_payload(base64_image: str, user_prompt: str, system_prompt: str,
+                   *, max_tokens: int | None = None) -> Dict[str, Any]:
+    """Vision-Language 모델 API 호출 페이로드를 구성합니다.
+
+    `max_tokens` 우선순위: **인자 > `VL_MAX_TOKENS` env > 2000**.
+    페이지 전면 전사는 본문·표·서술을 한 응답에 담아 기본 2000 에서 **절단이 정상 동작이
+    된다**(실측: 8000 으로 올려 복구).
+
+    `*` 로 keyword-only 를 강제한다 — positional 4번째 인자는 **호출 즉시 TypeError** 가 되어
+    상류의 `except Exception`(ocr/__init__.py 의 "페이지 실패 비치명")에 삼켜져 조용히
+    빈 페이지가 되는 경로를 막는다. 규약이 아니라 문법으로 막는다.
+    """
     model_name = _require_model_name()
-    max_tokens = os.environ.get("VL_MAX_TOKENS", "2000")
+    if max_tokens is None:
+        max_tokens = os.environ.get("VL_MAX_TOKENS", "2000")
 
     payload = {
         "model": model_name,
@@ -204,6 +218,23 @@ def _build_payload(base64_image: str, user_prompt: str, system_prompt: str) -> D
     # 생성해 느려지는 것 방지(KBP_VL_DISABLE_REASONING, 기본 on). edgequake 와 동일 정책.
     if os.environ.get("KBP_VL_DISABLE_REASONING", "1").lower() not in ("0", "false", "off", ""):
         payload["reasoning"] = {"enabled": False}
+    # OpenRouter 프로바이더 차단 — 같은 모델을 여러 업체에 분산시키는데 그중 일부가 **이미지를
+    # 조용히 버리고** 텍스트만 추론해 그럴듯한 환각을 낸다(실측: qwen3.5-122b 의 DeepInfra 가
+    # prompt_tokens=42 로 이미지 폐기). 거부가 아니라 조용한 환각이라 상류에서 검출이 불가능하다.
+    #
+    # 값 의미 셋 — **`or` 를 쓰면 안 된다**(빈 값이 기본값으로 되돌아간다):
+    #   미설정(키 부재) → DeepInfra 차단(안전한 기본)
+    #   빈 문자열       → 끄기. docker-compose.yml 이 **단일 대시** `${VAR-DeepInfra}` 라
+    #                    빈 값을 그대로 통과시킨다(`:-` 였다면 기본값이 먹는다)
+    #   none / off      → 끄기. 호스트 dev 경로용 — sync-parse-svc-env.sh 가 빈 값을 버려
+    #                    키가 안 실리고 기본값이 부활하기 때문이다
+    # 폐쇄망 자체 서빙에서는 무의미한 필드다.
+    _raw = os.environ.get("KBP_VL_BLOCK_PROVIDERS")
+    _blocked = ("DeepInfra" if _raw is None else _raw).strip()
+    if _blocked.lower() not in ("", "none", "off"):
+        _ignore = [x.strip() for x in _blocked.split(",") if x.strip()]
+        if _ignore:
+            payload["provider"] = {"ignore": _ignore}
     return _apply_guided_json(payload)
 
 

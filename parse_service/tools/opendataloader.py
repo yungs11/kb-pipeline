@@ -23,12 +23,28 @@ def _safe_basename(name: str) -> str:
 
 
 def _odl_convert(*, input_path: str, output_dir: str) -> None:
-    import opendataloader_pdf
+    """ODL CLI 실행. **도구 경계에서 모든 실패를 `ToolError` 로 변환한다.**
 
-    opendataloader_pdf.convert(
-        input_path=input_path, output_dir=output_dir, format="markdown",
-        markdown_with_html=True, markdown_page_separator=PAGE_SEP, quiet=True,
-    )
+    2026-08-11: 여기서 예외를 안 감싸 계약이 깨져 있었다 — `_odl_lane` 은 `except ToolError`
+    로만 받는데 실제로는 아래 둘이 그대로 올라와 **`parse()` 전체가 500 으로 죽었다**.
+
+      · `ImportError`  — `opendataloader-pdf` 는 `requirements.txt` 에만 있고
+        `pyproject.toml` dependencies 엔 없다. `pip install .` 로 만든 이미지에서 빠진다
+        (PyMuPDF/docx/openpyxl 이 같은 이유로 폐쇄망에서만 터진 전례가 있다).
+      · `subprocess.CalledProcessError` — java 부재/JAR 실패. 실측 확인.
+
+    그래서 **import 도 try 안**에 둔다. `except Exception` 이 넓어 보이지만 try 본문이
+    import 와 `convert` 호출 둘뿐이라 삼킬 정상 흐름 예외가 없다.
+    """
+    try:
+        import opendataloader_pdf
+
+        opendataloader_pdf.convert(
+            input_path=input_path, output_dir=output_dir, format="markdown",
+            markdown_with_html=True, markdown_page_separator=PAGE_SEP, quiet=True,
+        )
+    except Exception as e:  # noqa: BLE001 — 도구 경계: 원인을 ToolError 로 승격
+        raise ToolError(f"opendataloader 실행 실패: {type(e).__name__}: {e}") from e
 
 
 def convert_pdf_to_page_markdowns(file_bytes: bytes, filename: str) -> list[str]:

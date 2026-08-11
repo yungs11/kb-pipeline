@@ -42,9 +42,15 @@ async def _file_to_base64_pages(file_bytes: bytes, filename: str) -> list[str]:
 
 
 async def ocr_file_to_elements(file_bytes: bytes, filename: str,
-                               prompt_override: tuple[str, str] | None = None) -> dict:
+                               prompt_override: tuple[str, str] | None = None,
+                               *, max_tokens: int | None = None) -> dict:
     """VL OCR — file_bytes 를 elements[] 로. prompt_override=(system, user) 주면 그 프롬프트로
-    호출한다(다이어그램 전용 서술 등). None 이면 기본 전사 프롬프트."""
+    호출한다(다이어그램 전용 서술 등). None 이면 기본 전사 프롬프트.
+
+    `max_tokens` 는 keyword-only 다(`*`). positional 로 받으면 4번째 인자가 조용히 밀려
+    아래 `except Exception`(페이지 실패 비치명)에 삼켜진 채 **전 페이지가 빈 결과**가 된다.
+    `None` 이면 `VL_MAX_TOKENS`(현행 동작).
+    """
     from parse_service.parsers.ocr import vl_api, elements_parser, prompts
     b64_pages = await _file_to_base64_pages(file_bytes, filename)
     if prompt_override is not None:
@@ -56,7 +62,8 @@ async def ocr_file_to_elements(file_bytes: bytes, filename: str,
     for page_num, b64 in enumerate(b64_pages, start=1):
         try:
             async with _sem():
-                vl_resp, _t = await vl_api.call_vl_api_with_base64(b64, user_p, system_p)
+                vl_resp, _t = await vl_api.call_vl_api_with_base64(
+                    b64, user_p, system_p, max_tokens=max_tokens)
             els, next_id = elements_parser.parse_vision_language_response_to_elements(
                 vl_resp, page_num, next_id)
             all_elements.extend(els)
@@ -81,12 +88,14 @@ async def ocr_file_to_elements(file_bytes: bytes, filename: str,
 
 
 def ocr_elements_sync(file_bytes: bytes, filename: str,
-                      prompt_override: tuple[str, str] | None = None) -> list[dict]:
+                      prompt_override: tuple[str, str] | None = None,
+                      *, max_tokens: int | None = None) -> list[dict]:
     # parse-svc /parse 핸들러는 async def 라 이벤트루프가 도는 스레드에서 호출될 수 있다 —
     # 그 안에서 asyncio.run() 은 RuntimeError. 루프가 돌고 있으면 별도 스레드에서
     # asyncio.run 을 실행해 안전하게 블로킹한다.
     def _run():
-        return asyncio.run(ocr_file_to_elements(file_bytes, filename, prompt_override))["elements"]
+        return asyncio.run(ocr_file_to_elements(
+            file_bytes, filename, prompt_override, max_tokens=max_tokens))["elements"]
     try:
         asyncio.get_running_loop()
     except RuntimeError:

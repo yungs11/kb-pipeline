@@ -333,9 +333,10 @@ services:
       KBP_VL_PAGE_MAX_TOKENS: ${KBP_VL_PAGE_MAX_TOKENS:-8000}
       KBP_VL_PAGE_DPI: ${KBP_VL_PAGE_DPI:-200}
       KBP_VL_VISUAL_MIN_AREA: ${KBP_VL_VISUAL_MIN_AREA:-0.05}
-      # OpenRouter 전용 필드라 폐쇄망에서는 무의미하다. **빈 문자열을 명시 주입**해야 한다 —
+      # OpenRouter 전용 필드라 폐쇄망에서는 무의미하다. 끄기는 `none` 센티널로 명시한다 —
       # 키를 빼면 코드 기본값(DeepInfra)이 발동해 온프렘 서버로 provider.ignore 가 전송된다.
-      KBP_VL_BLOCK_PROVIDERS: ""
+      # (빈 문자열도 코드상 끄기지만 `none` 이 sync/호스트 경로까지 안전하다.)
+      KBP_VL_BLOCK_PROVIDERS: "none"
       # MinIO — 내부 스택 통신용(바꾸지 말 것). 외부 MinIO 전환 시에만 .env 로 조정.
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}

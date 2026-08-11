@@ -35,8 +35,26 @@ from parse_service.parsers.pdf.page_verdict import (                   # noqa: E
 
 DEFAULT_CORPUS = os.environ.get(
     "KBP_GW_REPLAY_CORPUS",
-    os.path.expanduser("~/Downloads/kbp-parser-compare"),
+    os.path.expanduser("~/workspace/9.kbp-parser-compare"),
 )
+
+#: 코퍼스는 2026-08-11 에 주제별로 재구성됐다(`gw_raw/` → `results/raw/gw/` 등).
+#: 옛 평면 구조도 계속 받아 준다 — 백업/아카이브 사본이 그 형태일 수 있다.
+_LAYOUTS = (
+    {"raw": "results/raw/gw", "runs": "results/metrics/qual_gw_runs.tsv",
+     "labels": "docs/analysis/GW_LABELS_EVIDENCE.md"},          # 신 구조
+    {"raw": "gw_raw", "runs": "qual_gw_runs.tsv",
+     "labels": "GW_LABELS_EVIDENCE.md"},                        # 구 평면 구조
+)
+
+
+def resolve_paths(corpus: str):
+    """(raw_dir, runs_tsv, labels_md) — 신/구 구조를 모두 지원. 없으면 None."""
+    for lay in _LAYOUTS:
+        paths = tuple(os.path.join(corpus, lay[k]) for k in ("raw", "runs", "labels"))
+        if all(os.path.exists(x) for x in paths):
+            return paths
+    return None
 
 #: 라벨 문서에서 **절 경계로 인정할 헤더는 이 셋뿐**이다. 본문 오염으로 생긴 가짜 `## `
 #: 헤더가 실재하므로(:107, :155) 순진하게 `^## ` 로 쪼개면 분류가 어긋난다.
@@ -84,15 +102,17 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--corpus", default=DEFAULT_CORPUS)
     args = ap.parse_args()
-    c = args.corpus
-    raw_dir, runs_tsv = os.path.join(c, "gw_raw"), os.path.join(c, "qual_gw_runs.tsv")
-    labels_md = os.path.join(c, "GW_LABELS_EVIDENCE.md")
-    for p in (raw_dir, runs_tsv, labels_md):
-        if not os.path.exists(p):
-            print(f"SKIP — 코퍼스 없음: {p}\n"
-                  f"      (PII 를 포함해 리포에 커밋하지 않는다. --corpus 로 경로를 주거나\n"
-                  f"       KBP_GW_REPLAY_CORPUS 를 설정하라. CI 회귀는 tests/fixtures 가 담당한다.)")
-            return 0
+    resolved = resolve_paths(args.corpus)
+    if resolved is None:
+        print(f"SKIP — 코퍼스 없음: {args.corpus}\n"
+              f"      기대 구조(둘 중 하나):\n"
+              f"        results/raw/gw + results/metrics/qual_gw_runs.tsv + docs/analysis/GW_LABELS_EVIDENCE.md\n"
+              f"        gw_raw + qual_gw_runs.tsv + GW_LABELS_EVIDENCE.md\n"
+              f"      (PII 를 포함해 리포에 커밋하지 않는다. --corpus 로 경로를 주거나\n"
+              f"       KBP_GW_REPLAY_CORPUS 를 설정하라. CI 회귀는 tests/fixtures 가 담당한다.)")
+        return 0
+    raw_dir, runs_tsv, labels_md = resolved
+    print(f"코퍼스: {args.corpus}\n  raw={os.path.relpath(raw_dir, args.corpus)}")
 
     labels = load_labels(labels_md)
     rows = list(csv.DictReader(open(runs_tsv, encoding="utf-8"), delimiter="\t"))

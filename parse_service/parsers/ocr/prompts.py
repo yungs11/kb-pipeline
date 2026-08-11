@@ -758,10 +758,9 @@ build_page_hybrid_prompts = page_hybrid_prompts
 PAGE_HYBRID_SYSTEM_PROMPT = build_system_prompt()
 PAGE_HYBRID_USER_PROMPT = build_user_prompt() + _page_hybrid_extra()
 
-
-def build_page_hybrid_prompts() -> tuple[str, str]:
-    """(system, user) — 기존 전사 프롬프트 + 그림/차트 조항."""
-    return build_system_prompt(), build_user_prompt() + _PAGE_HYBRID_EXTRA
+# 2026-08-11: 여기 있던 `def build_page_hybrid_prompts()` 재정의를 삭제했다. 위 별칭을 덮으면서
+# 본문이 존재하지 않는 `_PAGE_HYBRID_EXTRA` 를 참조해 **호출 즉시 NameError** 였다(현재 함수는
+# `_page_hybrid_extra()`). 호출자가 0이라 무증상이었지만 Phase 2 배선이 이 이름을 쓰면 터진다.
 
 
 __all__ = [

@@ -204,3 +204,21 @@ def test_all_quarantine_emits_dedicated_warning(caplog):
     msgs = [r.getMessage() for r in caplog.records]
     assert any("전 페이지 quarantine" in m for m in msgs)
     assert any("빈 결과로 나간다" in m for m in msgs)
+
+
+# ── 2026-08-11 Phase 1 §6: 정규화의 두 번째 소비자가 이 게이트다 ──────────────
+
+def test_toc_page_not_quarantined():
+    """leader dot 목차 페이지가 GW 게이트에서 quarantine 되면 안 된다.
+
+    `assess_text_rules` 정규화는 `filter_degenerate_pages` 뿐 아니라 이 게이트의 입력도
+    바꾼다(`apply_gw_page_gate` → `assess_page` → `assess_text_rules`). v1 게이트 회귀 앵커.
+    """
+    titles = ["총칙", "용어의 정의", "적용 범위", "우발비용의 개념", "사전점검 대상 사업",
+              "점검 시기 및 주기", "점검 항목과 기준", "현장 실사 절차", "보고서 작성 요령",
+              "이견 조정 및 재점검", "결과의 활용", "기록의 보존", "위임 및 준용", "부칙"]
+    toc = "\n".join(f"제{i}조 {t} {'. ' * 25} {i * 5}" for i, t in enumerate(titles, 1))
+    pages = [_p(1, [_text(toc)])]
+    (v,) = _gate(pages)
+    assert v.state is PageState.OK, f"목차가 격리됐다: {v.reason}"
+    assert pages[0]["blocks"], "목차 blocks 가 보존돼야 한다"
