@@ -1013,8 +1013,11 @@ SiliconFlow 0% / Alibaba 20% / AtlasCloud 27% / Novita 11%.
    "주 서빙 이상" 이라는 같은 신호다.
 2. **v1 의 "재시도 회복률 0%" 는 이 경로에 적용되지 않는다.** 그것은 **모델 퇴화** 실측이었고
    (`temperature=0.1` → 같은 이미지 같은 실패), 서빙 장애는 성격이 다르다. 오늘 데이터가 증거다.
-3. **2b plan F5 는 여전히 유효** — 9b 를 안 띄운 폐쇄망에서 도달 불가 모델에 시한(600s)을
-   태우면 안 된다. `KBP_VL_FALLBACK_MODEL_NAME` 공란=끄기 + verify-bundle 가드 필요.
+3. **F5 전제 정정(사용자 2026-08-13): 9b 는 폐쇄망에 이미 배포돼 있다.** "도달 불가 모델에
+   600s 를 태운다" 는 우려는 성립하지 않으므로 **기본값 ON 이 맞다.** 남는 작업은 가드가 아니라
+   **배선**이다 — `KBP_VL_FALLBACK_MODEL_NAME` 을 폐쇄망 env 선언처에 넣고, 9b 엔드포인트가
+   122b 와 다르면 `_API_URL`/`_API_KEY` 도 함께 넣는다(공란이면 주 모델 값 재사용).
+   ⚠️ **확인 필요**: `MODEL_API_URL` 하나에 두 모델이 같이 서빙되는지, 별도 엔드포인트인지.
 4. **dev 완화**(설계와 무관): `.env` 에 `KBP_VL_BLOCK_PROVIDERS` 확대 또는 SiliconFlow 고정.
    → `docs/superpowers/specs/2026-08-13-openrouter-provider-truncation-deferred.md`
 
@@ -1028,10 +1031,13 @@ V0 가 이걸 정해줬다. 나는 실패 14건을 보고 "페이지가 어렵�
 ```
 
 `("vl_primary","truncated")` 만 남기면 **같은 오독을 운영에서 반복한다.**
-→ `attempts` 에 `provider`·`tokens`·`finish` 를 함께 싣는다. `finish` 가 `stop` 이냐
-`length` 냐가 "서빙 이상" 과 "`max_tokens` 부족" 을 가른다(처방이 완전히 다르다).
+→ **`source` 가 핵심**이다 — "폴백으로 처리됐고 **결국 뭘로 처리됐나**"(사용자 지시).
+`attempts` 에는 `model`·`tokens`·`finish` 를 싣는다. `finish` 가 `stop` 이냐 `length` 냐가
+"서빙 이상" 과 "`max_tokens` 부족" 을 가른다(처방이 완전히 다르다).
+**`provider` 는 안 남긴다**(사용자 결정) — 실서비스는 폐쇄망 자체 서빙이라 개념이 없다.
 
-로그는 두 곳: **문서 요약 1줄**(`fallback: 1단 12p · 2단 2p · 3단 1p · 실패 0p`)과
+로그는 두 곳: **문서 요약 1줄**
+(`source: vl_primary 12p · vl_fallback 2p · gw_fallback 1p · empty 0p`)과
 **페이지 표의 `source`/`attempts` 컬럼**.
 
 **왜 일급인가** — 주 모델이 절반쯤 아파도 폴백이 덮어주므로 **결과물은 정상으로 보인다.**
