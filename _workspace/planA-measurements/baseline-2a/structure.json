@@ -1,0 +1,56 @@
+{
+ "m2_3lane_7p": {
+  "pages": 7,
+  "lanes": {
+   "1": "odl",
+   "2": "odl",
+   "3": "odl",
+   "4": "paddle_gw",
+   "5": "paddle_gw",
+   "6": "vl",
+   "7": "vl"
+  },
+  "lane_dist": {
+   "odl": 3,
+   "paddle_gw": 2,
+   "vl": 2
+  },
+  "doc_lane": "paddle_gw",
+  "narrate_pages": [],
+  "diagram_pages": [
+   7
+  ],
+  "page_verdicts_count": 0,
+  "page_verdicts_is_none": true,
+  "note": "구조 기준선(2026-08-13). 블록/자수/표수는 VL 비결정성으로 비교 대상이 아니다."
+ },
+ "odl_vl_14p": {
+  "pages": 14,
+  "lanes": {
+   "1": "odl",
+   "2": "odl",
+   "3": "odl",
+   "4": "odl",
+   "5": "odl",
+   "6": "odl",
+   "7": "vl",
+   "8": "odl",
+   "9": "odl",
+   "10": "vl",
+   "11": "odl",
+   "12": "odl",
+   "13": "odl",
+   "14": "odl"
+  },
+  "lane_dist": {
+   "odl": 12,
+   "vl": 2
+  },
+  "doc_lane": "odl",
+  "narrate_pages": [],
+  "diagram_pages": [],
+  "page_verdicts_count": 0,
+  "page_verdicts_is_none": true,
+  "note": "구조 기준선(2026-08-13). 블록/자수/표수는 VL 비결정성으로 비교 대상이 아니다."
+ }
+}

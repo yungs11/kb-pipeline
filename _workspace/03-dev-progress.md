@@ -828,7 +828,8 @@ plan `~/.claude/plans/v1-gw-hardfail-quarantine.md` v7 (ultracode 6라운드 REA
 |---|---|---|
 | 1 | scan-lane 독립 버그 5건 | ✅ `83142a3` |
 | **2a** | **재통합 + 페이지수준 라우팅 + 게이트 재배치 + 프롬프트·env 정합** | ✅ **`897d016`** |
-| 2b | 전 레인 5단 폴백 + PageTrace 관측 | ⬜ **실측 후 설계**(아래 V0) |
+| 2b-1 | **PageTrace 관측**(동작 무변경) | ⬜ plan v1 — `phase2b1-pagetrace.md` |
+| 2b-2 | VL 실패 정책(재시도 + 문서 실패) | ⬜ **2b-1 의 V6 실측 후** — `phase2b2-failure-policy.md` |
 | 2.5 | 레인 선택을 KB UI 에 노출 | ⬜ 2b 후 (`document_pages` 새 테이블 + 요약배지/페이지표) |
 | ~~3~~ | ~~layout hybrid 활성화~~ → **머지와 함께 이미 켜졌다** | ✅ **활성화 완료** — hybrid 에 on/off 스위치가 없다(면적 임계뿐). V7·M2합성에서 `hybrid_vl=2` 발화 확인. 남은 것은 **D1 임계 재조정**(아래) |
 | 4 | env 수명주기 정리 + `KBP_GATE_OCR_LANE` 탈출구 교체 | ⬜ 폐쇄망 마이그레이션 동반 |
