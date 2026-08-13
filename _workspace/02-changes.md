@@ -1054,3 +1054,38 @@ html 뿐이었고, csv 는 `TEXT_EXTS` 라 구조를 잃은 채 원문 텍스트
 - 검증: plan v1→v7, ultracode 경쟁 검증 6라운드(READY v7). 라운드마다 계획서 코드를 실제로
   실행해 "Expected: PASS" 선언의 진위를 확인했고, 그 방식으로 "계획서 코드가 계획서 테스트를
   통과하지 못하는" 경우를 3회 잡았다.
+
+## 레거시 `.xls`(BIFF) 레인 개통 (2026-08-13, markup-lane)
+
+**증상** — 폐쇄망에서 `.xls` 업로드가 `openpyxl does not support the old .xls file format…`
+으로 실패. 처음엔 "번들에 openpyxl 이 빠졌나"로 의심했지만 **반입 tar 내부를 열어보니
+있었다**(kb·kbp-parse 양쪽 `site-packages/openpyxl/` 확인). 폐쇄망 문제가 아니라
+**호스트 맥에서도 동일하게 죽는** 미완성 기능이었다.
+
+**진짜 원인 (실측 재현)**
+1. `.xls` 는 `EXCEL_EXTS` 소속이라 엑셀 레인으로 들어오고 상류 형변환 API 를 안 탄다.
+2. `auto_backend._should_try_openpyxl` 이 `suffix in {".xlsx",".xlsm"} and 전결키워드` 라
+   **`and` 단락 평가**로 `.xls` 는 키워드 검사에 **도달조차 못 하고** kordoc 으로 간다.
+3. `kordoc_backend` 는 kordoc 마크다운과 **동반 openpyxl 워크북**을 함께 쓰는데,
+   원본 `.xls` 를 그대로 `load_workbook` 해서 거기서 죽는다.
+4. 변환기(`loaders/xls_converter.py`)는 **있었지만 죽은 코드**였다 — 호출처가 openpyxl
+   백엔드 경로뿐이라 2번 때문에 `.xls` 가 도달할 수 없었다. `auto_backend` 주석의
+   "소속 backend 가 soffice 변환을 내부 처리" 는 사실이 아니었다(정정함).
+
+즉 **크래시(3)와 조용한 품질 손실(2)이 겹쳐 있었다** — 전결 `.xls` 는 죽지 않았어도
+`delegation_rule` 청크를 못 만들었을 것이다.
+
+**해결** — 레인 입구 한 곳(`parsers/excel/__init__.py`)에서 **매직바이트**로 BIFF 를 판정해
+`.xlsx` 바이트로 갈아끼운다(csv 선례와 동형). 하류 코드 변경 0 으로 크래시·라우팅·게이트가
+동시에 해결된다. 확장자 판정을 쓰지 않는 이유는 `01-architecture.md` §8 참조.
+parse-svc 이미지에 `libreoffice-calc/core` 추가(**압축 +176.6MB, 번들 +8%** 실측).
+
+**구현 중 발견 — LibreOffice 는 캐시 오류값을 소문자로 쓴다.** 왕복 후 `#REF!` → `#ref!`,
+수식 쪽은 `=#REF!` → `="#ref!"`(문자열 리터럴). 게이트의 `ERROR_RE` 는 대문자 전용이라
+**값·수식 스캔이 전부 빗나가 `.xls` 문서의 참조오류 검사가 통째로 침묵**했다(= 불량 문서가
+조용히 통과). `re.IGNORECASE` 추가로 해결. 이건 plan 이 "최대 미검증 축"으로 지목해 픽스처
+전제 assert 를 넣어둔 자리에서 **그 assert 가 실제로 발화해** 잡혔다.
+
+**검증** — 신규 테스트 12개(매직바이트 라우팅 5케이스·탈출구·임시물 누수 정상/예외·실왕복·
+병합셀 colspan 비교·캐시전용 `#REF!` 보존·전결 게이트 도달) + 기존 회귀 341 통과.
+폐쇄망 가드에 `.xls` 왕복 스모크 추가(픽스처 부재 시 **스킵이 아니라 실패**).

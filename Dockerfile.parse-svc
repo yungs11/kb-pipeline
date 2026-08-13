@@ -9,6 +9,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm \
     && rm -rf /var/lib/apt/lists/* && npm install -g kordoc
 ENV KORDOC_BIN=kordoc KORDOC_MD_OUT=/tmp/kordoc_md_out EXCEL_PARSER_BACKEND=auto
 RUN mkdir -p /tmp/kordoc_md_out
+# LibreOffice(Calc headless): 레거시 .xls(BIFF) → .xlsx 변환. openpyxl 은 BIFF 를 못 읽어
+# `.xls` 업로드가 전량 실패했다(2026-08-13, 폐쇄망에서 발견 — 호스트 맥에서도 동일했다).
+# 변환은 엑셀 레인 입구가 수행한다(parse_service/parsers/excel/__init__.py).
+# 크기: 압축 기준 +176MB(실측). 렌더링을 하지 않으므로 폰트 패키지는 넣지 않는다.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libreoffice-calc libreoffice-core && rm -rf /var/lib/apt/lists/*
 
 # --- 의존성 레이어 (앱 코드보다 먼저 — requirements 는 코드에 의존하지 않으므로
 #     코드 변경 시 이 레이어가 캐시됨). 앱 패키지(kb_pipeline/parse_service/service)는

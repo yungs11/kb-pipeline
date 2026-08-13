@@ -74,3 +74,38 @@
   BOM/utf-8/cp949 밖 인코딩(shift_jis, iso-8859-1)의 html 은 크게 실패하거나 cp949
   모지바케가 된다. 기존 text 레인과 동일 동작이라 **회귀는 아니다**. 비한국어 html 이
   입력으로 들어오기 시작하면 필요해진다.
+- **D51 doc_guard 의 `.xls`** (2026-08-13, markup-lane) — **실측으로 해소(기우였다).**
+  `SUPPORTED_EXTENSIONS = {".docx",".pdf",".xlsx"}` 는 multipart `/v1/check` 경로 전용인데
+  그 경로는 **호출부가 0건**이다(kb `pipeline.py:338` 주석도 같은 사실을 적고 있다).
+  실제 엑셀 게이트는 kb → facade `/gate/check-excel` → doc_guard `/v1/check-excel` 로
+  **parse-svc 가 만든 `gate_summary` 를 받아 리포트만 만든다** — 파일 확장자와 무관하다.
+  실측(doc_guard :8001): `broken_formula.xls` → `result=fail`,
+  `ref_error / 참조오류 시트 H3, J9`, `legacy_sample.xls` → `unclear_header`. 무검문 적재 아님.
+
+- **D52 kb-backend `document_signals` 의 `.xls`** (2026-08-13, markup-lane) —
+  `_EXTRACTORS` 에 `xls` 키가 없어 텍스트 폴백으로 degrade 한다(페이지수를 지어낸다).
+  D51 과 같은 이유로 이번 배포 후에 관측 가능해진다.
+- **D53 암호화 OOXML 이 CFB 매직에 걸린다** (2026-08-13, markup-lane) —
+  `\xD0\xCF\x11\xE0` 는 BIFF 전용이 아니다(구 `.doc`/`.ppt`, 암호 걸린 `.xlsx` 도 CFB).
+  암호 xlsx 는 **오늘은 openpyxl 이 즉시 실패**하는데, 변경 후엔 soffice 변환
+  타임아웃(60s)까지 워커를 점유한 뒤 실패한다. 최악 점유 = 워커수 × 60s.
+  `EncryptedPackage` 스트림 탐지로 한 겹 좁힐 수 있다 — 실제 유입이 관측되면 착수.
+- **D54 `.xls` 이름 + 비CFB·비zip 바이트** (2026-08-13, markup-lane) —
+  HTML 표·탭구분 텍스트를 `.xls` 로 저장한 실무 파일. 이번 범위는 **BIFF 개통**이라
+  매직바이트가 CFB 가 아니면 변환을 타지 않고 오늘과 동일하게 실패한다(테스트 케이스 ⑤로
+  고정). 지원하려면 별도 스니핑 레인이 필요하다.
+- **D55 이름만 `.xls` 인 zip(실체 xlsx)** (2026-08-13, markup-lane) —
+  지금은 확장자를 보존해 kordoc 경로로 간다(오늘과 동일). xlsx 레인으로 보내는 편이 "더
+  올바른" 처리일 수 있으나 라우팅(Tier1/1.5)이 바뀌는 동작 변경이라 이번 목표 밖으로 뒀다.
+- **D56 전결 `.xls`** (2026-08-13, markup-lane) — **실측으로 닫힘.**
+  실제 위임전결 문서(`위임전결규정_병합셀_6p-35p.xlsx`, 72KB)를 `MS Excel 97` 필터로
+  `.xls`(120KB) 변환해 원본과 비교:
+
+  | | routed_backend | delegation_rule |
+  |---|---|---|
+  | 원본 `.xlsx` | `openpyxl` | **207** |
+  | `.xls` → 변환본 | `openpyxl` | **207** |
+
+  청크 본문도 동일(`… 물품 구입 신청 항목군의 전결 기준: - 50만원 초과 …: 총장 결재:○`).
+  변환 전이라면 확장자 게이트에 막혀 kordoc 으로 떨어져 **207 → 0** 이 됐을 자리다.
+  픽스처로 커밋하지는 않았다(타 프로젝트 코퍼스 120KB) — 재현 절차만 여기 남긴다.

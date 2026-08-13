@@ -22,7 +22,12 @@ from ..chunking.sibling_rule import _is_meta_sheet  # 크로스모듈 재사용(
 # unclear_header 후보 리전 타입 — 헤더 없이 표류하는 표(전결 Index/자산목록 등과 동형).
 _UNCLEAR_DRIFT_TYPES = {"flat_table", "unknown_table", "code_mapping_table", "key_value_block"}
 
-ERROR_RE = re.compile(r"#(REF|VALUE|DIV/0|N/A|NAME\?|NULL|NUM)!?")
+# ★ IGNORECASE 필수(2026-08-13 실측) — **LibreOffice 는 캐시된 오류값을 소문자로 쓴다.**
+# 레거시 .xls 를 soffice 로 .xlsx 변환해 들여오면 `#REF!` 가 `#ref!` 가 되고, 수식 쪽도
+# `=#REF!` → `="#ref!"`(문자열 리터럴)로 바뀐다. 대문자 전용 패턴이면 값·수식 양쪽 스캔이
+# 전부 빗나가 **참조오류 게이트가 .xls 문서에서 통째로 침묵**한다(= 불량 문서가 통과).
+# 소문자 `#ref!` 가 정상 본문에 나올 일은 사실상 없어 오탐 위험은 무시할 수준이다.
+ERROR_RE = re.compile(r"#(REF|VALUE|DIV/0|N/A|NAME\?|NULL|NUM)!?", re.IGNORECASE)
 # 약어 의미 정규화 — 공백·각주 기호 제거('기술관리실*' vs '기술관리실' 동일 취급, 비상충).
 # 주의: internal whitespace 도 제거됨('경영 기획팀'=='경영기획팀') — 미발화 쪽 오류라 정밀-안전.
 _MEANING_NORM_RE = re.compile(r"[\s*※†‡]+")

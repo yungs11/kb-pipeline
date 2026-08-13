@@ -290,6 +290,47 @@ print("OK html_blocks=%d" % len(blocks))
     *) echo "  ${RED}✗ html 파싱 왕복 실패 — markdownify 누락 또는 parsers/html import 실패:${RST}"
        echo "$hout" | tail -6 | sed 's/^/    /'; return 1 ;;
   esac
+  # ★ 레거시 .xls(BIFF) 레인 — LibreOffice(soffice) 가 이미지에 있어야 한다(2026-08-13).
+  #   openpyxl 은 BIFF 를 못 읽어 `.xls` 업로드가 전량 실패했다. 위 엑셀 스모크는
+  #   openpyxl 로 **만든** xlsx 만 돌려서 이 회귀를 못 잡는다 — BIFF 는 openpyxl 로
+  #   생성 자체가 불가능하므로 **리포 픽스처를 이미지에서 읽는다**(COPY parse_service 로
+  #   tests/fixtures 가 동봉된다. .dockerignore 는 tests 를 제외하지 않는다).
+  #   변수명이 위 XLS_PY(실제로는 xlsx 스모크)와 겹치지 않게 BIFF_PY 로 둔다.
+  echo "== 레거시 .xls 왕복 스모크(soffice + BIFF 변환) =="
+  local BIFF_PY='
+import shutil, sys
+from pathlib import Path
+fx = Path("/app/parse_service/tests/fixtures/legacy_sample.xls")
+if not fx.is_file():
+    print("FIXTURE_MISSING:%s" % fx); sys.exit(1)   # 스킵이 아니라 실패다
+from parse_service.parsers.excel.excel_parser_rag.loaders.xls_converter import find_soffice
+if find_soffice() is None:
+    print("SOFFICE_MISSING"); sys.exit(1)
+from parse_service.parsers.excel import parse as xparse
+r = xparse(fx.read_bytes(), "legacy_sample.xls")
+n = len(getattr(r, "chunks", None) or [])
+gs = getattr(r, "gate_summary", None) or {}
+if n < 1 or gs.get("error") is not None or not gs.get("sheets"):
+    print("BIFF_PARSE_FAILED: chunks=%d gate=%r" % (n, gs)); sys.exit(1)
+print("OK biff_chunks=%d sheets=%d" % (n, len(gs["sheets"])))
+'
+  local bout
+  # LibreOffice 콜드스타트(+프로필 생성)가 QEMU amd64 에서 느리다 — 기본 스모크보다 넉넉히.
+  if [ -n "$TIMEOUT_BIN" ]; then
+    bout="$("$TIMEOUT_BIN" "${BIFF_CHECK_TIMEOUT:-300}" "$ENGINE" run --rm -w /app -e PYTHONPATH=/app \
+      --entrypoint python "$ref" -c "$BIFF_PY" 2>&1)"
+  else
+    bout="$("$ENGINE" run --rm -w /app -e PYTHONPATH=/app --entrypoint python "$ref" -c "$BIFF_PY" 2>&1)"
+  fi
+  case "$bout" in
+    *OK\ biff_chunks=*) echo "  ${GRN}✓ .xls 왕복 성공 — ${bout##*OK }${RST}" ;;
+    *SOFFICE_MISSING*) echo "  ${RED}✗ 이미지에 soffice(LibreOffice)가 없다 — .xls 업로드가 전량 실패한다${RST}"
+       echo "    ${RED}  → Dockerfile.parse-svc 의 libreoffice-calc/libreoffice-core 설치 확인${RST}"; return 1 ;;
+    *FIXTURE_MISSING:*) echo "  ${RED}✗ 이미지에 .xls 픽스처가 없다: ${bout#*FIXTURE_MISSING:}${RST}"
+       echo "    ${RED}  → .dockerignore 가 tests 를 제외했는지 확인(가드가 조용히 무력화된다)${RST}"; return 1 ;;
+    *) echo "  ${RED}✗ .xls 파싱 왕복 실패 — 이미지가 healthy 로 떠도 레거시 엑셀이 깨진다:${RST}"
+       echo "$bout" | tail -6 | sed 's/^/    /'; return 1 ;;
+  esac
   # ⚠️ 파일변환(한컴) API 는 이미지 안 도구가 아니라 온프렘 HTTP 엔드포인트라 여기서
   # 도달성을 못 확인한다 — check_env() 의 KBP_FILECONVERT_URL 값 존재 확인이 유일한
   # 사전 방어선이다. docx/hwp/ppt 파싱은 그 서비스가 실제로 응답해야 성공한다

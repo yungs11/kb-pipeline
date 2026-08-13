@@ -8,6 +8,7 @@ pipeline.py 가 고정한 시그니처:
 
 from __future__ import annotations
 
+import tempfile
 import warnings
 from pathlib import Path
 from typing import Optional, Tuple
@@ -36,7 +37,11 @@ def load_workbook_for_parsing(
     if not src.is_file():
         raise FileNotFoundError(f"입력 파일이 존재하지 않습니다: {src}")
     if src.suffix.lower() == ".xls":
-        src = convert_xls_to_xlsx(src)
+        # 레인 입구(`parsers/excel/__init__.py`)가 CFB 를 이미 갈아끼우므로 실전에서는
+        # 여기 `.xls` 가 도달하지 않는다. 그래도 **output_dir 을 넘긴다** — 같은 함수의
+        # 호출 규약이 호출처마다 다르면 다음 사람이 또 밟는다(미지정 시 변환기가 만드는
+        # 임시 디렉터리는 지우는 주체가 없어 사본이 영구 누적된다).
+        src = convert_xls_to_xlsx(src, output_dir=tempfile.mkdtemp(prefix="xls2xlsx_"))
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
