@@ -7,8 +7,8 @@
 #       (큰 PDF 도 프록시 타임아웃 없이 안전).
 #
 # 사용:
-#   HOST=api-doc.ys-helperai.com ./ocr_single.sh doc.pdf
-#   HOST=https://api-doc.ys-helperai.com ENGINE=paddleocr_vl ./ocr_single.sh page.jpg
+#   HOST=15.164.81.29:18081 ./ocr_single.sh doc.pdf
+#   HOST=http://15.164.81.29:18081 ENGINE=paddleocr_vl ./ocr_single.sh page.jpg
 #   CHART=1 ./ocr_single.sh report.pdf              # opts use_chart_recognition
 # 환경변수: HOST(스킴 없으면 http://) · ENGINE(paddleocr_vl) · LANG_(korean)
 #           POLL_TIMEOUT(1800) · OUTDIR(결과 저장 폴더, 기본 현재)

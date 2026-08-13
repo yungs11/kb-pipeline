@@ -13,7 +13,7 @@ Python3 표준 라이브러리만 사용(pip 불요). 게이트웨이는 PDF/이
 
 사용:
   # test_doc 폴더로 2,4,8,12,16 단계 램프
-  ./ocr_loadtest.py ../../test_doc --host api-doc.ys-helperai.com --steps 2,4,8,12,16
+  ./ocr_loadtest.py ../../test_doc --host 15.164.81.29:18081 --steps 2,4,8,12,16
 
   # 단일 이미지로, 각 단계 요청수 지정
   ./ocr_loadtest.py /tmp/ocr_page1.jpg --steps 4,8,16,24 --count-per-step 24
