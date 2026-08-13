@@ -191,7 +191,7 @@ def vl_elements_to_blocks(elements: list[dict], *, page_idx: int,
 
 
 def _hybrid_scan_pages(pages: list[dict], file_bytes: bytes, target_pnos: set[int],
-                       ocr_url: str | None, counters: dict) -> set[int]:
+                       ocr_url: str | None, counters: dict, att=None) -> set[int]:
     """layout 이 그림·차트를 검출한 **스캔** 페이지를 전면 VL 출력으로 교체한다(in-place).
 
     대상(``target_pnos``)은 호출부가 준다 — 페이지수준 라우팅에서는 paddle 레인 페이지 집합이
@@ -204,6 +204,16 @@ def _hybrid_scan_pages(pages: list[dict], file_bytes: bytes, target_pnos: set[in
     """
     from kb_pipeline.blockify import elements_to_blocks, hybrid_to_blocks
     from parse_service.parsers.ocr import prompts
+
+    # ── 관측(2026-08-14) ────────────────────────────────────────────────────────
+    # 이 함수는 VL 실패를 **5곳에서 조용히 삼키고** paddle 산출물을 유지한다. 그런데
+    # V6-③ 실측이 확인했듯 **`source=empty` 가 나오는 경로가 바로 여기**(hybrid 로
+    # 못 살린 스캔 페이지 → 게이트 quarantine)다. 기록이 없으면 2b-2 의 실패 규칙
+    # ("error 이면서 empty 면 문서 실패")이 **정작 실패하는 자리에서만 발동하지 않는다**.
+    # → 삼키는 지점마다 `att(pno, "hybrid_vl", <사유>)` 를 남긴다. **동작은 안 바꾼다**.
+    def _a(pno: int, outcome: str, meta: dict | None = None) -> None:
+        if att is not None:
+            att(pno, "hybrid_vl", outcome, meta)
 
     replaced: set[int] = set()
     if not target_pnos:
@@ -227,6 +237,8 @@ def _hybrid_scan_pages(pages: list[dict], file_bytes: bytes, target_pnos: set[in
         # render_pdf_pages 는 한 페이지 예외로도 문서 전체 [] 를 반환한다(비치명).
         log.warning("hybrid: render failed for %d page(s) — keeping paddle output",
                     len(hybrid_pnos))
+        for pno in sorted(hybrid_pnos):
+            _a(pno, "render_failed")
         return set()
     by_pno = {rp.page_number: rp for rp in rendered}
     max_tokens = int(os.environ.get("KBP_VL_PAGE_MAX_TOKENS", "8000"))
@@ -242,9 +254,11 @@ def _hybrid_scan_pages(pages: list[dict], file_bytes: bytes, target_pnos: set[in
         batch = [els for els, _metas in _ocr_elements_for_pages(
             [(rp.jpeg, f"page-{pno}-hybrid.jpeg") for pno, rp in pairs], ocr_url,
             prompt_override=override, max_tokens=max_tokens)]
-    except Exception:  # noqa: BLE001 — 배치 전체 실패도 비치명(전 페이지 paddle 원본 유지)
+    except Exception as exc:  # noqa: BLE001 — 배치 전체 실패도 비치명(paddle 원본 유지)
         log.exception("hybrid VL batch failed — keeping paddle output for %d page(s)",
                       len(pairs))
+        for pno, _rp in pairs:
+            _a(pno, "batch_failed", {"error": f"{type(exc).__name__}: {exc}"[:200]})
         return set()
     els_by_pno = {pno: els for (pno, _rp), els in zip(pairs, batch)}
 
@@ -255,11 +269,13 @@ def _hybrid_scan_pages(pages: list[dict], file_bytes: bytes, target_pnos: set[in
         elements = els_by_pno[pno]
         if not elements:
             log.warning("hybrid: empty VL result for page %d — keeping paddle output", pno)
+            _a(pno, "empty_result")
             continue
         failed = _looks_like_failed_vl(elements)
         if failed:
             counters[failed] += 1
             log.warning("hybrid: %s for page %d — keeping paddle output", failed, pno)
+            _a(pno, failed)          # "truncated" | "error_placeholder"
             continue
 
         paddle_blocks = pg.get("blocks") or []
@@ -272,10 +288,12 @@ def _hybrid_scan_pages(pages: list[dict], file_bytes: bytes, target_pnos: set[in
 
         if not cleaned:
             log.warning("hybrid: all VL blocks filtered for page %d — keeping paddle output", pno)
+            _a(pno, "all_filtered")
             continue
         pg["blocks"] = keep + cleaned
         counters["tbl_backfill"] += len(keep)
         replaced.add(pno)
+        _a(pno, "ok", {"kept_tables": len(keep), "vl_blocks": len(cleaned)})
 
     # 교체된 페이지는 **게이트 대상에서 뺀다**(§4b) — 내용이 게이트웨이 산출물이 아니라
     # 전면 VL 산출물이라 v1 게이트의 판정 근거(게이트웨이 붕괴 패턴)가 적용되지 않는다.
@@ -537,7 +555,8 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
             # 자체 try 필수: 이 지점 예외가 parse() 로 전파되면 문서 전체 500 이 된다.
             try:
                 hybrid_replaced = _hybrid_scan_pages(
-                    gw_pages, file_bytes, set(paddle_pnos), ocr_url, counters) or set()
+                    gw_pages, file_bytes, set(paddle_pnos), ocr_url, counters,
+                    att=_att) or set()
             except Exception:  # noqa: BLE001
                 log.exception("hybrid scan-page step failed (%s)", filename)
             gw_by_pno = {p["page_number"]: p for p in gw_pages}

@@ -735,7 +735,7 @@ def test_page_traces_gw_hybrid_distinguished_from_gw(wire, monkeypatch):
     "게이트웨이가 처리했다" 로 뭉뚱그려진다.
     """
     monkeypatch.setattr(pdf_parser, "_hybrid_scan_pages",
-                        lambda pages, fb, tgt, ocr_url, counters: {1})
+                        lambda pages, fb, tgt, ocr_url, counters, **kw: {1})
     wire["set_gate"](_decision({1: "paddle_gw"}))
     wire["set_gw"]([{"page_number": 1, "blocks": [{"type": "text", "text": "GW 본문"}],
                      "layout": [], "page_size": None, "status": "ok", "error": ""}])

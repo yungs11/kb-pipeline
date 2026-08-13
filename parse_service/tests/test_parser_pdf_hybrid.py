@@ -380,3 +380,29 @@ def test_real_gateway_layout_shapes():
     # 구버전/형식이상 → ([], None)
     assert pg._parse_layout({}) == ([], None)
     assert pg._parse_layout({"layout": "nope"}) == ([], None)
+
+
+# ── 관측: 삼킨 VL 실패가 attempts 에 남는가 (2026-08-14) ─────────────────────
+def test_hybrid_records_swallowed_vl_failure_in_attempts(wire):
+    """hybrid 가 VL 실패를 삼킬 때 **반드시 발자국을 남긴다**.
+
+    이 함수는 실패 시 paddle 산출물을 조용히 유지한다. 그런데 V6-③ 실측상
+    `source=empty` 가 나오는 경로가 바로 여기다(hybrid 로 못 살린 스캔 페이지가
+    게이트 quarantine 으로 간다). 기록이 없으면 2b-2 의 실패 규칙
+    ("error 이면서 empty 면 문서 실패")이 **정작 실패하는 자리에서만 발동하지
+    않는다** — 실측에서 그 페이지들이 `attempts=[]` 였다.
+    """
+    seen: list[tuple] = []
+    wire["set_vl"](lambda _n: [])          # VL 이 elements 를 못 냄 → empty_result
+    pages = [_page(1, [{"type": "text", "text": "원문"}], [_big()])]
+    counters = {"layout_pages": 0, "visual_pages": 0, "area_guard_skipped": 0,
+                "truncated": 0, "error_placeholder": 0, "vl_page_calls": 0,
+                "tbl_backfill": 0, "vl_extra_tables": 0}
+    pdf_parser._hybrid_scan_pages(
+        pages, b"%PDF", {1}, None, counters,
+        att=lambda pno, stage, outcome, meta=None: seen.append((pno, stage, outcome)))
+
+    assert seen, "VL 실패를 삼켰는데 attempts 가 비어 있다 — 2b-2 규칙이 무력화된다"
+    assert seen[0][0] == 1 and seen[0][1] == "hybrid_vl"
+    assert seen[0][2] != "ok", f"실패인데 ok 로 기록됐다: {seen}"
+    assert pages[0]["blocks"] == [{"type": "text", "text": "원문"}], "동작은 불변"
