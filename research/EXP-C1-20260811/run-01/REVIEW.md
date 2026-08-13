@@ -63,9 +63,9 @@ VL 최초 empty 5건은 retry-01 판정을 사용한다. 아래 값은 과거 la
 - comparison evidence: 양쪽 모두 `2016.11.14/2016.11.16`을 보존. GW에는 barcode noise, VL은 `일반인으로서는`을 `일반인으로서도`로 변경.
 - current v1: `accept_gw` — no hard-fail reason
 - chars: GW 705 / VL 698 · errors: GW `-'` / VL `-'`
-- exact input: [`page_images/I03_01_운정지역주택조합_대리사무_채권자대위권등_신창근외17_상대방_소장_pdf_p22.jpg`](page_images/I03_01_운정지역주택조합_대리사무_채권자대위권등_신창근외17_상대방_소장_pdf_p22.jpg) · sha256 `e7f455166c01b0ebb422a4e386dccb9bf2b9e24b3afb92eaadce829aab496fe6`
+- exact input: [`page_images/I03.jpg`](page_images/I03.jpg) · sha256 `e7f455166c01b0ebb422a4e386dccb9bf2b9e24b3afb92eaadce829aab496fe6`
 
-![I03 original](page_images/I03_01_운정지역주택조합_대리사무_채권자대위권등_신창근외17_상대방_소장_pdf_p22.jpg)
+![I03 original](page_images/I03.jpg)
 
 <details><summary>GW parser output</summary>
 
@@ -105,9 +105,9 @@ VL 최초 empty 5건은 retry-01 판정을 사용한다. 아래 값은 과거 la
 - comparison evidence: 원본 `제4조 ③항`을 VL이 `제4조 ⑨항`으로 변경하고 Cyrillic `m`을 생성.
 - current v1: `accept_gw` — no hard-fail reason
 - chars: GW 1028 / VL 1002 · errors: GW `-'` / VL `-'`
-- exact input: [`page_images/I10_01_세종시_대평동_관토신_서울중앙_분양대금등반환_소미영_소장_pdf_p34.jpg`](page_images/I10_01_세종시_대평동_관토신_서울중앙_분양대금등반환_소미영_소장_pdf_p34.jpg) · sha256 `0f708a6f6122191669962f724e6f153f6bf37eb29f5d21ebd038ff775a5a4686`
+- exact input: [`page_images/I10.jpg`](page_images/I10.jpg) · sha256 `0f708a6f6122191669962f724e6f153f6bf37eb29f5d21ebd038ff775a5a4686`
 
-![I10 original](page_images/I10_01_세종시_대평동_관토신_서울중앙_분양대금등반환_소미영_소장_pdf_p34.jpg)
+![I10 original](page_images/I10.jpg)
 
 <details><summary>GW parser output</summary>
 
@@ -207,9 +207,9 @@ VL 최초 empty 5건은 retry-01 판정을 사용한다. 아래 값은 과거 la
   [retry output](retries/vl-empty-retry-01/normalized/I14_01_고양시_향동동_관토신_서울중앙_기타_금전_정재석외2_소장_pdf_p31_vl.md) ·
   [raw](retries/vl-empty-retry-01/vl_raw/I14_01_고양시_향동동_관토신_서울중앙_기타_금전_정재석외2_소장_pdf_p31.json)
 
-- exact input: [`page_images/I14_01_고양시_향동동_관토신_서울중앙_기타_금전_정재석외2_소장_pdf_p31.jpg`](page_images/I14_01_고양시_향동동_관토신_서울중앙_기타_금전_정재석외2_소장_pdf_p31.jpg) · sha256 `4156325dba99a65beda2576dee32106c5a8acc5b6761b4105e872bb466eb5752`
+- exact input: [`page_images/I14.jpg`](page_images/I14.jpg) · sha256 `4156325dba99a65beda2576dee32106c5a8acc5b6761b4105e872bb466eb5752`
 
-![I14 original](page_images/I14_01_고양시_향동동_관토신_서울중앙_기타_금전_정재석외2_소장_pdf_p31.jpg)
+![I14 original](page_images/I14.jpg)
 
 <details><summary>GW parser output</summary>
 
@@ -282,9 +282,9 @@ VL 최초 empty 5건은 retry-01 판정을 사용한다. 아래 값은 과거 la
   [retry output](retries/vl-empty-retry-01/normalized/I17_01_시흥시_장현지구_분관신_대리사무_수원지법_성남지원_납입금_반환_등_청구의_소_박은_p52_vl.md) ·
   [raw](retries/vl-empty-retry-01/vl_raw/I17_01_시흥시_장현지구_분관신_대리사무_수원지법_성남지원_납입금_반환_등_청구의_소_박은_p52.json)
 
-- exact input: [`page_images/I17_01_시흥시_장현지구_분관신_대리사무_수원지법_성남지원_납입금_반환_등_청구의_소_박은_p52.jpg`](page_images/I17_01_시흥시_장현지구_분관신_대리사무_수원지법_성남지원_납입금_반환_등_청구의_소_박은_p52.jpg) · sha256 `071d5b6a391a17cfb3357678e4eb403a821f361e62b8a3cbff5a71269d6e78d1`
+- exact input: [`page_images/I17.jpg`](page_images/I17.jpg) · sha256 `071d5b6a391a17cfb3357678e4eb403a821f361e62b8a3cbff5a71269d6e78d1`
 
-![I17 original](page_images/I17_01_시흥시_장현지구_분관신_대리사무_수원지법_성남지원_납입금_반환_등_청구의_소_박은_p52.jpg)
+![I17 original](page_images/I17.jpg)
 
 <details><summary>GW parser output</summary>
 
@@ -352,9 +352,9 @@ VL 최초 empty 5건은 retry-01 판정을 사용한다. 아래 값은 과거 la
   [retry output](retries/vl-empty-retry-01/normalized/I18_01_서울_서초구_관토신_책준_대구지법_계약금반환_남경은_소장_pdf_p128_vl.md) ·
   [raw](retries/vl-empty-retry-01/vl_raw/I18_01_서울_서초구_관토신_책준_대구지법_계약금반환_남경은_소장_pdf_p128.json)
 
-- exact input: [`page_images/I18_01_서울_서초구_관토신_책준_대구지법_계약금반환_남경은_소장_pdf_p128.jpg`](page_images/I18_01_서울_서초구_관토신_책준_대구지법_계약금반환_남경은_소장_pdf_p128.jpg) · sha256 `ad2ae531ad1d9c17a47a79a29f7aaae56da9efed44fe12f923a36883f0e59797`
+- exact input: [`page_images/I18.jpg`](page_images/I18.jpg) · sha256 `ad2ae531ad1d9c17a47a79a29f7aaae56da9efed44fe12f923a36883f0e59797`
 
-![I18 original](page_images/I18_01_서울_서초구_관토신_책준_대구지법_계약금반환_남경은_소장_pdf_p128.jpg)
+![I18 original](page_images/I18.jpg)
 
 <details><summary>GW parser output</summary>
 
@@ -400,9 +400,9 @@ VL 최초 empty 5건은 retry-01 판정을 사용한다. 아래 값은 과거 la
 - comparison evidence: GW `사체/부인하면/없에기/엑면금액`; VL이 원본의 `사채/부언하면/없애기/액면금액`을 복구.
 - current v1: `accept_gw` — no hard-fail reason
 - chars: GW 1212 / VL 1199 · errors: GW `-'` / VL `-'`
-- exact input: [`page_images/I19_01_양주시_옥정동_관토신_책준_서울중앙_분양대금반환등_장성근_소장_pdf_p35.jpg`](page_images/I19_01_양주시_옥정동_관토신_책준_서울중앙_분양대금반환등_장성근_소장_pdf_p35.jpg) · sha256 `4ba852eef9680cb1e1ee59ba35866fd1ec19954f5b92dabebb23bbca03fbc5ca`
+- exact input: [`page_images/I19.jpg`](page_images/I19.jpg) · sha256 `4ba852eef9680cb1e1ee59ba35866fd1ec19954f5b92dabebb23bbca03fbc5ca`
 
-![I19 original](page_images/I19_01_양주시_옥정동_관토신_책준_서울중앙_분양대금반환등_장성근_소장_pdf_p35.jpg)
+![I19 original](page_images/I19.jpg)
 
 <details><summary>GW parser output</summary>
 
@@ -461,9 +461,9 @@ VL 최초 empty 5건은 retry-01 판정을 사용한다. 아래 값은 과거 la
 - comparison evidence: VL body가 더 깨끗하지만 원본 `가처분이의`를 `가치분이의`로 변경. GW 오류가 critical이 아니어서 target 정의상 beneficial 아님.
 - current v1: `accept_gw` — no hard-fail reason
 - chars: GW 995 / VL 1040 · errors: GW `-'` / VL `-'`
-- exact input: [`page_images/I20_01_인천시_청라동_관토신_책준_서울중앙_가처분이의_주_디벨럽팩토리_심문기일통지서_가처_p41.jpg`](page_images/I20_01_인천시_청라동_관토신_책준_서울중앙_가처분이의_주_디벨럽팩토리_심문기일통지서_가처_p41.jpg) · sha256 `99e68b21ef9b9181c4f73ea642aeb3f59a8a9b0192e376e05f03913932f7909b`
+- exact input: [`page_images/I20.jpg`](page_images/I20.jpg) · sha256 `99e68b21ef9b9181c4f73ea642aeb3f59a8a9b0192e376e05f03913932f7909b`
 
-![I20 original](page_images/I20_01_인천시_청라동_관토신_책준_서울중앙_가처분이의_주_디벨럽팩토리_심문기일통지서_가처_p41.jpg)
+![I20 original](page_images/I20.jpg)
 
 <details><summary>GW parser output</summary>
 
@@ -531,9 +531,9 @@ VL 최초 empty 5건은 retry-01 판정을 사용한다. 아래 값은 과거 la
 - comparison evidence: GW는 무관한 중국어 표를 만들고 VL은 header 뒤에서 절단. 현재 v1 quarantine 대상.
 - current v1: `quarantine` — 한자 오염: 한자 130자, 비율 0.54
 - chars: GW 472 / VL 209 · errors: GW `-'` / VL `-'`
-- exact input: [`page_images/I24_01_경산삼남지역주택조합_대리사무_대구지법_손해배상_기_강성대외95_소장_pdf_p419.jpg`](page_images/I24_01_경산삼남지역주택조합_대리사무_대구지법_손해배상_기_강성대외95_소장_pdf_p419.jpg) · sha256 `c261a6dce840347daef024a373b4a9097a442dd5c7b30ae333dc31c4109f56dd`
+- exact input: [`page_images/I24.jpg`](page_images/I24.jpg) · sha256 `c261a6dce840347daef024a373b4a9097a442dd5c7b30ae333dc31c4109f56dd`
 
-![I24 original](page_images/I24_01_경산삼남지역주택조합_대리사무_대구지법_손해배상_기_강성대외95_소장_pdf_p419.jpg)
+![I24 original](page_images/I24.jpg)
 
 <details><summary>GW parser output</summary>
 
@@ -587,9 +587,9 @@ VL 최초 empty 5건은 retry-01 판정을 사용한다. 아래 값은 과거 la
 - comparison evidence: GW가 피고·피항소인 B와 승계참가인 D를 누락; VL은 당사자와 금액을 보존.
 - current v1: `accept_gw` — no hard-fail reason
 - chars: GW 345 / VL 441 · errors: GW `-'` / VL `-'`
-- exact input: [`page_images/I26_01_창원시_팔용동_관토신_서울중앙_손해배상_등_이경연외2_소장_pdf_p270.jpg`](page_images/I26_01_창원시_팔용동_관토신_서울중앙_손해배상_등_이경연외2_소장_pdf_p270.jpg) · sha256 `b430eca3848e5a0ee17e865b8d9143a799eea834ccc50699b3e6de48f468ed42`
+- exact input: [`page_images/I26.jpg`](page_images/I26.jpg) · sha256 `b430eca3848e5a0ee17e865b8d9143a799eea834ccc50699b3e6de48f468ed42`
 
-![I26 original](page_images/I26_01_창원시_팔용동_관토신_서울중앙_손해배상_등_이경연외2_소장_pdf_p270.jpg)
+![I26 original](page_images/I26.jpg)
 
 <details><summary>GW parser output</summary>
 
@@ -678,9 +678,9 @@ VL 최초 empty 5건은 retry-01 판정을 사용한다. 아래 값은 과거 la
 - comparison evidence: GW가 사건번호 `2024가단5205920`과 문서 문맥을 누락; VL이 복구.
 - current v1: `accept_gw` — 빈 페이지(ink=0.0158) — 내용 없음
 - chars: GW 40 / VL 201 · errors: GW `-'` / VL `-'`
-- exact input: [`page_images/I35_01_남양주시_금곡리_대리사무_서울중앙_추심금_김성수_소장_pdf_p18.jpg`](page_images/I35_01_남양주시_금곡리_대리사무_서울중앙_추심금_김성수_소장_pdf_p18.jpg) · sha256 `4b11d0cbe575fe106d2285f7e4f83c5f1d84dfe944bbf0d2dfef0d8470e2f68e`
+- exact input: [`page_images/I35.jpg`](page_images/I35.jpg) · sha256 `4b11d0cbe575fe106d2285f7e4f83c5f1d84dfe944bbf0d2dfef0d8470e2f68e`
 
-![I35 original](page_images/I35_01_남양주시_금곡리_대리사무_서울중앙_추심금_김성수_소장_pdf_p18.jpg)
+![I35 original](page_images/I35.jpg)
 
 <details><summary>GW parser output</summary>
 
@@ -731,9 +731,9 @@ VL 최초 empty 5건은 retry-01 판정을 사용한다. 아래 값은 과거 la
   [retry output](retries/vl-empty-retry-01/normalized/I37_01_서울시_종로구_신문로_대리사무_분관신_서울중앙_부당이득금_주식회사_거삼_소장_pd_p160_vl.md) ·
   [raw](retries/vl-empty-retry-01/vl_raw/I37_01_서울시_종로구_신문로_대리사무_분관신_서울중앙_부당이득금_주식회사_거삼_소장_pd_p160.json)
 
-- exact input: [`page_images/I37_01_서울시_종로구_신문로_대리사무_분관신_서울중앙_부당이득금_주식회사_거삼_소장_pd_p160.jpg`](page_images/I37_01_서울시_종로구_신문로_대리사무_분관신_서울중앙_부당이득금_주식회사_거삼_소장_pd_p160.jpg) · sha256 `980627f9a6135030c5339d62020071d7267701c73034603da561b253eb8c53b7`
+- exact input: [`page_images/I37.jpg`](page_images/I37.jpg) · sha256 `980627f9a6135030c5339d62020071d7267701c73034603da561b253eb8c53b7`
 
-![I37 original](page_images/I37_01_서울시_종로구_신문로_대리사무_분관신_서울중앙_부당이득금_주식회사_거삼_소장_pd_p160.jpg)
+![I37 original](page_images/I37.jpg)
 
 <details><summary>GW parser output</summary>
 
@@ -782,9 +782,9 @@ VL 최초 empty 5건은 retry-01 판정을 사용한다. 아래 값은 과거 la
 - comparison evidence: 원본 `테스타디앤씨`를 양쪽 모두 `테스타디엔씨`로 변경. 금액은 모두 보존.
 - current v1: `accept_gw` — no hard-fail reason
 - chars: GW 434 / VL 475 · errors: GW `-'` / VL `-'`
-- exact input: [`page_images/I41_01_하남미사지구_지식산언센터_관토신_서울중앙_하자보수비등_미사테스타타워관리단_소장_p_p10.jpg`](page_images/I41_01_하남미사지구_지식산언센터_관토신_서울중앙_하자보수비등_미사테스타타워관리단_소장_p_p10.jpg) · sha256 `e5092a5bebeada5832009ab8e20a436d6ad18b8c3ef583ebeaddaacf305c2af0`
+- exact input: [`page_images/I41.jpg`](page_images/I41.jpg) · sha256 `e5092a5bebeada5832009ab8e20a436d6ad18b8c3ef583ebeaddaacf305c2af0`
 
-![I41 original](page_images/I41_01_하남미사지구_지식산언센터_관토신_서울중앙_하자보수비등_미사테스타타워관리단_소장_p_p10.jpg)
+![I41 original](page_images/I41.jpg)
 
 <details><summary>GW parser output</summary>
 
@@ -831,9 +831,9 @@ VL 최초 empty 5건은 retry-01 판정을 사용한다. 아래 값은 과거 la
 - comparison evidence: GW는 수취인 주소를 절단; VL은 더 완전하지만 원본 `용죽1로`를 `용죽로`로 변경해 critical address error가 남음.
 - current v1: `accept_gw` — no hard-fail reason
 - chars: GW 660 / VL 684 · errors: GW `-'` / VL `-'`
-- exact input: [`page_images/I42_01_평택시_용이동_관토신_하자보수에갈음하는손해배상등_평택비전지웰푸르지오입주자대표회의__p336.jpg`](page_images/I42_01_평택시_용이동_관토신_하자보수에갈음하는손해배상등_평택비전지웰푸르지오입주자대표회의__p336.jpg) · sha256 `a6352a5751e9fce4b2827a791e40fbd99dd17ba0e982f928362aca94b1fb353b`
+- exact input: [`page_images/I42.jpg`](page_images/I42.jpg) · sha256 `a6352a5751e9fce4b2827a791e40fbd99dd17ba0e982f928362aca94b1fb353b`
 
-![I42 original](page_images/I42_01_평택시_용이동_관토신_하자보수에갈음하는손해배상등_평택비전지웰푸르지오입주자대표회의__p336.jpg)
+![I42 original](page_images/I42.jpg)
 
 <details><summary>GW parser output</summary>
 
@@ -943,9 +943,9 @@ G-well PRUGIO 평택비전지웰푸르지오 입주자대표회의
   [retry output](retries/vl-empty-retry-01/normalized/I46_01_동탄2신도시_관토신_서울중앙_분양대금반환_김은현외17_소장_pdf_p65_vl.md) ·
   [raw](retries/vl-empty-retry-01/vl_raw/I46_01_동탄2신도시_관토신_서울중앙_분양대금반환_김은현외17_소장_pdf_p65.json)
 
-- exact input: [`page_images/I46_01_동탄2신도시_관토신_서울중앙_분양대금반환_김은현외17_소장_pdf_p65.jpg`](page_images/I46_01_동탄2신도시_관토신_서울중앙_분양대금반환_김은현외17_소장_pdf_p65.jpg) · sha256 `88a22043023a1edb4ea6300a4dba6d781e85b99f96fa1459f86de30049df16d8`
+- exact input: [`page_images/I46.jpg`](page_images/I46.jpg) · sha256 `88a22043023a1edb4ea6300a4dba6d781e85b99f96fa1459f86de30049df16d8`
 
-![I46 original](page_images/I46_01_동탄2신도시_관토신_서울중앙_분양대금반환_김은현외17_소장_pdf_p65.jpg)
+![I46 original](page_images/I46.jpg)
 
 <details><summary>GW parser output</summary>
 
@@ -972,9 +972,9 @@ G-well PRUGIO 평택비전지웰푸르지오 입주자대표회의
 - comparison evidence: GW는 `2023.6.30/2023.12.30`과 사건번호를 보존; VL은 첫 문장에서 절단.
 - current v1: `accept_gw` — no hard-fail reason
 - chars: GW 742 / VL 82 · errors: GW `-'` / VL `-'`
-- exact input: [`page_images/I49_05_안산시_성곡동_관토신_책준_안산지원_매매대금반환_박신숙_판결문_pdf_p4.jpg`](page_images/I49_05_안산시_성곡동_관토신_책준_안산지원_매매대금반환_박신숙_판결문_pdf_p4.jpg) · sha256 `19f71e068bb455215ec1bde78810c45b0b07676efeefb749135a0e93ac10152b`
+- exact input: [`page_images/I49.jpg`](page_images/I49.jpg) · sha256 `19f71e068bb455215ec1bde78810c45b0b07676efeefb749135a0e93ac10152b`
 
-![I49 original](page_images/I49_05_안산시_성곡동_관토신_책준_안산지원_매매대금반환_박신숙_판결문_pdf_p4.jpg)
+![I49 original](page_images/I49.jpg)
 
 <details><summary>GW parser output</summary>
 
@@ -1024,9 +1024,9 @@ G-well PRUGIO 평택비전지웰푸르지오 입주자대표회의
 - comparison evidence: 양쪽 모두 당사자명·주소를 훼손하고, VL은 등록번호 숫자를 생성/혼합하며 대표자를 변경. 금액만 보존.
 - current v1: `accept_gw` — no hard-fail reason
 - chars: GW 2124 / VL 1794 · errors: GW `-'` / VL `-'`
-- exact input: [`page_images/I56_01_고양시_향동동_관토신_서울중앙_분양대금반환_등_이동배_외4_소장_pdf_p44.jpg`](page_images/I56_01_고양시_향동동_관토신_서울중앙_분양대금반환_등_이동배_외4_소장_pdf_p44.jpg) · sha256 `2a507c5c3c473a2c71670d720e5456332256c59d00661b96ef433d4a5380ac3c`
+- exact input: [`page_images/I56.jpg`](page_images/I56.jpg) · sha256 `2a507c5c3c473a2c71670d720e5456332256c59d00661b96ef433d4a5380ac3c`
 
-![I56 original](page_images/I56_01_고양시_향동동_관토신_서울중앙_분양대금반환_등_이동배_외4_소장_pdf_p44.jpg)
+![I56 original](page_images/I56.jpg)
 
 <details><summary>GW parser output</summary>
 

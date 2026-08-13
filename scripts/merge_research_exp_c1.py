@@ -47,6 +47,10 @@ def main() -> None:
             for key, (source, target) in mapping.items():
                 shutil.copy2(source, target)
                 row[key] = str(target.relative_to(OUT))
+            # Markdown preview servers can return 404 for long Unicode URLs.
+            # Keep the canonical image filename in features.tsv and add a short
+            # ASCII alias specifically for REVIEW.md rendering.
+            shutil.copy2(OUT / row["image_file"], OUT / "page_images" / f"I{idx:02d}.jpg")
             if sha(OUT / row["image_file"]) != row["image_sha256"]:
                 raise RuntimeError(f"image hash mismatch: index {idx}")
             row["sample_id"] = f"I{idx:02d}"
@@ -101,6 +105,7 @@ def main() -> None:
                 "이 문서의 각 이미지는 두 엔진에 실제 전송된 JPEG와 동일하며 `features.tsv`의 SHA-256으로 검증된다.", ""]
     for row in merged:
         sample = sample_by_index[int(row["source_index"])]
+        review_image = f"page_images/{row['sample_id']}.jpg"
         gw = (OUT / row["gw_file"]).read_text(encoding="utf-8")
         vl = (OUT / row["vl_file"]).read_text(encoding="utf-8")
         sections += [
@@ -108,8 +113,8 @@ def main() -> None:
             f"- historical GW label: `{sample.get('historical_label_status', 'NOT_JOINED')}` — identity key required",
             f"- current v1: `{row['v1_verdict']}` — {row['v1_reason'] or 'no hard-fail reason'}",
             f"- chars: GW {row['gw_chars']} / VL {row['vl_chars']} · errors: GW `{row['gw_error'] or '-'}'` / VL `{row['vl_error'] or '-'}'`",
-            f"- exact input: [`{row['image_file']}`]({row['image_file']}) · sha256 `{row['image_sha256']}`", "",
-            f"![{row['sample_id']} original]({row['image_file']})", "",
+            f"- exact input: [`{review_image}`]({review_image}) · sha256 `{row['image_sha256']}`", "",
+            f"![{row['sample_id']} original]({review_image})", "",
             "<details><summary>GW parser output</summary>", "", "```markdown", gw, "```", "</details>", "",
             "<details><summary>VL parser output</summary>", "", "```markdown", vl or "(EMPTY)", "```", "</details>", "",
         ]

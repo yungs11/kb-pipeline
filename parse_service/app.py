@@ -363,6 +363,9 @@ def run_parse(file_bytes: bytes, filename: str, *,
         # 키를 무시하므로 하위호환이다. **색인 제외는 여기서 하지 않는다** — 게이트가
         # 이미 quarantine 페이지의 blocks 를 비워서 위 concat 에 안 잡힌다.
         "page_verdicts": getattr(rr, "page_verdicts", None),
+        # Phase 2b-1 관측: **전 페이지** trace. `page_verdicts`(게이트 대상 부분집합)와
+        # 공존한다 — 개명이 아니라 추가다(기존 소비자 무영향).
+        "page_traces": getattr(rr, "page_traces", None),
         # 모니터링(P2, additive): 파서 단계 분해 — parse(opendataloader/OCR) vs
         # modal_enrich(표/이미지 LLM) vs render_upload. modal_llm 에 표 N개×LLM 분해.
         "timing_metrics": {

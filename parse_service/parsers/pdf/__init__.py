@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import collections
 import os
 import re
 
@@ -376,7 +377,33 @@ def parse(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteResult:
     removed = filter_degenerate_pages(res.pages or [])
     if removed:
         log.warning("VL 퇴화 블록 %d개 제거 (%s)", removed, filename)
+        # 퇴화 필터는 `RouteResult` 생성 **뒤**에 blocks 를 지운다 — trace 의
+        # `source`/`chars` 가 그대로면 "품질 상한 = empty 비율" 이 거짓이 된다(2b-1 §1).
+        _refresh_trace_sources(res)
     return res
+
+
+def _refresh_trace_sources(res: RouteResult) -> None:
+    """`filter_degenerate_pages` 뒤 trace 를 최종 blocks 에 맞춘다.
+
+    전량 삭제된 페이지는 `source` 를 **`empty`** 로 내리고 `attempts` 에 사유를 남긴다.
+    관측이 파싱을 깨면 안 되므로 실패해도 조용히 넘어간다.
+    """
+    try:
+        if not res.page_traces:
+            return
+        by_pno = {p["page_number"]: (p.get("blocks") or []) for p in (res.pages or [])}
+        for t in res.page_traces:
+            bl = by_pno.get(t["page_number"])
+            if bl is None:
+                continue
+            chars = sum(len((b.get("table_body") or b.get("text") or "")) for b in bl)
+            if not bl and t["source"] != "empty":
+                t["attempts"] = list(t["attempts"]) + [("degen", "all_removed", {})]
+                t["source"] = "empty"
+            t["chars"] = chars
+    except Exception:  # noqa: BLE001 — 관측이 파싱을 깨면 안 된다
+        log.exception("trace 갱신 실패")
 
 
 def _apply_gw_gate(pages: list, file_bytes: bytes, decision, filename: str,
@@ -669,13 +696,50 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
         verdicts = _apply_gw_gate(pages, file_bytes, decision, filename,
                                   target_pages=gate_pnos)
 
+    # ── 8) trace 조립(Phase 2b-1 관측) ────────────────────────────────────────
+    # **`source` 는 여기서 최종 확정한다** — 병합 루프 뒤에 blocks 를 바꾸는 곳이 있다:
+    #   · `_supplement_diagram_pages`(append) — 비었던 페이지가 채워질 수 있다
+    #   · 게이트 quarantine — blocks 를 비운다. 단 `source` 는 **안 바꾼다**(무엇이
+    #     처리했나는 그대로다). `verdict`/`state` 로 표현한다.
+    # ⚠️ `filter_degenerate_pages` 는 `parse()` 안, RouteResult 생성 **뒤**라 여기서
+    #    못 잡는다 — `parse()` 가 삭제 후 갱신한다(아래 `_refresh_trace_sources`).
+    if odl_error:
+        _att(0, "odl", "failed", {"error": odl_error})   # 문서 단위 사건 → pno=0
+    _blocks_by_pno = {p["page_number"]: (p.get("blocks") or []) for p in pages}
+    _verdict_by_pno = {v["page_number"]: v for v in (verdicts or [])}
+    _sig_by_pno = {sg.page_number: sg for sg in (decision.page_signals or ())}
+    page_traces = []
+    for pno in range(1, total_pages + 1):
+        t = traces.get(pno) or {"lane": lanes.get(pno, "odl"), "source": None,
+                                "attempts": []}
+        bl = _blocks_by_pno.get(pno) or []
+        chars = sum(len((b.get("table_body") or b.get("text") or "")) for b in bl)
+        v = _verdict_by_pno.get(pno) or {}
+        sig = _sig_by_pno.get(pno)
+        page_traces.append({
+            "page_number": pno,
+            "bucket": (sig.bucket.name if sig and sig.bucket else None),
+            "lane": t["lane"],
+            # blocks 가 비면 `empty` 로 덮어쓴다 — VL 이 elements 를 냈는데 전량 필터된
+            # 경우가 실재한다. 안 덮으면 "품질 상한 = empty 비율" 지표가 거짓이 된다.
+            "source": (t["source"] if bl else "empty"),
+            "attempts": list(t["attempts"]) + list(attempts.get(0, ())),
+            "chars": chars,
+            "verdict": v.get("verdict"),
+            "state": v.get("state"),
+            "verdict_reason": v.get("reason"),
+        })
+
     log.info("parse-svc pdf(%s): pages=%d odl=%d skip=%d paddle=%d vl=%d demoted=%d "
              "transcribe=%d narrate=%d hybrid_vl=%d tbl_backfill=%d truncated=%d",
              filename, total_pages, len(odl_pnos), len(skip_pnos), len(paddle_pnos),
              len(vl_pnos), len(demoted_pnos), len(transcribe_pnos), len(narrate_pages),
              counters["vl_page_calls"], counters["tbl_backfill"], counters["truncated"])
+    _src_dist = collections.Counter(t["source"] for t in page_traces)
+    log.info("parse-svc pdf(%s) source: %s", filename,
+             " · ".join(f"{k} {v}p" for k, v in sorted(_src_dist.items())))
     result = RouteResult(kind="pages", chunk_needed=True, pages=pages,
-                         page_verdicts=verdicts)
+                         page_verdicts=verdicts, page_traces=page_traces)
     _try_log_triage(decision, result, lanes, filename)
     return result
 
@@ -689,6 +753,19 @@ def _try_log_triage(decision, result: RouteResult, lanes: dict, filename: str) -
         _log_triage_table(decision, result, lanes=lanes, filename=filename)
     except Exception:  # noqa: BLE001
         log.exception("triage 로그 실패 (%s)", filename)
+
+
+def _fmt_attempts(atts) -> str:
+    """`attempts` 를 한 칸에 담는다 — `vl:ok(496,stop)` 식."""
+    out = []
+    for a in (atts or []):
+        stage, outcome = a[0], a[1]
+        meta = a[2] if len(a) > 2 else {}
+        bits = [str(meta[k]) for k in ("tokens", "finish") if meta.get(k) is not None]
+        if meta.get("error"):
+            bits = [str(meta["error"])[:28]]
+        out.append(f"{stage}:{outcome}" + (f"({','.join(bits)})" if bits else ""))
+    return " → ".join(out) or "-"
 
 
 def _log_triage_table(decision, result: RouteResult, *, lanes: dict, filename: str) -> None:
@@ -711,19 +788,23 @@ def _log_triage_table(decision, result: RouteResult, *, lanes: dict, filename: s
 
     log.info("triage %s: doc_lane=%s pages=%d", filename, decision.lane,
              decision.total_pages)
+    # ⚠️ 기존 11컬럼은 **triage 튜닝 근거**다 — 버리지 말고 뒤에 붙인다(2b-1 §3).
     log.info("| p | triage | lane | dia | char | img | imgcov | curve | line | "
-             "판정근거 | 성공여부 |")
-    log.info("|---|---|---|---|---|---|---|---|---|---|---|")
+             "판정근거 | 성공여부 | source | attempts |")
+    log.info("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    _tr = {t["page_number"]: t for t in (result.page_traces or [])}
     page_map = {p.get("page_number"): p for p in (result.pages or [])}
     for sig in decision.page_signals:
         entry = page_map.get(sig.page_number)
         has_blocks = bool(entry and entry.get("blocks"))
-        log.info("| %d | %s | %s | %s | %d | %d | %.2f | %d | %d | %s | %s |",
+        t = _tr.get(sig.page_number) or {}
+        log.info("| %d | %s | %s | %s | %d | %d | %.2f | %d | %d | %s | %s | %s | %s |",
                  sig.page_number, sig.bucket.name if sig.bucket else "-",
                  lanes.get(sig.page_number, "odl"), sig.is_diagram,
                  sig.char_count, sig.image_count, sig.image_coverage,
                  sig.curve_count, sig.line_count, sig.reason,
-                 "성공" if has_blocks else "실패")
+                 "성공" if has_blocks else "실패",
+                 t.get("source") or "-", _fmt_attempts(t.get("attempts")))
 
 
 def _odl_lane(file_bytes: bytes, filename: str, *, ocr_url: str,
