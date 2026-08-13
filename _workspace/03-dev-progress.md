@@ -1018,6 +1018,28 @@ SiliconFlow 0% / Alibaba 20% / AtlasCloud 27% / Novita 11%.
 4. **dev 완화**(설계와 무관): `.env` 에 `KBP_VL_BLOCK_PROVIDERS` 확대 또는 SiliconFlow 고정.
    → `docs/superpowers/specs/2026-08-13-openrouter-provider-truncation-deferred.md`
 
+#### 관측 요구사항 — 폴백 **몇 단까지 갔는지**가 로그에 남아야 한다 (사용자 지시)
+
+V0 가 이걸 정해줬다. 나는 실패 14건을 보고 "페이지가 어렵다" 로 읽었다가 틀렸고,
+둘을 가른 것은 **프로바이더·토큰 수**였다:
+
+```
+정의서 p12  Alibaba:truncated(86)  Alibaba:truncated(86)  SiliconFlow:ok(580)
+```
+
+`("vl_primary","truncated")` 만 남기면 **같은 오독을 운영에서 반복한다.**
+→ `attempts` 에 `provider`·`tokens`·`finish` 를 함께 싣는다. `finish` 가 `stop` 이냐
+`length` 냐가 "서빙 이상" 과 "`max_tokens` 부족" 을 가른다(처방이 완전히 다르다).
+
+로그는 두 곳: **문서 요약 1줄**(`fallback: 1단 12p · 2단 2p · 3단 1p · 실패 0p`)과
+**페이지 표의 `source`/`attempts` 컬럼**.
+
+**왜 일급인가** — 주 모델이 절반쯤 아파도 폴백이 덮어주므로 **결과물은 정상으로 보인다.**
+`source` 분포를 세지 않으면 "122b 가 언제부터 이상해졌나" 를 사후에 알 수 없다.
+오늘 dev 에서 그 상태가 14% 였고 **우연히** 발견했다. 운영에서는 우연을 기대할 수 없다.
+
+상세 설계: `~/.claude/plans/phase2b-fallback-and-trace.md` v3 "관측 요구사항".
+
 #### M2 미완
 
 두 문서 다 **전면 `vl` 레인**(가로형)이라 레인별 분포·실패 대조가 안 됐다.
