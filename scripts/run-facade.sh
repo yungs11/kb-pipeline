@@ -11,8 +11,8 @@
 # KBP_REQUIRE_EDGEQUAKE=1 이면 edgequake 도달 불가 시 기동을 **중단**한다(기본: 경고만).
 #
 # The facade reads its config straight from os.environ (no dotenv), so it needs the
-# KBP_* vars exported. They live in the gitignored scripts/facade.env (captured from
-# the running process). Unlike parse-svc, the facade does NOT need java.
+# KBP_* vars exported. 값은 **리포 루트 `.env` 하나**가 소유한다(2026-08-13, scripts/facade.env 폐기).
+# Unlike parse-svc, the facade does NOT need java.
 #
 # DOCKER-SHADOW gotcha (2026-07-07): facade + parse-svc are HOST dev processes; the
 # docker-compose stack is BACKING services only. `docker compose up -d` also starts the
@@ -44,10 +44,10 @@ _DEV_ENV_LEGACY=""; _DEV_ENV_MAIN=""
 _dev_env_load "$ROOT" "$ROOT/scripts/facade.env"
 _dev_env_host_addrs
 _dev_env_report "$ROOT"
-: "${KBP_OPENAI_API_KEY:?missing — scripts/facade.env must set KBP_OPENAI_API_KEY}"
-: "${KBP_PG_DSN:?missing — scripts/facade.env must set KBP_PG_DSN}"
+: "${KBP_OPENAI_API_KEY:?missing — set KBP_OPENAI_API_KEY in the repo-root .env}"
+: "${KBP_PG_DSN:?missing — set POSTGRES_* (or KBP_PG_DSN) in the repo-root .env}"
 # 잡 staging 이 여기 없으면 /parse·/ingest 접수가 런타임에 전면 실패한다.
-: "${MINIO_ENDPOINT:?missing — scripts/facade.env must set MINIO_ENDPOINT (호스트 dev 는 localhost:9000)}"
+: "${MINIO_ENDPOINT:?missing — set MINIO_ENDPOINT in the repo-root .env (호스트 dev 는 localhost:9000)}"
 # Raised parse read-timeout (multi-table PDFs take ~400s+). Code default is 1800.
 export KBP_PARSE_SVC_TIMEOUT="${KBP_PARSE_SVC_TIMEOUT:-1800}"
 
