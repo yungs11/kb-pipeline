@@ -96,7 +96,7 @@ Parse → Blockify → Modal Enrich → Chunking → Insert → Community → Se
 - **그 외(폴백, 예: hwpx)** → `fallback`: **kordoc** CLI(구 markitdown 폴백 제거).
 - **스캔 PDF / 스캔 페이지** → 해당 페이지를 렌더해 in-process VL OCR 로 보충(best-effort, 비치명).
 
-VL OCR 계약(in-process, `parsers/ocr/vl_api.py`): OpenAI-호환 chat/completions(`MODEL_API_URL`/`MODEL_API_KEY`/`MODEL_NAME`), guided-json(`GUIDED_JSON_MODE=response_format` OpenRouter 호환), 응답 스키마 `elements[].{category(table|figure), content{html,markdown,text}}`. 동시성 `KBP_VL_MAX_CONCURRENT`(기본 3), 페이지 실패 비치명. 순수 텍스트 figure 는 text 블록으로 재분류(markdown 유실 방지). 페이지 보존 경로는 `elements[]` 를 `elements_to_blocks` 로 넘긴다.
+VL OCR 계약(in-process, `parsers/ocr/vl_api.py`): OpenAI-호환 chat/completions(`MODEL_API_URL`/`MODEL_API_KEY`/`MODEL_NAME`), guided-json(`GUIDED_JSON_MODE=response_format` OpenRouter 호환), 응답 스키마 `elements[].{category(table|figure), content{html,markdown,text}}`. 동시성 `KBP_VL_MAX_CONCURRENT`(기본 8), 페이지 실패 비치명. 순수 텍스트 figure 는 text 블록으로 재분류(markdown 유실 방지). 페이지 보존 경로는 `elements[]` 를 `elements_to_blocks` 로 넘긴다.
 
 ### 4.2 Blockify(블록화)
 

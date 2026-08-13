@@ -19,11 +19,11 @@ def test_scanned_page_gets_ocr(monkeypatch):
     monkeypatch.setattr(pdf_parser, "_page_markdowns", lambda fb, fn: ["# p1", "   "])
     class FakeRP:  # render_pdf_pages 반환 원소 흉내
         page_number, jpeg = 2, b"jpegbytes"
-    monkeypatch.setattr(pdf_parser, "_render_pages", lambda fb: [FakeRP()])
-    monkeypatch.setattr(pdf_parser, "_ocr_elements_for_page",
-                        lambda jpeg, name, ocr_url: [
-                            {"category": "text", "content": {"markdown": "ocr text"}, "page": 0}
-                        ])
+    monkeypatch.setattr(pdf_parser, "_render_pages", lambda fb, page_numbers=None, **k: [FakeRP()])
+    monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages",
+                        lambda jobs, ocr_url=None, **k: [
+                            [{"category": "text", "content": {"markdown": "ocr text"}, "page": 0}]
+                            for _ in jobs])
     res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
     assert res.pages[1]["page_number"] == 2
     assert res.pages[1]["blocks"], "OCR 보충 블록이 있어야"
@@ -53,24 +53,56 @@ def test_scanned_page_with_imagerefs_and_empty_tables_gets_ocr(monkeypatch):
     class FakeRP:
         page_number, jpeg = 2, b"jpegbytes"
 
-    monkeypatch.setattr(pdf_parser, "_render_pages", lambda fb: [FakeRP()])
+    monkeypatch.setattr(pdf_parser, "_render_pages", lambda fb, page_numbers=None, **k: [FakeRP()])
     called = {}
 
-    def fake_ocr(jpeg, name, ocr_url):
+    def fake_ocr(jobs, ocr_url=None, **k):
         called["ocr"] = True
-        return [{"category": "text", "content": {"markdown": "vl 추출 내용"}, "page": 0}]
+        return [[{"category": "text", "content": {"markdown": "vl 추출 내용"}, "page": 0}]
+                for _ in jobs]
 
-    monkeypatch.setattr(pdf_parser, "_ocr_elements_for_page", fake_ocr)
+    monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages", fake_ocr)
     res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
     assert called.get("ocr"), "이미지참조/빈표 페이지는 VL(OCR) 로 라우팅돼야 한다"
     assert res.pages[1]["blocks"], "VL 보충 블록이 있어야 한다"
     assert res.pages[0]["blocks"], "digital 페이지(p1)는 그대로 ODL 블록"
 
 
-def test_tool_error_becomes_parser_error(monkeypatch):
+def test_odl_tool_error_falls_back_to_vl(monkeypatch):
+    """ODL 프로세스 실패는 **문서 실패가 아니라 VL 폴백**이다(Plan B-5, 사용자 확정 2026-08-04).
+
+    이전에는 `ToolError → ParserError` 로 문서 전체가 실패했다. 자바/ODL 은 세팅 전제이므로
+    그 실패는 예외 상황이고, 그때 문서를 통째로 버리는 것보다 VL 로 읽는 편이 낫다.
+    """
     from parse_service.tools import ToolError
+
     def boom(fb, fn):
         raise ToolError("no md")
+
+    class FakeRP:
+        page_number, jpeg = 1, b"jpegbytes"
+
+    monkeypatch.setattr(pdf_parser, "_page_markdowns", boom)
+    monkeypatch.setattr(pdf_parser, "_render_pages",
+                        lambda fb, page_numbers=None, **k: [FakeRP()])
+    monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages",
+                        lambda jobs, ocr_url=None, **k: [
+                            [{"category": "text",
+                              "content": {"markdown": "VL 로 살린 내용"}, "page": 0}]
+                            for _ in jobs])
+    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    assert res.kind == "pages"
+    texts = " ".join(b.get("text") or "" for p in res.pages for b in p["blocks"])
+    assert "VL 로 살린 내용" in texts
+
+
+def test_odl_tool_error_in_delegated_path_still_raises(monkeypatch):
+    """`_odl_lane` 위임 경로(정합 가드)는 현행 계약 유지 — ToolError → ParserError."""
+    from parse_service.tools import ToolError
+
+    def boom(fb, fn):
+        raise ToolError("no md")
+
     monkeypatch.setattr(pdf_parser, "_page_markdowns", boom)
     with pytest.raises(ParserError):
-        pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+        pdf_parser._odl_lane(b"%PDF", "a.pdf", ocr_url="http://ocr")

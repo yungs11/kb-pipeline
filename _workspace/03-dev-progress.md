@@ -813,3 +813,69 @@ plan `~/.claude/plans/v1-gw-hardfail-quarantine.md` v7 (ultracode 6라운드 REA
   `"GW 가 충분히 생성했는데 조용히 틀린 페이지를 어떻게 찾지?"` 로 바뀌었다.
   target label 은 `VL_ROUTE = VL rescued GW`.
 - 미검증: CJK 임계·문서 가드(국한문혼용 표본 0건, D12), `EMPTY`/`ENGINE_ERROR` 독립 발화(D15/D7)
+
+---
+
+## scan-lane 재통합 — Phase 2a 완료 (2026-08-12, `897d016`)
+
+`feat/paddle-gw-scan-lane` → `feat/scan-lane-remerge`. **44파일 분기 / 92커밋 뒤처짐.**
+설계 결정과 근거는 [`02-changes.md`](02-changes.md) "Phase 2a" 절, 아키텍처 반영은
+[`01-architecture.md`](01-architecture.md) §3.1.1 참조.
+
+### Phase 진행 상태
+
+| Phase | 내용 | 상태 |
+|---|---|---|
+| 1 | scan-lane 독립 버그 5건 | ✅ `83142a3` |
+| **2a** | **재통합 + 페이지수준 라우팅 + 게이트 재배치 + 프롬프트·env 정합** | ✅ **`897d016`** |
+| 2b | 전 레인 5단 폴백 + PageTrace 관측 | ⬜ **실측 후 설계**(아래 V0) |
+| 2.5 | 레인 선택을 KB UI 에 노출 | ⬜ 2b 후 (`document_pages` 새 테이블 + 요약배지/페이지표) |
+| 3 | layout hybrid 활성화 | ⚠️ **전제 재확인 필요**(V7-0) |
+| 4 | env 수명주기 정리 + `KBP_GATE_OCR_LANE` 탈출구 교체 | ⬜ 폐쇄망 마이그레이션 동반 |
+
+### 검증 (완료)
+
+- **V1** `pytest parse_service/tests` → **363 passed, 0 failed**
+- **V2** 전체 리포 → **735 passed, 3 skipped, 0 failed**
+- **V1-b** 커버리지 대조 → **363 ≥ 350**(하한 = HEAD 300 + 신규 50), 파일별 하한 전부 충족
+  - `test_pdf_gate` 31/30 · `test_paddle_gw` 17/16 · `test_parser_pdf_routing` 35/35
+- **V3** 게이트 리플레이 → quarantine 3 / recall 3/11 / **observed FP 0/49** (무변경)
+- **V4** java 부재에서 `parse()` 예외 없음
+- **V9** 폐쇄망 가드 → 오설정 **발화** / 정상 구성 **침묵**
+- **V10 / V10-b** env 선언 7곳 + 값 검사, `KBP_VL_MAX_CONCURRENT` 의 `3` 잔존 0
+
+### 남은 검증 — **게이트웨이 필요**
+
+| | 항목 | 기준 |
+|---|---|---|
+| V5-0 | **게이트 도달 전제** | `신탁업무처리지침` 3p 의 `bucket`·`is_landscape`·`imgcov` 를 **먼저** 찍는다. 가로형이거나 `imgcov ≥ MIXED_IMAGE_COV` 면 triage 가 `LLM_NEEDED` 로 보내 **paddle_gw 레인도 게이트도 안 돈다** → `page_verdicts=[]` 가 정상 결과라 **실패가 통과로 읽힌다** |
+| V5 | 실 게이트웨이 스캔 | V5-0 확인 후. 블록/표 ≥ 머지 전(33/5), `page_verdicts` 비어있지 않음 |
+| V6 | 가로형 문서 | `자산신탁 온톨로지 PoC.pdf` 18p — 전 페이지 `vl`, 표가 VL 산출물에 존재, **머지 전 HEAD 와 표 개수·구조 대조** |
+| V7-0 | **hybrid 도달 전제** | `_hybrid_scan_pages` 는 `paddle_gw` 레인에서만 돈다. `LLM_NEEDED → vl` 때문에 사실 #22 의 4페이지가 `vl` 로 샐 수 있다 → **전부 새면 hybrid 는 사문**이고 Phase 3 의 전제부터 다시 본다 |
+| V7 | hybrid 발화 실측 | V7-0 이 `OCR_NEEDED` 로 남는 페이지를 확인한 뒤에만 유효 |
+
+### Phase 2b 착수 전 실측 (V0) — **이 결과가 설계 입력이다**
+
+폴백 체인을 종이 위에서 설계하려다 검증이 수렴하지 않았다(02-changes "방법론" 참조).
+2a 가 착지했으므로 **실패 분포를 먼저 잰다.**
+
+| | 무엇 | 왜 |
+|---|---|---|
+| M1 | 가로형 18p → **VL 실패 페이지 수·실패 종류**(truncated/empty/format) | 각 폴백 단이 몇 페이지를 대상으로 하는지 |
+| M2 | 혼합 문서 → 레인별 분포 + 레인별 실패 수 | skip 규칙이 어느 집단에 걸리는지 |
+| M3 | 실패 페이지에 **9b 직접 태우기** → 구하는 비율 | D9 를 닫는다 |
+| M4 | 같은 페이지에 **GW 직접 태우기** → 구하는 비율 | 3단 실효 + D10 |
+
+**M3·M4 가 둘 다 0 이면 5단 체인은 만들지 않는다** — 2a 의 현행 폴백으로 충분하고
+관측(PageTrace)만 신설한다.
+
+### 리스크 / 유예 (deferred)
+
+- **D11 `_supplement_diagram_pages` 사문화** — `LLM_NEEDED → vl` 로 `narrate_pages` 가
+  공집합이 된다. 코드는 남기고 제거는 Phase 4(`KBP_GATE_OCR_LANE=vl` 예외 경로 존재).
+- **D13 ODL 페이지수 불일치 가드가 §3 목표를 무효화** — `len(odl_md) != total_pages` 면
+  문서 전체를 `_odl_lane(diagram_pages=())` 로 위임하고 즉시 return 한다. ODL 이 페이지를
+  하나 더/덜 내는 것만으로 가로형·다이어그램 페이지가 VL 을 통째로 못 받는다. 로그로 추적.
+- **D4 `planA-measurements/` 90개 산출물** — 브랜치 내용이라 그대로 가져왔다. 처분 미정.
+- **D12 폐쇄망 탈출구(`=vl`) + 전면 스캔 문서** — 스캔이라 `rp.text` 도 비어 VL 1회 실패 =
+  빈 문서. HEAD 문서수준 vl 레인에 있던 종결 폴백이 사라진 셈 → **Phase 2b 가 실측 기반 처리**.

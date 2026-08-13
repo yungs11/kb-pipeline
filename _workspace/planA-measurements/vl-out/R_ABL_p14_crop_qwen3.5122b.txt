@@ -1,0 +1,6 @@
+1. **Agent Orchestration** (Use-case Scenario 3, Use-case Scenario 2, Use-case Scenario 1) → **Model Factory** (Intelligent Model Router, Deep Models, VLM Models, Vector EBD Models, Foundation Models)
+2. **Model Factory** ↔ **Deep Research Engine** (Agentic RAG, Planner, Search Studio (Vector DB), Knowledge Grounding (Graph RAG, SparQL))
+3. **Deep Research Engine** ↔ **MCP based Enterprise Data Federation** (Document Studio, NL2SQL, Access & Authentication Control, MCPs)
+4. **Legacy Systems** (Policy Administration System (PAS), Claims, Underwriting, ...) → **Master Table** → **생명보험 Datamart** (고객, 계약, 상품, 계리, 심사) → **MCP based Enterprise Data Federation**
+5. **MCP based Enterprise Data Federation** → **Knowledge Studio** (Query Mgr., Ontology, Mapping Rule, OntoGen (Query, Model))
+6. **Agent Orchestration** ↔ **Agent Studio** (Workflow, Designer) ↔ **Application Server** (Portal, Notification) ↔ **사용자** ↔ **Dashboard** (For User, For Admin)

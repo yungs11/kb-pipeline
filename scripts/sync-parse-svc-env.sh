@@ -37,6 +37,8 @@ KEYS=(
   # 스캔 레인 — paddle_gw 면 URL 이 반드시 있어야 한다
   KBP_GATE_OCR_LANE KBP_PADDLE_OCR_GATEWAY_URL KBP_PADDLE_GW_LANG
   # 게이트/트리아지 임계 (parse_service/parsers/pdf/gate.py, triage)
+  # ⚠️ 아래 3개는 2026-08-12 페이지수준 라우팅 도입으로 **소비자가 사라졌다**(무효).
+  #    파생만 유지 — 삭제는 Phase 4.
   KBP_GATE_DEFAULT_LANE KBP_GATE_VL_LANE KBP_GATE_VL_RATIO
   KBP_TRIAGE_CONTENT_MIN KBP_TRIAGE_NATIVE_TEXT_MIN_CHARS KBP_TRIAGE_LOG_TABLE
   KBP_TRIAGE_LANDSCAPE_TO_LLM KBP_TRIAGE_MIXED_IMAGE_COV
@@ -49,6 +51,10 @@ KEYS=(
   KBP_DEGEN_COMPRESS_MAX KBP_DEGEN_SOFT_RULES
   # VL 프로바이더 차단(vl_api.py) — 미설정이면 DeepInfra 차단
   KBP_VL_BLOCK_PROVIDERS
+  # 페이지수준 라우팅 · VL 전사(2026-08-12). **여기 없으면 파생 parse-svc.env 에서 조용히
+  # 누락돼 폐쇄망에서만 코드 기본값으로 돈다** — 로컬 dev 는 루트 .env 를 직접 읽어 무증상.
+  KBP_PADDLE_GW_DPI KBP_VL_PAGE_DPI KBP_VL_PAGE_MAX_TOKENS
+  KBP_VL_VISUAL_MIN_AREA KBP_VL_MAX_CONCURRENT KBP_VL_DISABLE_REASONING
   # 프롬프트 오버라이드(비면 코드 기본값)
   KBP_PROMPT_HIERARCHY_RULE KBP_PAGE_HYBRID_DIAGRAM_RULE
   # 엑셀 — kordoc 백엔드. Dockerfile.parse-svc:10 이 컨테이너에 ENV 로 박는 값들

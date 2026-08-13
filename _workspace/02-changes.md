@@ -1100,3 +1100,131 @@ scan-lane 이 관측한 arXiv p5 4002자·p6 2527자가 후자다. 저쪽은 폴
 
 **코퍼스 이동** — `~/Downloads/kbp-parser-compare` → `~/workspace/9.kbp-parser-compare`(주제별
 재구성). `replay_gw_gate.py` 가 신·구 구조를 모두 받는다.
+
+---
+
+## Phase 2a — scan-lane 재통합: 페이지수준 라우팅 (2026-08-12, `897d016`)
+
+`feat/paddle-gw-scan-lane`(92커밋 뒤처짐, **44파일 분기**)을 HEAD 에 재통합했다.
+
+### 결정 1 — `LLM_NEEDED → vl` (문서수준 레인 폐지의 완성)
+
+가로형 페이지를 `vl` 로 보내려다, `is_landscape` 를 `_page_lane` 에서 보는 게 **중복**임을
+발견했다 — `triage.py` 가 이미 가로형을 `LLM_NEEDED` 로 마킹한다. 매핑 하나로 정리하니
+정의처도 없던 `_landscape_to_vl()`, "페이지마다 env 를 읽으면 비결정" 이라 해놓고 페이지마다
+호출하던 자기모순, 도달 불가 조합을 요구하던 앵커가 **한꺼번에 사라졌다.**
+
+부수 효과로 **세로형 혼합 콘텐츠 페이지**(`imgcov ≥ KBP_TRIAGE_MIXED_IMAGE_COV`)가 VL 을
+통째로 잃던 회귀도 닫혔다 — 옛 배선은 그 페이지를 `odl` 로 떨어뜨리고 `narrate_pages` 는
+`is_diagram` 만 담아 **어디서도 VL 을 못 받았다**. HEAD 는 `KBP_GATE_VL_RATIO` 로 문서수준
+`vl` 에 보내던 집단이라, 문서수준 레인을 없애면서 조용히 생긴 구멍이었다.
+
+교환은 명시한다: `LLM_NEEDED` 인 **모든** 페이지가 정확한 ODL 텍스트 대신 VL 전사를 받는다.
+
+### 결정 2 — demote 는 **엔진 사고뿐**
+
+`status == "ok"` + 빈 blocks 는 강등하지 않는다. 그 집단이 v1 이 측정한 "게이트가 잡은
+페이지" 이고 거기서 VL 은 **구조율 0 · 날조 2건**이었다(Fisher p=0.021). 강등하면 v1 이
+실측으로 기각한 GW→VL escalation 이 되살아난다.
+
+### 결정 3 — `paddle_gw` 페이지 dict = **6-key 계약**
+
+두 브랜치가 **서로 다른 4-tuple** 을 내고 있었다:
+HEAD `(page_number, blocks, status, error)` / scan-lane `(page_number, blocks, layout, page_size)`.
+**어느 한쪽만 취하면 조용히 죽는다** —
+
+- `layout`·`page_size` 소실 → `_hybrid_scan_pages` 의 `pg.get("layout")`·`_has_visual` 이
+  **영구 거짓** → hybrid 가 통째로 죽는데, `hybrid_vl=0` 이라는 **정상처럼 보이는 로그**로만
+  나타난다(발화 0 을 "그런 문서가 없었다" 로 오독하게 된다).
+- `status` 소실 → demote 조건이 축약되어 게이트웨이 개별 페이지 실패가 demote 도 VL 도
+  못 받고 게이트 EMPTY→quarantine 으로 **빈 페이지**가 된다.
+
+생산자를 직접 단언하는 앵커를 신설했다(`test_paddle_gw.py`) — 라우팅 테스트는
+`run_paddle_gateway` 를 monkeypatch 하므로 **픽스처가 status 를 넣어줘 안 고쳐도 초록**이다.
+
+### 조용히 깨졌을 것들 (문서 검토로는 안 보인 것 / 병합해야 보인 것)
+
+| 무엇 | 왜 안 보였나 |
+|---|---|
+| `ocr/__init__.py` 에 scan-lane 의 **positional `max_tokens`** 가 병합돼 있었다 | git 이 **충돌로 표시하지 않은 영역**. HEAD 는 keyword-only(Phase 1)라 `TypeError` → 상류 `except Exception` 이 삼켜 전 페이지 빈 결과 |
+| `gate.py` 조기 return 2곳이 싱글턴 `_ODL` 재사용 | `page_lanes`/`total_pages` 가 비어 전-SKIP 문서가 **전량 VL 전사 호출**을 받는다 |
+| 병합 분기가 md 를 vl 보다 **먼저** 봤다 | `_DIGITAL_MIN_CHARS == 1` 이라 혼합 문서에서 실텍스트 1자만 있어도 **VL 결과가 통째로 버려진다**(비용만 태우고 폐기) |
+| `_log_triage_table` 이 scan-lane 에 **아예 없었다** | `KBP_TRIAGE_LOG_TABLE` 의 소비자 소멸. 페이지수준으로 재작성 + **모든 종료점**(조기 return 2곳 포함)에서 호출 |
+| `test_pdf_gate.py` 페이지수준 5건이 worktree 판에만 있었다 | 정본을 HEAD 로 골라 **명시적으로 이식하지 않으면 0건**이 되는데, **pytest 가 못 잡는다**(테스트가 없으면 실패도 없다) |
+| `KBP_TRIAGE_LOG_TABLE` 회귀 3건도 동일 | worktree 에 이 env 참조가 **0건** |
+
+### 결정 4 — `figure` + `html` 전소 방지를 **vl 레인에도** 적용 (구현 중 발견)
+
+`elements_to_blocks` 를 직접 부르면 VL 이 `category="figure"` + `content.html` 로 낸 표가
+**img_path 가 빈 image 블록**이 되어 `<table>` HTML 이 통째로 사라진다. `ocr/__init__.py` 의
+figure→text 재라벨은 **html 이 빌 때만** 발동해 구제하지 못한다. **표가 많은 슬라이드가 정확히
+이 형태**라, `vl` 레인이 노리는 대상에서 표가 조용히 없어진다.
+
+`_hybrid_scan_pages` 안에만 있던 element 처리를 `vl_elements_to_blocks()` 공유 헬퍼로 빼서
+두 경로가 같이 쓴다. 회귀 앵커는 **수정 전 코드에서 실제로 실패**함을 확인했다(`['image']` 로 전소).
+
+### `adopt_vl_table`("표는 paddle 이 정본")의 근거 재검토 — **기각 방향**
+
+사용자가 "VL 이 GW 보다 표를 못 읽은 사례를 본 적 없다" 고 지적해 근거를 전수 확인했다.
+
+| 확인 | 결과 |
+|---|---|
+| 규칙 근거 | **R5 한 줄 — 페이지 1장**(ABL p33 Re-TACRED, 전면 VL 이 3번 다 놓침) |
+| 그 페이지 성격 | **네이티브 가로형 슬라이드**. 게다가 리더보드라 PAGE_HYBRID 의 "차트는 3줄 요약" 이 삼킨 것으로 보인다 — 같은 페이지의 진짜 차트 3개는 정확히 요약했다. **사용자 판단: VL 동작이 옳았다** |
+| 규칙이 실제로 도는 곳 | `_hybrid_scan_pages` = **스캔 페이지** |
+| 스캔 페이지의 표 사례 | **0건.** `planA-measurements/layout/S_scan_*.json` 10장 전부 GW `<table>` 0개 — 표가 있는 세로형 스캔 페이지가 코퍼스에 없다 |
+| VL 의 표 실측(대조군) | LICO p10 **11행 45셀 + rowspan/colspan 3개 보존** · 정의서 p6 `<table>` 2개 |
+| **GW 의 표 실패 실측** | LICO p3 간트 → **`<td>` 1,098개 / 46,610자 거짓 표**(R4). VL 은 156자 요약 = 정상 |
+
+즉 **자기 도메인(스캔)에서 한 번도 측정되지 않은 규칙**이고, 표에 관해 실측된 명백한 실패는
+오히려 GW 쪽이다. 또 `LLM_NEEDED → vl` 이후 ABL p33 같은 네이티브 슬라이드는 `vl` 레인으로
+가므로 이 규칙이 적용될 여지 자체가 없다.
+
+**처분**: `vl` 레인은 애초에 표 승계가 없다(VL 산출물만 쓴다) — 이미 사용자가 원하는 동작이다.
+`_hybrid_scan_pages` 의 `adopt_vl_table` 제거는 **Phase 3 범위**이고, **V7-0**(hybrid 발화
+페이지가 `vl` 로 새는지)에서 사문 판정이 나면 코드째 사라지므로 그 결과를 보고 정한다.
+
+### env — CLAUDE.md 폐쇄망 절차
+
+- **`.env.example` 에 7개가 전무했다.** "Phase 1 이 선언했다" 는 전제가 틀렸다(실측 grep).
+- **`sync-parse-svc-env.sh` 의 `KEYS` 에 6개가 없었다** → 파생 `parse-svc.env` 에서 조용히
+  누락돼 **폐쇄망에서만** 코드 기본값으로 돈다. 로컬 dev 는 루트 `.env` 를 직접 읽어 무증상.
+- **`KBP_VL_DISABLE_REASONING` 은 빈 값이 미설정과 정반대다.**
+  `vl_api.py:219` 가 `os.environ.get(..., "1") not in ("0","false","off","")` 로 읽어
+  미설정=`"1"`=reasoning **끔**, 빈 값=reasoning **켬**. `=1` 을 7곳에 명시했다.
+- **`KBP_VL_MAX_CONCURRENT` 를 8 로 통일**(코드2·compose2·문서6·env3). `docker-compose.yml`
+  이 리터럴 `"3"` 이라 **루트 `.env` 값이 docker 스택에서 무시되고** 있었다.
+- 죽은 env 3개(`KBP_GATE_VL_RATIO`/`VL_LANE`/`DEFAULT_LANE`)는 **선언 유지 + 무효 주석**.
+  지우지도 설명하지도 않으면 다음 사람이 값을 바꿔보고 아무 일도 안 일어나는 것을 겪는다.
+
+### 검증
+
+| | 결과 |
+|---|---|
+| V1 `pytest parse_service/tests` | **363 passed, 0 failed** |
+| V2 전체 리포 | **735 passed, 3 skipped, 0 failed** |
+| V1-b 커버리지 대조 | **363 ≥ 350**(하한), 파일별 하한 전부 충족 |
+| V3 게이트 리플레이 | quarantine 3 / recall 3/11 / **observed FP 0/49** — 무변경 |
+| V4 java 부재 | `parse()` 예외 없음 |
+| V9 폐쇄망 가드 | 오설정 **발화** / 정상 구성 **침묵** |
+| V10·V10-b env | 선언 7곳 + 값 검사, `3` 잔존 0 |
+
+**미실행**: V5(실 게이트웨이 스캔 3p) · V6(가로형 18p) · V7(hybrid 발화) — 게이트웨이 필요.
+V7 은 앞서 **V7-0(도달 전제)** 을 먼저 봐야 한다: `LLM_NEEDED → vl` 때문에 대상 4페이지가
+`vl` 로 새면 hybrid 는 이 배선에서 **사문**이고 Phase 3 의 전제부터 다시 봐야 한다.
+
+### 방법론 — 검증이 수렴하지 않은 이유
+
+plan 검증을 8라운드 돌렸다(v4~v11, **약 2.6M 토큰 · 1시간 40분**). must-fix 는
+12 → 8 → 7 → **10** → 4 → 4 → 2 → … 로 **줄지 않았다.** 원인 둘:
+
+1. **한 plan 이 여섯 가지를 담고 있었다.** v4 의 12건 중 8건이 그 라운드에 새로 넣은 두
+   서브시스템(5단 폴백·PageTrace 관측)에서 나왔다 → **2a/2b 로 분할**했다.
+2. **44파일 병합 결과를 문서로 미리 명세하려 했다.** v7 이 10건으로 늘어난 게 그 신호였다 —
+   검증관이 라운드마다 **새 분기 파일**을 찾아냈다. 44행 정본 표를 손으로 쓰는 것은
+   **병합을 문서에서 한 번 더 하는 것**이라, 기본규칙(HEAD 정본) + 예외목록으로 닫고
+   워크트리에서 실제로 병합했다.
+
+**교훈**: 병합 충돌 해소는 문서로 선명세할 대상이 아니다. 다만 **커버리지 소실만은
+pytest 가 못 잡으므로**(테스트가 없으면 실패도 없다) 그 부분은 문서(승계표 + V1-b 하한)로
+남겨야 했다 — 실제로 그게 `test_pdf_gate.py` 5건과 `KBP_TRIAGE_LOG_TABLE` 3건을 구했다.

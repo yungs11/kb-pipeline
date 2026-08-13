@@ -18,14 +18,15 @@ def test_requires_gateway_url(monkeypatch):
 def test_pages_parsed_in_parallel_with_table_html(monkeypatch):
     """페이지별 POST → markdown+HTML표 → hybrid_to_blocks(page_idx). 표 HTML 보존."""
     monkeypatch.setenv("KBP_PADDLE_OCR_GATEWAY_URL", "https://gw/ocr/paddleocr_vl")
-    monkeypatch.setattr(paddle_gw, "_render_pages", lambda fb: [_RP(1), _RP(2)])
+    monkeypatch.setattr(paddle_gw, "_render_pages",
+                        lambda fb, page_numbers=None: [_RP(1), _RP(2)])
     seen = []
 
     def fake_post(jpeg, name):
         seen.append(name)
         if "page-1" in name:
-            return "# 제목\n\n본문 텍스트\n\n<table><tr><td>셀A</td></tr></table>"
-        return "둘째 페이지 텍스트"
+            return ("# 제목\n\n본문 텍스트\n\n<table><tr><td>셀A</td></tr></table>", [], None)
+        return ("둘째 페이지 텍스트", [], None)
 
     monkeypatch.setattr(paddle_gw, "_post_page", fake_post)
     pages = paddle_gw.run_paddle_gateway(b"%PDF", "a.pdf")
@@ -41,12 +42,13 @@ def test_pages_parsed_in_parallel_with_table_html(monkeypatch):
 def test_nonprobe_page_failure_nonfatal_empty_blocks(monkeypatch):
     """프로브(1p) 성공 후 개별 페이지 실패는 비치명 — 그 페이지만 빈 blocks."""
     monkeypatch.setenv("KBP_PADDLE_OCR_GATEWAY_URL", "https://gw/ocr/paddleocr_vl")
-    monkeypatch.setattr(paddle_gw, "_render_pages", lambda fb: [_RP(1), _RP(2), _RP(3)])
+    monkeypatch.setattr(paddle_gw, "_render_pages",
+                        lambda fb, page_numbers=None: [_RP(1), _RP(2), _RP(3)])
 
     def fake_post(jpeg, name):
         if "page-2" in name:
             raise RuntimeError("gateway 5xx")
-        return f"{name} 텍스트"
+        return (f"{name} 텍스트", [], None)
 
     monkeypatch.setattr(paddle_gw, "_post_page", fake_post)
     pages = paddle_gw.run_paddle_gateway(b"%PDF", "a.pdf")
@@ -59,7 +61,8 @@ def test_probe_failure_raises_for_fast_fallback(monkeypatch):
     """첫 페이지(프로브) 실패 = 게이트웨이 불능 → 즉시 raise (페이지별 타임아웃 대기 없이
     parse() 가 바로 ODL/VL 폴백). 행 게이트웨이가 문서 전체를 붙잡던 문제의 회귀 고정."""
     monkeypatch.setenv("KBP_PADDLE_OCR_GATEWAY_URL", "https://gw/ocr/paddleocr_vl")
-    monkeypatch.setattr(paddle_gw, "_render_pages", lambda fb: [_RP(1), _RP(2)])
+    monkeypatch.setattr(paddle_gw, "_render_pages",
+                        lambda fb, page_numbers=None: [_RP(1), _RP(2)])
     calls = []
 
     def boom(jpeg, name):
@@ -121,7 +124,7 @@ def test_async_post_page_submits_polls_and_fetches_result(monkeypatch):
 
     monkeypatch.setattr(paddle_gw.httpx, "post", fake_post)
     monkeypatch.setattr(paddle_gw.httpx, "get", fake_get)
-    md = paddle_gw._post_page(b"jpeg", "page-1.jpeg")
+    md, layout, page_size = paddle_gw._post_page(b"jpeg", "page-1.jpeg")
     assert "<table>" in md
     assert calls[0] == ("POST", "https://gw/ocr/dots_ocr/tasks")
     assert calls[-1] == ("GET", "https://gw/ocr/dots_ocr/tasks/t-1/result")
@@ -190,7 +193,7 @@ def test_raw_json_layout_response_retried_once(monkeypatch):
 
     monkeypatch.setattr(paddle_gw.httpx, "post", fake_post)
     monkeypatch.setattr(paddle_gw.httpx, "get", fake_get)
-    md = paddle_gw._post_page(b"jpeg", "page-10.jpeg")
+    md, layout, page_size = paddle_gw._post_page(b"jpeg", "page-10.jpeg")
     assert submits["n"] == 2, "raw JSON 1회 재시도"
     assert "<table>" in md and not md.strip().startswith("[{")
 
@@ -218,3 +221,124 @@ def test_strip_dead_image_refs():
 def test_strip_keeps_real_content_untouched():
     md = "# 제목\n\n<table><tr><td>정상 표</td></tr></table>\n\n본문 텍스트"
     assert paddle_gw._strip_gateway_image_refs(md) == md
+
+
+# ── Plan B-2 (2026-08-04): page_numbers — 스캔 페이지만 렌더·전송 ──────────────────
+def test_page_numbers_filters_rendered_pages(monkeypatch):
+    """부분집합을 주면 그 페이지만 게이트웨이로 간다(문서 절대 page_number 유지)."""
+    monkeypatch.setenv("KBP_PADDLE_OCR_GATEWAY_URL", "https://gw/ocr/paddleocr_vl")
+    seen = {}
+
+    def fake_render(fb, page_numbers=None):
+        seen["page_numbers"] = page_numbers
+        pnos = sorted(page_numbers) if page_numbers is not None else [1, 2, 3]
+        return [_RP(n) for n in pnos]
+
+    monkeypatch.setattr(paddle_gw, "_render_pages", fake_render)
+    monkeypatch.setattr(paddle_gw, "_post_page",
+                        lambda jpeg, name: (f"{name} 본문", [], None))
+    pages = paddle_gw.run_paddle_gateway(b"%PDF", "a.pdf", page_numbers={2, 5})
+    assert seen["page_numbers"] == {2, 5}
+    assert [p["page_number"] for p in pages] == [2, 5], "문서 절대 번호 유지"
+
+
+def test_page_numbers_none_renders_all(monkeypatch):
+    """None 이면 현행대로 전 페이지(하위호환)."""
+    monkeypatch.setenv("KBP_PADDLE_OCR_GATEWAY_URL", "https://gw/ocr/paddleocr_vl")
+    seen = {}
+
+    def fake_render(fb, page_numbers=None):
+        seen["page_numbers"] = page_numbers
+        return [_RP(1), _RP(2)]
+
+    monkeypatch.setattr(paddle_gw, "_render_pages", fake_render)
+    monkeypatch.setattr(paddle_gw, "_post_page",
+                        lambda jpeg, name: (f"{name} 본문", [], None))
+    pages = paddle_gw.run_paddle_gateway(b"%PDF", "a.pdf")
+    assert seen["page_numbers"] is None
+    assert [p["page_number"] for p in pages] == [1, 2]
+
+
+def test_probe_uses_first_rendered_page_of_subset(monkeypatch):
+    """프로브는 렌더된 **첫 원소**를 쓴다 — 부분집합이면 그 집합의 첫 페이지다."""
+    monkeypatch.setenv("KBP_PADDLE_OCR_GATEWAY_URL", "https://gw/ocr/paddleocr_vl")
+    monkeypatch.setattr(paddle_gw, "_render_pages",
+                        lambda fb, page_numbers=None: [_RP(7), _RP(9)])
+    calls = []
+
+    def boom(jpeg, name):
+        calls.append(name)
+        raise RuntimeError("gateway down")
+
+    monkeypatch.setattr(paddle_gw, "_post_page", boom)
+    with pytest.raises(RuntimeError):
+        paddle_gw.run_paddle_gateway(b"%PDF", "a.pdf", page_numbers={7, 9})
+    assert calls == ["page-7.jpeg"], "부분집합의 첫 페이지로 프로브하고 즉시 포기"
+
+
+def test_empty_page_numbers_returns_empty(monkeypatch):
+    """빈 set → 렌더 0장 → 빈 리스트. 게이트웨이를 부르지 않는다."""
+    monkeypatch.setenv("KBP_PADDLE_OCR_GATEWAY_URL", "https://gw/ocr/paddleocr_vl")
+    monkeypatch.setattr(paddle_gw, "_render_pages",
+                        lambda fb, page_numbers=None: [])
+    called = []
+    monkeypatch.setattr(paddle_gw, "_post_page",
+                        lambda j, n: called.append(n) or ("", [], None))
+    assert paddle_gw.run_paddle_gateway(b"%PDF", "a.pdf", page_numbers=set()) == []
+    assert called == []
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 앵커 9-b — **6-key 계약의 *생산자* 검증**(2026-08-12 Phase 2a 재통합, 신설)
+#
+# 왜 별도 앵커인가: `test_parser_pdf_routing.py` 의 게이트 앵커들은
+# `run_paddle_gateway` 를 통째로 monkeypatch 하므로 **픽스처가 status 를 넣어준다** —
+# `paddle_gw.py` 를 안 고쳐도 초록이다. 반대편 실패(HEAD 판 채택 → layout/page_size 소실)는
+# `hybrid_vl=0`·`vl_extra_tables=0` 이라는 **정상처럼 보이는 로그**로만 나타나고,
+# 유일한 실측 그물 V7 은 "hybrid 가 사문일 수 있다" 고 유보해 소실과 사문을 구분하지 못한다.
+# 그래서 실물 `run_paddle_gateway` 로 6키를 직접 단언한다.
+# ══════════════════════════════════════════════════════════════════════════════
+_SIX_KEYS = {"page_number", "blocks", "layout", "page_size", "status", "error"}
+
+
+def test_page_dict_carries_six_key_contract_on_success(monkeypatch):
+    """정상 페이지 — 6키 전부 + `status == "ok"`.
+
+    `layout`/`page_size` 는 `_hybrid_scan_pages` 의 `pg.get("layout")`·`_has_visual` 이 쓴다
+    (빠지면 hybrid 가 **영구 거짓**이 되어 통째로 죽는다).
+    `status` 는 `_parse_routed` 의 demote 판정이 쓴다(빠지면 게이트웨이 개별 페이지 실패가
+    demote 도 VL 도 못 받고 게이트 EMPTY→quarantine 으로 **빈 페이지**가 된다).
+    """
+    monkeypatch.setenv("KBP_PADDLE_OCR_GATEWAY_URL", "https://gw/ocr/paddleocr_vl")
+    monkeypatch.setattr(paddle_gw, "_render_pages",
+                        lambda fb, page_numbers=None: [_RP(1)])
+    monkeypatch.setattr(paddle_gw, "_post_page",
+                        lambda jpeg, name: ("본문 텍스트", [{"label": "text"}], (800, 600)))
+    (pg,) = paddle_gw.run_paddle_gateway(b"%PDF", "a.pdf")
+    assert set(pg) == _SIX_KEYS, f"6키 계약 위반: {sorted(pg)}"
+    assert pg["status"] == "ok" and pg["error"] == ""
+    assert pg["layout"] == [{"label": "text"}] and pg["page_size"] == (800, 600)
+    assert pg["blocks"], "정상 페이지는 blocks 가 있다"
+
+
+def test_page_dict_carries_six_key_contract_on_page_error(monkeypatch):
+    """개별 페이지 예외 — 6키 유지 + `status == "error"` + 사유 보존.
+
+    프로브(첫 페이지)가 아닌 페이지의 실패는 **레인 포기가 아니다** — 그 페이지만
+    `status="error"` 로 표시하고 나머지는 계속 간다.
+    """
+    monkeypatch.setenv("KBP_PADDLE_OCR_GATEWAY_URL", "https://gw/ocr/paddleocr_vl")
+    monkeypatch.setattr(paddle_gw, "_render_pages",
+                        lambda fb, page_numbers=None: [_RP(1), _RP(2)])
+
+    def flaky(jpeg, name):
+        if "page-2" in name:
+            raise TimeoutError("poll timed out")
+        return ("정상 p1", [], None)
+
+    monkeypatch.setattr(paddle_gw, "_post_page", flaky)
+    p1, p2 = paddle_gw.run_paddle_gateway(b"%PDF", "a.pdf")
+    assert set(p2) == _SIX_KEYS, f"실패 페이지도 6키를 유지한다: {sorted(p2)}"
+    assert p2["status"] == "error" and "TimeoutError" in p2["error"]
+    assert p2["blocks"] == [] and p2["layout"] == [] and p2["page_size"] is None
+    assert p1["status"] == "ok", "다른 페이지는 영향 없다(레인 포기 아님)"
