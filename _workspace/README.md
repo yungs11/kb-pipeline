@@ -17,6 +17,10 @@
 | [`03-dev-progress.md`](03-dev-progress.md) | **개발진행사항** — W0~W6 작업항목 상태, E2E 검증, 타이밍 모니터링 plan, 리스크/협의사항 | SoT.md §6/§8/§10/§11, kb-stage-monitoring.md, process-definition §6 |
 | [`04-planA-handoff.md`](04-planA-handoff.md) | **Plan A 인수인계** — 스캔 레인 layout 기반 그림·차트 처리. 설계 완료/구현 미착수. 실측 R1~R11, 반복된 실패 유형, 범위 대장, 검증 절차 | `~/.claude/plans/mighty-whistling-quiche.md`(활성 plan), `planA-measurements/` |
 
+> **최근 큰 변경**: PDF 는 **페이지수준 라우팅**이다(2026-08-12 Phase 2a, `897d016`).
+> 문서수준 레인(odl/vl/paddle_gw 중 하나)이 사라지고 페이지마다 갈린다 —
+> [`01-architecture.md` §3.1.1](01-architecture.md) 참조.
+
 ## 핵심 아키텍처 결정 (ADR)
 
 **경로 (나′): edgequake 를 베이스 엔진으로 두고, 앞단(파싱·블록화·모달서술·청킹)만 커스텀으로 만들어 edgequake 에 청크를 주입한다.**

@@ -55,14 +55,53 @@
 
 | 확장자 | 도메인 | 파서(in-process) | `<table>` HTML | `chunk_needed` | 비고 |
 |--------|--------|------------------|----------------|----------------|------|
-| PDF | `pdf` | **문서수준 게이트**(triage) → 순수텍스트=**OpenDataLoader**(`markdown_with_html=True`) / 스캔=**PaddleOCR-VL 게이트웨이**(원격 GPU) | ✅ (06=70개, pipe=0) | True | JRE 21 의존(ODL). 문서당 .md 1개 → `<<<ODL_PAGE_BREAK>>>` sentinel 로 페이지 복원. 게이트: `parse_service/parsers/pdf/gate.py`(triage 버킷 집계). 게이트웨이 실패 시 ODL/VL 폴백 |
+| PDF | `pdf` | **페이지수준 라우팅**(triage) → 페이지마다 odl / paddle_gw / vl / skip (아래 §3.1.1) | ✅ (06=70개, pipe=0) | True | JRE 21 의존(ODL). 문서당 .md 1개 → `<<<ODL_PAGE_BREAK>>>` sentinel 로 페이지 복원. 라우팅: `parse_service/parsers/pdf/gate.py`. 게이트웨이 실패 시 그 페이지만 VL 전사 |
 | XLSX/XLSM/XLS | `excel` | **excel_parser_rag**(vendored, `auto`→전결 openpyxl / 그 외 kordoc) | ✅ | **False** | LLM 없이 parse+chunk 결합 → native 청크. `chunk_strategy=excel_rag_parser` |
 | DOCX·HWP·HWPX·DOC·PPT·PPTX·HTML | `pdf` | **원격 변환 API → PDF → ODL/GW/VL** | ✅ | True | `run_parse` 가 변환 후 `.pdf` 이름으로 PDF 레인에 넣는다(2026-08-06) |
 | 단일 이미지 | `ocr` | **in-process VL OCR**(`parsers/ocr`) | ✅ + elements[] | True | 이미지→base64 → **PAGE_HYBRID**(전사 + 시각 서술) VL 호출. `IMAGE_EXTS`={png,jpg,jpeg,gif,bmp,tif,tiff,webp} |
 | TXT·MD·CSV·JSON | `text` | 그대로 블록화(utf-8-sig/utf-16/cp949) | — | True | 변환·파서 없음. `page_count=1` |
 | 그 외(폴백) | `fallback` | **kordoc** CLI | ✅ | True | 미지 확장자(hwpx 등)는 kordoc 로(구 markitdown 폴백 제거) |
-| 스캔 PDF | (pdf 내부, `paddle_gw` 레인) | **PaddleOCR-VL 게이트웨이**(원격 GPU — layout + VL 인식 + 표 조립) | ✅ | True | 게이트가 `OCR_NEEDED` 하나라도 있으면 이 레인(문서 단위 — 네이티브 페이지도 함께 전송). 페이지 이미지 1장씩 `/tasks` 비동기 호출. **layout 이 image/figure/chart 를 (면적 5%↑) 검출한 스캔 페이지는 전면 VL 로 교체하고 paddle 표는 승계**(Plan A, 2026-08-03 — `_hybrid_scan_pages`). 미설정/실패/빈결과 시 **ODL/in-process VL 폴백**(가용성) |
-| 스캔 PDF 폴백 | (pdf 내부) | **in-process VL OCR** | ✅ | True | 게이트웨이 미가동/실패 시 폴백. 글자 거의 없는 페이지만 렌더 → VL OCR 보충(best-effort 비치명) |
+| 스캔 페이지 | (pdf 내부, `paddle_gw` 레인) | **PaddleOCR-VL 게이트웨이**(원격 GPU — layout + VL 인식 + 표 조립) | ✅ | True | **그 페이지만 전송**(`page_numbers` 부분집합, 2026-08-12). 페이지 이미지 1장씩 `/tasks` 비동기 호출. **layout 이 image/figure/chart 를 (면적 5%↑) 검출한 스캔 페이지는 전면 VL 로 교체하고 paddle 표는 승계**(Plan A — `_hybrid_scan_pages`). 미설정/레인 불능/엔진 사고 시 **그 페이지만 VL 전사 폴백** |
+| 가로형·다이어그램·혼합콘텐츠 페이지 | (pdf 내부, `vl` 레인) | **in-process VL 전면 전사**(PAGE_HYBRID) | ✅ | True | `LLM_NEEDED` 페이지 전부(2026-08-12 Phase 2a). 표·본문 원문전사 + 순서도 흐름서술 + 차트 요약을 **한 프롬프트**에서 처리 — 표 승계 없이 페이지 전체를 VL 이 읽는다 |
+| VL 전사 폴백 | (pdf 내부) | **네이티브 텍스트**(`RenderedPage.text`) | — | True | VL 전사 실패(절단·모델 퇴화) 시 PyMuPDF 추출본으로 폴백. 재시도는 무효였다(실측 회복률 0%, `temperature=0.1`). 폴백 체인 재설계는 Phase 2b |
+
+#### 3.1.1 PDF 페이지수준 라우팅 (2026-08-12 Phase 2a — 문서수준 게이트 대체)
+
+**문서수준 레인이 사라졌다.** 이전에는 문서 전체가 odl / vl / paddle_gw 중 하나로 갔는데,
+그림 비율(`KBP_GATE_VL_RATIO`)만 보고 문서 전체를 VL 로 넘기던 경로에서 **표가 많은 문서가
+표 테두리 벡터선(curve=350)을 순서도로 오탐당해 통째로 재전사되며 표가 깨졌다**(KIS 11p 실관측).
+이제 **페이지마다** 자기 신호대로 레인을 고르고 병합한다.
+
+| triage bucket | 레인 | 처리 |
+|---|---|---|
+| `SKIP` | `skip` | ODL md 있으면 블록화, 없으면 빈 blocks. **VL 미호출** |
+| `OCR_NEEDED` | `KBP_GATE_OCR_LANE`(기본 `paddle_gw`) | 게이트웨이 + layout 기반 hybrid |
+| `LLM_NEEDED` | **`vl`** | 가로형·다이어그램·세로형 혼합콘텐츠 **전부**. 페이지 전체를 VL 이 전사 |
+| `TEXT_ONLY` | `odl` | ODL 이 표·텍스트 보존. 빈약하면 그 페이지만 VL 전사 |
+
+`_page_lane` 은 **`is_landscape` 를 보지 않는다** — `triage.py` 가 이미 가로형을 `LLM_NEEDED`
+로 마킹하므로(`KBP_TRIAGE_LANDSCAPE_TO_LLM`, 기본 1) 매핑 하나로 따라온다.
+
+**감수하는 교환(명시)**: `LLM_NEEDED` 인 모든 페이지가 "정확한 ODL 네이티브 텍스트" 대신
+"VL 전사" 를 받는다. 사용자가 근거를 보고 선택했다. 부작용으로 `narrate_pages` 가 거의 항상
+공집합이 되어 **`_supplement_diagram_pages` 는 사실상 사문**이다(제거는 Phase 4).
+
+**탈출구**: `KBP_GATE_OCR_LANE=vl` 로 두면 스캔 페이지가 게이트웨이 대신 VL 전사로 간다 —
+게이트웨이가 아예 없는 폐쇄망용. `verify-bundle.sh:106/115` 두 가드가 이 값에 걸려 있다.
+
+**게이트 배치**: v1 GW quarantine 게이트는 `_supplement_diagram_pages` **뒤**, 그리고
+**`paddle_pnos - demoted - hybrid_replaced` 부분집합에만** 돈다. 전량을 넘기면 phase 2
+mutation 이 odl/vl 페이지의 ODL 네이티브 본문까지 지운다.
+
+**강등(demote)은 엔진 사고뿐**이다 — 레인 불능(프로브 실패·URL 공란) 또는 페이지
+`status == "error"`. `status == "ok"` + 빈 blocks 는 강등하지 않고 게이트가 판정한다:
+그 집단이 v1 이 측정한 "게이트가 잡은 페이지" 이고 거기서 VL 은 **구조율 0 · 날조 2건**
+이었다(Fisher p=0.021).
+
+**`paddle_gw` 페이지 dict = 6-key 계약**
+`(page_number, blocks, layout, page_size, status, error)`. 두 브랜치가 서로 다른 4-tuple 을
+내고 있었고, 어느 한쪽만 취하면 조용히 죽는다 — `layout` 소실 → hybrid 가 영구 거짓,
+`status` 소실 → 게이트웨이 페이지 실패가 demote 도 VL 도 못 받고 빈 페이지.
 
 - **표준 중간표현**: "markdown + inline HTML 표". 표는 절대 pipe 로 납작화 금지.
 - 문서 ID 폴백 = `sha256(file_bytes).hexdigest()[:16]`(orchestrator 동일 식 → MinIO 키 일치). 파일명 정규화 = `tools.safe_basename`(경로 탈출 차단, 구 `parsing._safe_basename` 이동). 비표시문자 제거 = PUA(U+E000–U+F8FF).
