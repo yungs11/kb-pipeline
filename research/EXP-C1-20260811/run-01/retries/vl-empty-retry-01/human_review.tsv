@@ -1,0 +1,6 @@
+sample_id	vl_retrieval	vl_fidelity	vl_safety	vl_coverage	vl_structure	winner_vs_gw	vl_beneficial	critical_field_notes	review_notes
+I14	RETRIEVAL_PASS	NO_MATERIAL_ERROR	NO_HALLUCINATION	COMPLETE_ENOUGH	TABLE_ERROR	VL	true	VL preserves capital 1,000,000 where GW emitted 1,000.000	Retry is complete and materially safer than GW
+I17	RETRIEVAL_PASS	NO_MATERIAL_ERROR	NO_HALLUCINATION	COMPLETE_ENOUGH	TABLE_ERROR	VL	true	Business-purpose terms and dates are preserved; GW had widespread term corruption	Strike-through history is flattened into status columns but searchable meaning is retained
+I18	RETRIEVAL_PASS	MINOR_ERROR	NO_HALLUCINATION	COMPLETE_ENOUGH	TABLE_ERROR	GW	false	30-day answer deadline and copy-count requirements are preserved	Retry has minor wording errors such as 증거조기기일 and 달리는; GW remains cleaner
+I37	RETRIEVAL_FAIL	CRITICAL_ERROR	NO_HALLUCINATION	TRUNCATED	OTHER_STRUCTURE_ERROR	BOTH_FAIL	false	VL stops during paragraph ⑤ and omits the rest of the page	Retry removes the empty result but does not make the page usable
+I46	RETRIEVAL_PASS	NO_MATERIAL_ERROR	NO_HALLUCINATION	COMPLETE_ENOUGH	STRUCTURE_OK	VL	true	VL preserves plaintiff 손세라 and all visible dates and amounts; GW emitted 순세라	Clear identity-field rescue

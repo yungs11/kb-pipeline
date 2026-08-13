@@ -1,0 +1,117 @@
+{
+  "N": 16,
+  "split": "DEV_convenience_nonrepresentative_legacy_strata_invalid",
+  "beneficial": "3/16",
+  "beneficial_ids": [
+    "I19",
+    "I26",
+    "I35"
+  ],
+  "v1_quarantine": "1/16",
+  "v1_quarantine_ids": [
+    "I24"
+  ],
+  "v1_quarantine_vl_rescue": "0/1",
+  "vl_empty": "5/16",
+  "vl_truncated": "2/16",
+  "vl_confirmed_hallucination": "2/16",
+  "gw_critical_error": "11/16",
+  "vl_critical_error": "11/16",
+  "policies": {
+    "OCR-only": {
+      "retrieval_pass": 9,
+      "retrieval_borderline": 5,
+      "critical_error": 11,
+      "confirmed_hallucination": 0,
+      "quarantine": 0,
+      "vl_calls": 0
+    },
+    "VL-only": {
+      "retrieval_pass": 8,
+      "retrieval_borderline": 1,
+      "critical_error": 11,
+      "confirmed_hallucination": 2,
+      "empty_or_truncated": 7,
+      "quarantine": 0,
+      "vl_calls": 16
+    },
+    "v1": {
+      "retrieval_pass": 9,
+      "retrieval_borderline": 5,
+      "critical_error_in_final": 10,
+      "confirmed_hallucination": 0,
+      "quarantine": 1,
+      "vl_calls": 0
+    },
+    "oracle_selective_VL": {
+      "retrieval_pass": 11,
+      "retrieval_borderline": 3,
+      "critical_error_in_final": 7,
+      "confirmed_hallucination": 0,
+      "quarantine": 1,
+      "vl_calls": 3
+    }
+  },
+  "candidate_features": {
+    "v1_hard_gate_as_vl_trigger": {
+      "selected": 1,
+      "beneficial_selected": 0,
+      "beneficial_total": 3,
+      "precision_on_DEV": "0/1",
+      "recall_on_DEV": "0/3",
+      "selected_ids": [
+        "I24"
+      ]
+    },
+    "gw_no_table": {
+      "selected": 8,
+      "beneficial_selected": 3,
+      "beneficial_total": 3,
+      "precision_on_DEV": "3/8",
+      "recall_on_DEV": "3/3",
+      "selected_ids": [
+        "I03",
+        "I19",
+        "I20",
+        "I26",
+        "I35",
+        "I37",
+        "I42",
+        "I49"
+      ]
+    },
+    "gw_chars_lt_400_POST_HOC": {
+      "selected": 2,
+      "beneficial_selected": 2,
+      "beneficial_total": 3,
+      "precision_on_DEV": "2/2",
+      "recall_on_DEV": "2/3",
+      "selected_ids": [
+        "I26",
+        "I35"
+      ]
+    },
+    "gw_chars_lt_500_POST_HOC": {
+      "selected": 4,
+      "beneficial_selected": 2,
+      "beneficial_total": 3,
+      "precision_on_DEV": "2/4",
+      "recall_on_DEV": "2/3",
+      "selected_ids": [
+        "I24",
+        "I26",
+        "I35",
+        "I41"
+      ]
+    }
+  },
+  "latency_seconds": {
+    "gw_sum": 1331.4,
+    "gw_p50": 74.9,
+    "gw_max": 165.4,
+    "vl_sum": 205.0,
+    "vl_p50": 7.6,
+    "vl_max": 49.8,
+    "execution": "GW/VL concurrent per page; three page batches; submit_gap=0"
+  }
+}

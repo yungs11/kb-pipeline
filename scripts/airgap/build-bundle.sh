@@ -82,6 +82,82 @@ fi
 command -v docker >/dev/null || { echo "docker 없음"; exit 1; }
 docker buildx version >/dev/null 2>&1 || { echo "docker buildx 없음 (Docker Desktop 필요)"; exit 1; }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 소스 출처 가드 — 각 빌드 컨텍스트가 **선언된 브랜치**인지 확인한다.
+#
+# `docker build` 는 브랜치가 아니라 **워킹트리**를 굽는다. 그래서 sibling 레포가
+# 다른 브랜치에 체크아웃돼 있거나 미커밋 변경이 있으면, 번들에 **무엇이 실렸는지
+# 아무 데도 안 남은 채** 조용히 다른 코드가 나간다. verify-bundle.sh 는 배포 시점
+# 가드라 이걸 못 잡는다 — 브랜치는 빌드 시점에만 알 수 있다.
+#
+# 실측 계기(2026-08-11): doc_guard 가 `feat/conflicting-code-mapping` 에 체크아웃된
+# 채로 8/10 번들이 나갔다. 이번엔 그 브랜치가 main 과 diff 0 이라 결과가 같았지만,
+# 갈라져 있었으면 폐쇄망에만 다른 코드가 들어가고 아무도 몰랐다.
+#
+# EXPECT_BRANCH: "컨텍스트경로|기대브랜치". 컨텍스트가 여기 없으면 검사 생략.
+#   feature 브랜치를 쓰는 컴포넌트는 **그 브랜치를 여기 적어 고정**한다 — 전부 main 을
+#   요구하면 매번 override 를 쓰게 되고 그러면 가드가 죽는다. 브랜치를 바꿀 때
+#   이 표도 같이 고치는 것이 "무엇으로 배포하는가"의 선언이다.
+EXPECT_BRANCH=(
+  ".|feat/fileconvert-api"                              # kb-pipeline (parse-svc/facade/edgequake 이미지)
+  "edgequake|feat/kb-pipeline-provider"                 # 서브모듈 (webui)
+  "../99.projects/adaptive_chunk|feat/adaptive-chunk-metric-weighting"
+  "../99.projects/shinhan_trust/doc_guard|main"         # 2026-08-11 이후 main 배포 (룰 동기화 커밋 40fde0f)
+)
+
+# 빌드에 실제로 쓰인 출처. 번들 안 BUILD-PROVENANCE.txt 로 남긴다.
+PROVENANCE=()
+
+log "소스 출처 가드 — 브랜치/커밋 확인"
+GUARD_FAIL=0
+for spec in "${BUILDS[@]}"; do
+  IFS='|' read -r _img _dfile ctx <<<"$spec"
+  # 같은 컨텍스트가 여러 이미지에 쓰인다(., edgequake) — 한 번만 검사한다.
+  case " ${PROVENANCE[*]-} " in *" ctx=$ctx "*) continue ;; esac
+
+  if ! branch="$(git -C "$ctx" rev-parse --abbrev-ref HEAD 2>/dev/null)"; then
+    echo "  · $ctx → git 레포 아님 (검사 생략)"
+    continue
+  fi
+  commit="$(git -C "$ctx" rev-parse --short HEAD)"
+  # 추적 파일만 본다 — .DS_Store·로그 같은 untracked 는 이미지에 안 들어가는 경우가 많고
+  # 여기서 막으면 실효 없이 시끄럽기만 하다.
+  dirty=""
+  [ -n "$(git -C "$ctx" status --porcelain --untracked-files=no)" ] && dirty=" +uncommitted"
+  PROVENANCE+=("ctx=$ctx branch=$branch commit=$commit${dirty}")
+
+  want=""
+  for e in "${EXPECT_BRANCH[@]}"; do
+    [ "${e%%|*}" = "$ctx" ] && { want="${e##*|}"; break; }
+  done
+
+  if [ -z "$want" ]; then
+    echo "  · $ctx → $branch@$commit${dirty}  (기대 브랜치 미선언 — EXPECT_BRANCH 에 추가하라)"
+  elif [ "$branch" != "$want" ]; then
+    echo "  ✗ $ctx → $branch@$commit${dirty}  (기대: $want)"
+    GUARD_FAIL=1
+  elif [ -n "$dirty" ]; then
+    # 차단하지 않는다 — 개발기는 상시 dirty 라 여기서 막으면 매번 override 를 쓰게 되고
+    # 그러면 브랜치 가드까지 함께 죽는다. 대신 BUILD-PROVENANCE.txt 에 `+uncommitted` 로 남는다.
+    echo "  ! $ctx → $branch@$commit${dirty}  (미커밋 변경 — 이 커밋만으로는 재현 불가. 기록됨)"
+  else
+    echo "  ✓ $ctx → $branch@$commit"
+  fi
+done
+
+if [ "$GUARD_FAIL" -eq 1 ] && [ "${ALLOW_SOURCE_DRIFT:-0}" != "1" ]; then
+  cat >&2 <<'EOF'
+
+  ✗ 소스 출처 가드 실패 — 위 ✗(브랜치 불일치)를 정리한 뒤 다시 실행하라.
+      · 해당 레포에서 `git checkout <기대브랜치>`
+      · 의도한 변경이면 이 스크립트의 EXPECT_BRANCH 표를 고쳐라 (그게 배포 선언이다)
+
+  의도적으로 무시하려면:  ALLOW_SOURCE_DRIFT=1 scripts/airgap/build-bundle.sh ...
+  (무시해도 실제 출처는 번들의 BUILD-PROVENANCE.txt 에 그대로 기록된다.)
+EOF
+  exit 1
+fi
+
 if [ "$NO_BUILD" -eq 0 ]; then
   log "buildx 크로스빌드 ($PLATFORM) — 6개 앱 이미지"
   for spec in "${BUILDS[@]}"; do
@@ -126,6 +202,16 @@ log "docker save → $IMAGES_TAR (gzip)"
 # 받는 쪽은 필요도 없는 이미지를 로드하게 되고 용량·시간이 그만큼 낭비된다.
 rm -rf "$BUNDLE"
 mkdir -p "$BUNDLE/images" "$BUNDLE/scripts/airgap" "$BUNDLE/docs"
+
+# 출처 기록 — 이 번들이 **어느 레포의 어느 커밋**으로 구워졌는지 남긴다. 현장에서
+# "지금 도는 게 어느 버전이냐"를 이미지 안을 뒤지지 않고 답할 수 있게 하는 유일한 근거다.
+{
+  printf 'kb-pipeline airgap bundle\n'
+  printf 'platform=%s tag=%s parse_only=%s\n' "$PLATFORM" "$TAG" "$PARSE_ONLY"
+  printf '\n[sources]\n'
+  # set -u 에서 빈 배열 전개가 죽는다(bash 3.2) — 방어.
+  printf '%s\n' "${PROVENANCE[@]-(none)}"
+} > "$BUNDLE/BUILD-PROVENANCE.txt"
 docker save "${ALL_IMAGES[@]}" -o "$IMAGES_TAR"
 gzip -f "$IMAGES_TAR"
 IMAGES_TAR="${IMAGES_TAR}.gz"

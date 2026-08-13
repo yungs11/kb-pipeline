@@ -830,7 +830,7 @@ plan `~/.claude/plans/v1-gw-hardfail-quarantine.md` v7 (ultracode 6라운드 REA
 | **2a** | **재통합 + 페이지수준 라우팅 + 게이트 재배치 + 프롬프트·env 정합** | ✅ **`897d016`** |
 | 2b | 전 레인 5단 폴백 + PageTrace 관측 | ⬜ **실측 후 설계**(아래 V0) |
 | 2.5 | 레인 선택을 KB UI 에 노출 | ⬜ 2b 후 (`document_pages` 새 테이블 + 요약배지/페이지표) |
-| 3 | layout hybrid 활성화 | ⚠️ **전제 재확인 필요**(V7-0) |
+| 3 | layout hybrid 활성화 | ⬜ **전제 유효 확인됨**(V7-0 완료, 아래) — 발화 대상 2장 생존 |
 | 4 | env 수명주기 정리 + `KBP_GATE_OCR_LANE` 탈출구 교체 | ⬜ 폐쇄망 마이그레이션 동반 |
 
 ### 검증 (완료)
@@ -851,8 +851,38 @@ plan `~/.claude/plans/v1-gw-hardfail-quarantine.md` v7 (ultracode 6라운드 REA
 | V5-0 | **게이트 도달 전제** | `신탁업무처리지침` 3p 의 `bucket`·`is_landscape`·`imgcov` 를 **먼저** 찍는다. 가로형이거나 `imgcov ≥ MIXED_IMAGE_COV` 면 triage 가 `LLM_NEEDED` 로 보내 **paddle_gw 레인도 게이트도 안 돈다** → `page_verdicts=[]` 가 정상 결과라 **실패가 통과로 읽힌다** |
 | V5 | 실 게이트웨이 스캔 | V5-0 확인 후. 블록/표 ≥ 머지 전(33/5), `page_verdicts` 비어있지 않음 |
 | V6 | 가로형 문서 | `자산신탁 온톨로지 PoC.pdf` 18p — 전 페이지 `vl`, 표가 VL 산출물에 존재, **머지 전 HEAD 와 표 개수·구조 대조** |
-| V7-0 | **hybrid 도달 전제** | `_hybrid_scan_pages` 는 `paddle_gw` 레인에서만 돈다. `LLM_NEEDED → vl` 때문에 사실 #22 의 4페이지가 `vl` 로 샐 수 있다 → **전부 새면 hybrid 는 사문**이고 Phase 3 의 전제부터 다시 본다 |
-| V7 | hybrid 발화 실측 | V7-0 이 `OCR_NEEDED` 로 남는 페이지를 확인한 뒤에만 유효 |
+| V7 | hybrid 발화 실측 | **V7-0 통과**(아래) — 부동산교재 p7·p49 로 측정 가능 |
+
+### V7-0 — hybrid 도달 전제 **확인 완료** (2026-08-13)
+
+**질문**: `_hybrid_scan_pages` 는 `paddle_gw` 레인에서만 돈다. `LLM_NEEDED → vl` 로 바꾼 뒤
+hybrid 발화 페이지가 전부 `vl` 로 새면 **hybrid 는 이 배선에서 사문**이고 Phase 3 의 전제부터
+다시 봐야 한다.
+
+**방법**: `planA-measurements/layout/*.json` 의 `detection[]` 에서 페이지별 최대 visual
+(`image`/`figure`/`chart`) 면적을 전수 계산해 임계 0.05 를 넘는 **스캔** 페이지를 추린 뒤,
+원본 PDF 를 실제 `triage_document()` + `_page_lane()` 에 태웠다.
+
+**발화 대상 = 스캔 3장**(R10 의 "그림 지배 3장 34.6~43%" 와 일치):
+
+| 페이지 | 방향 | visual 면적 | bucket | 레인 | hybrid |
+|---|---|--:|---|---|---|
+| 부동산교재 p7 | 세로 | 41.37% | `OCR_NEEDED` | `paddle_gw` | **✅ 돈다** |
+| 부동산교재 p49 | 세로 | 42.64% | `OCR_NEEDED` | `paddle_gw` | **✅ 돈다** |
+| 하용호 p3 | **가로** | 34.60% | `LLM_NEEDED` | **`vl`** | ❌ 미실행 |
+| *(대조)* 법원통지서 p1 | 세로 | 0.54% | `OCR_NEEDED` | `paddle_gw` | 임계 미달 → 미발화 |
+
+**판정: hybrid 는 사문이 아니다.** 세로형 스캔은 triage 분기 순서상
+`가로형?` → `네이티브 텍스트?` → `스캔` 이라, 가로형도 아니고 텍스트도 없어 **`OCR_NEEDED`
+로 남는다**(imgcov 1.000, char 3~5). Phase 3 의 전제는 유효하고 V7 실측이 가능하다.
+
+**부수 발견 — 가로형 스캔이 레인을 갈아탔다**(plan 미기록 동작 변화)
+`하용호 p3`(가로형 **스캔**)는 `is_landscape=True` 라 triage 가 `OCR_NEEDED` **앞에서**
+`LLM_NEEDED` 로 마킹한다. 전에는 `paddle_gw` + hybrid(전면 VL 교체 + **paddle 표 승계**)를
+받았고, 이제는 `vl` 레인 전면 전사를 받는다.
+**두 경로의 결과는 거의 같다**(둘 다 전면 VL 전사) — 차이는 **표 승계 여부뿐**이다.
+그 승계 규칙(`adopt_vl_table`)의 근거가 재검토에서 무너졌으므로(02-changes 참조)
+**오히려 더 나은 경로로 옮겨간 것일 수 있다.** 품질 영향은 V6·V7 에서 실측한다.
 
 ### Phase 2b 착수 전 실측 (V0) — **이 결과가 설계 입력이다**
 
