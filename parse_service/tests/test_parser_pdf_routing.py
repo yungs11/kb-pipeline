@@ -640,3 +640,104 @@ def test_vl_lane_keeps_figure_html_table(wire, monkeypatch):
     assert any("산문" in (b.get("text") or "") for b in blocks), "같은 element 의 산문도 보존"
     assert not any(b.get("type") == "image" and not b.get("img_path") for b in blocks), \
         "img_path 빈 image 블록이 남으면 안 된다"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Phase 2b-1 — PageTrace 관측 앵커
+#
+# 이 phase 는 **기록만 추가**한다. 동작 무변경이 수용 기준이고, 그 증거는
+#   ① 위 `page_verdicts` 단언 13곳이 **한 줄도 수정되지 않고** 통과하는 것(개명 안 함)
+#   ② `_workspace/planA-measurements/baseline-2a/structure.json` 과의 구조 대조
+# 다. 아래는 신설 계약을 못박는다.
+# ══════════════════════════════════════════════════════════════════════════════
+def test_page_traces_covers_every_page(wire):
+    """`page_traces` 는 **전 페이지**를 담는다 — `page_verdicts`(부분집합)와 다르다."""
+    wire["set_gate"](_decision({1: "odl", 2: "skip", 3: "odl"}))
+    wire["set_md"](["# 본문 하나", "", "# 본문 셋"])
+    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    assert [t["page_number"] for t in res.page_traces] == [1, 2, 3]
+    assert res.page_verdicts is None, "paddle 페이지가 없으면 게이트 판정은 없다"
+    assert all(t["verdict"] is None for t in res.page_traces), \
+        "게이트를 안 탄 페이지는 verdict=None"
+
+
+def test_page_traces_source_per_branch(wire):
+    """병합 분기 → `source` 매핑. 어휘가 뭉개지면 지표가 거짓이 된다."""
+    wire["set_gate"](_decision({1: "odl", 2: "skip"}))
+    wire["set_md"](["# 디지털 본문", ""])
+    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    src = {t["page_number"]: t["source"] for t in res.page_traces}
+    assert src[1] == "odl_md"
+    assert src[2] == "skip", "SKIP 은 정상적으로 비는 경로 — empty 와 구분해야 한다"
+
+
+def test_page_traces_empty_overrides_source(wire, monkeypatch):
+    """VL 이 elements 를 냈는데 **전량 필터**되면 `source` 는 `vl` 이 아니라 `empty`.
+
+    안 덮어쓰면 §2 의 "품질 상한 = `source==empty` 비율" 이 거짓이 된다 —
+    2b-2 의 문서실패 대상집합이 그 수치 위에 선다.
+    """
+    monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages",
+                        lambda jobs, ocr_url=None, **k: [
+                            # img_path 빈 image element → vl_elements_to_blocks 가 전량 제거
+                            ([{"category": "figure", "page": 0,
+                               "content": {"html": "", "markdown": "", "text": ""}}], [])
+                            for _ in jobs])
+    wire["set_gate"](_decision({1: "vl"}))
+    wire["set_md"]([""])
+    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    t = res.page_traces[0]
+    assert t["source"] == "empty", f"blocks 가 비면 empty 로 덮어써야 한다: {t}"
+    assert t["chars"] == 0
+
+
+def test_page_traces_attempts_carry_tokens_and_finish(wire, monkeypatch):
+    """`attempts` 에 `tokens`·`finish` 가 **page_traces 까지** 도달한다.
+
+    `finish` 가 `length`(상한 소진)냐 `stop`+짧은 응답(서빙 이상)이냐가 **처방을 가른다**
+    (2026-08-13 V0 실측). 값이 안 오면 "8000 토큰인데 왜 잘려?" 에서 막힌다.
+    """
+    from parse_service.parsers.ocr import vl_api
+    meta = vl_api.VLCallMeta(model="q/122b", tokens=86, finish="stop", elapsed=1.0)
+    monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages",
+                        lambda jobs, ocr_url=None, **k: [
+                            ([{"category": "text", "content": {"markdown": "VL 전사"},
+                               "page": 0}], [meta]) for _ in jobs])
+    wire["set_gate"](_decision({1: "vl"}))
+    wire["set_md"]([""])
+    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    atts = res.page_traces[0]["attempts"]
+    assert atts and atts[0][0] == "vl"
+    assert atts[0][2]["tokens"] == 86 and atts[0][2]["finish"] == "stop"
+
+
+def test_page_traces_vl_error_distinguished_from_empty(wire, monkeypatch):
+    """VL **예외**와 **빈 응답**이 구분된다(삼킴 3층 해소).
+
+    예외가 빈 리스트로만 도착하면 "서빙이 아프다" 와 "이 페이지는 원래 빈다" 가
+    같은 신호가 된다 — 이 phase 가 대비하려는 바로 그 혼동이다.
+    """
+    def boom(*a, **k):
+        raise RuntimeError("VL down")
+    monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages", boom)
+    wire["set_gate"](_decision({1: "vl"}))
+    wire["set_md"]([""])
+    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    atts = res.page_traces[0]["attempts"]
+    assert any(a[1] == "error" and "RuntimeError" in str(a[2].get("error", ""))
+               for a in atts), f"배치 전체 실패 사유가 남아야 한다: {atts}"
+
+
+def test_page_traces_gw_hybrid_distinguished_from_gw(wire, monkeypatch):
+    """hybrid 가 갈아끼운 페이지는 `gw` 가 아니라 `gw_hybrid` 다.
+
+    내용이 게이트웨이 산출물이 아니라 **전면 VL** 산출물이라 구분하지 않으면
+    "게이트웨이가 처리했다" 로 뭉뚱그려진다.
+    """
+    monkeypatch.setattr(pdf_parser, "_hybrid_scan_pages",
+                        lambda pages, fb, tgt, ocr_url, counters: {1})
+    wire["set_gate"](_decision({1: "paddle_gw"}))
+    wire["set_gw"]([{"page_number": 1, "blocks": [{"type": "text", "text": "GW 본문"}],
+                     "layout": [], "page_size": None, "status": "ok", "error": ""}])
+    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    assert res.page_traces[0]["source"] == "gw_hybrid"

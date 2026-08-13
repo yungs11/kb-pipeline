@@ -398,7 +398,7 @@ def _refresh_trace_sources(res: RouteResult) -> None:
             if bl is None:
                 continue
             chars = sum(len((b.get("table_body") or b.get("text") or "")) for b in bl)
-            if not bl and t["source"] != "empty":
+            if not bl and t["source"] not in _EMPTY_IS_NORMAL and t["source"] != "empty":
                 t["attempts"] = list(t["attempts"]) + [("degen", "all_removed", {})]
                 t["source"] = "empty"
             t["chars"] = chars
@@ -722,7 +722,11 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
             "lane": t["lane"],
             # blocks 가 비면 `empty` 로 덮어쓴다 — VL 이 elements 를 냈는데 전량 필터된
             # 경우가 실재한다. 안 덮으면 "품질 상한 = empty 비율" 지표가 거짓이 된다.
-            "source": (t["source"] if bl else "empty"),
+            # ⚠️ **단 `_EMPTY_IS_NORMAL` 은 덮지 않는다** — `skip`(내용 없음이 정상)과
+            #    `unclassified`(방어코드)는 **정상적으로 비는 경로**다. 실패와 섞으면
+            #    2b-2 의 "문서 실패 대상 집합" 을 정할 수 없다.
+            "source": (t["source"] if (bl or t["source"] in _EMPTY_IS_NORMAL)
+                       else "empty"),
             "attempts": list(t["attempts"]) + list(attempts.get(0, ())),
             "chars": chars,
             "verdict": v.get("verdict"),
@@ -742,6 +746,11 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
                          page_verdicts=verdicts, page_traces=page_traces)
     _try_log_triage(decision, result, lanes, filename)
     return result
+
+
+#: 정상적으로 빈 blocks 로 끝나는 경로 — `empty`(실패)로 덮어쓰지 않는다.
+#: 게이트 quarantine 은 `source` 를 안 바꾸므로(verdict 로 표현) 여기 없어도 된다.
+_EMPTY_IS_NORMAL = frozenset({"skip", "unclassified"})
 
 
 def _try_log_triage(decision, result: RouteResult, lanes: dict, filename: str) -> None:
