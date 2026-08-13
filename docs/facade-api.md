@@ -424,7 +424,7 @@ query `workspace_id`, `doc_id`. 성공 시 **204 No Content**(본문 없음).
 | 계층 | 배치 주체 | 실체 |
 |---|---|---|
 | **다건 업로드** | **kb-backend(:8088)의 durable batch worker** — facade 밖 | 별도 프로세스 `app.workers.batch_worker`. DB 큐 기반, 기본 capacity **2**. 로그 `/tmp/kb_batch_worker.log`, PID `/tmp/kb_batch_worker.pid`. 워커가 죽으면 업로드가 `queued` 에 머문다 |
-| **문서 1건 내부** | parse-svc 페이지 병렬 | VL/paddle_gw 페이지 호출 동시 **3**(`KBP_VL_MAX_CONCURRENT`), 모달 LLM 동시 **3**(`KBP_MODAL_MAX_WORKERS`) |
+| **문서 1건 내부** | parse-svc 페이지 병렬 | VL/paddle_gw 페이지 호출 동시 **8**(`KBP_VL_MAX_CONCURRENT`), 모달 LLM 동시 **3**(`KBP_MODAL_MAX_WORKERS`) |
 | **청킹** | adaptive_chunk 비동기 잡 | facade 가 잡 제출 후 3초 간격 폴링 (동기 호출처럼 보이게 은폐) |
 | **적재** | edgequake 비동기 task | `async_processing:true` 제출 후 3초 간격 폴링 |
 | **커뮤니티** | 오프라인 배치 | `/communities/build` 온디맨드 202, 또는 global 검색 시 build-if-missing |
@@ -458,7 +458,7 @@ query `workspace_id`, `doc_id`. 성공 시 **204 No Content**(본문 없음).
 | 구간 | 상한 | 출처 |
 |---|---|---|
 | **parse-svc** | 사실상 **1건** — `scripts/run-parse-svc.sh` 도 단일 워커이고 `/parse` 가 동일한 async-blocking 구조 | `parse_service/app.py:366` |
-| VL OCR 페이지 호출 | 3 (`KBP_VL_MAX_CONCURRENT`) | `parse_service/parsers/ocr/__init__.py:34`, `parsers/pdf/paddle_gw.py:178` |
+| VL OCR 페이지 호출 | 8 (`KBP_VL_MAX_CONCURRENT`) | `parse_service/parsers/ocr/__init__.py`, `parsers/pdf/paddle_gw.py` |
 | 모달 LLM | 3 (`KBP_MODAL_MAX_WORKERS`) | `parse_service/app.py:212` |
 | adaptive_chunk | 허브 자체 큐 | — |
 | edgequake | 자체 태스크 큐 | — |

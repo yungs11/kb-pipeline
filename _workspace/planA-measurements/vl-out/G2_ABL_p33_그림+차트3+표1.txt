@@ -1,0 +1,38 @@
+# SECTION 04 | 온톨로지 확장 전략
+
+## Agent 기반 지식 추출 및 통합 검색 품질
+
+### A. RAG 검색 파이프라인
+
+비정형 문서 파싱 (Document Studio) → 검색 쿼리 재구성 (LUXIA3.5-LLM) → 쿼리 확장 (LUXIA3.5-LLM) → 온톨로지 지식 추출 (LUXIA3.5-LLM) → Lexical Search (BM25) / Semantic Search (LUXIA-Embedding) → Reranking (LUXIA-Reranker)
+
+LLM 을 활용한 전처리 작업을 포함한 Advanced RAG 검색 방식
+
+### 온톨로지 지식 추출 정확도
+
+개체식별, 관계추출 등의 특화 학습을 통해 온톨로지 지식 추출 정확도 향상
+- Nemotron3-120B: 87
+- gpt-oss-120B: 89
+- LUXIA3.5-120B: 91
+
+### 임베딩 모델 한/영 검색 정확도
+
+한/영 Cross-lingual 특화 데이터를 활용하여 검색 정확도 확보
+- PIXIE-Spell-Preview-1.7B: 92
+- Qwen3-Embedding-0.6B: 90
+- luxia-embedding-1.1.0: 93
+
+### 전문 도메인 리랭킹 정확도
+
+Hard-negative 샘플이 많은 전문 도메인에서도 우수한 리랭킹 성능
+- Bge-reranker-v2-m3: 86
+- Qwen3-0.6B-reranker: 90
+- LUXIA-reranker-v1.0: 93
+
+---
+
+## 2021 년 Re-TACRED leaderboard : 프린스턴 대학, 워싱턴 대학, 메타AI 상대로 1 위 달성
+
+* 문서 수준의 지식추출부문 경쟁 (Re-TACRED)에서 전세계 1 위 달성
+
+수호천사동양생명 | ABL

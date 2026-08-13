@@ -1,0 +1,48 @@
+# SECTION 03 | 수행 경과보고
+
+## (T-Box) 기초서류 작성을 위한 보험, 법률 관련 스키마 구축
+
+보험 지식 Class 7종, 법률 지식 Class 2종 구축
+
+### 1. 온톨로지 상위 개념 (보험)
+
+*   **C1 Insurance_Product (보험 상품)**
+    *   SC1 Health_Insurance (건강 보험)
+    *   SC2 Life_Insurance (종신보험)
+*   **C2 Insurance_Condition (보험 조건)**
+    *   SC1 Insurance_Period_Condition (보험기간 조건)
+    *   SC2 Payment_Cycle_Condition (납입주기 조건)
+    *   SC3 Payment_Term_Condition (납입기간 조건)
+    *   SC4 Sum_Insured_Condition (보험가입금액 조건)
+*   **C3 Coverage (보장 항목)**
+    *   SC1 Death_Coverage (사망 보장)
+    *   SC2 Disability_Coverage (장해 보장)
+    *   SC3 Health_Coverage (건강 보장)
+*   **C4 Benefit (급부)**
+    *   SC1 Insurance_Benefit (보험 급부)
+    *   SC2 Payment_Condition (지급 조건)
+*   **C5 Premium (보험료)**
+    *   SC1 Interest_Rate_Base (이율 기준)
+    *   SC2 Policy_Reserve (책임 준비금)
+*   **C6 Contract (계약)**
+    *   SC1 Main_Contract (주계약)
+    *   SC2 Rider (특약)
+*   **C7 Person (사람)**
+    *   SC1 Insurance_Agent (보험 설계사)
+    *   SC2 Insurance_Participant (보험 관계자)
+
+### 1. 온톨로지 상위 개념 (법률)
+
+*   **C8 Legal_Party (법적 당사자)**
+    *   SC1 Beneficial_Party (수익자)
+    *   SC2 Consumer_Party (소비자 당사자)
+    *   SC3 Group_Policyholder (단체 계약자)
+    *   SC4 Insurance_Agent_Party (보험 설계사 당사자)
+    *   SC5 Insured_Party (피보험자)
+    *   SC6 Policyholder_Party (계약자)
+    *   SC7 Legal_Party (법적 당사자)
+    *   SC8 Premium_Party (보험료 당사자)
+    *   SC9 Premium_Payer_Party (보험료 납입자)
+*   **C9 Legal_Provision (법률 조항)**
+    *   SC1 Commercial_CoProvision (상법 조항)
+    *   SC2 Standard_Terms_Act_Provision (약관규제법 조항)

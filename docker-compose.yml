@@ -267,6 +267,7 @@ services:
       KBP_TRIAGE_DIAGRAM_COMBO_CURVE_MIN: ${KBP_TRIAGE_DIAGRAM_COMBO_CURVE_MIN:-10}
       KBP_TRIAGE_NATIVE_TEXT_MIN_CHARS: ${KBP_TRIAGE_NATIVE_TEXT_MIN_CHARS:-20}
       KBP_TRIAGE_LANDSCAPE_TO_LLM: ${KBP_TRIAGE_LANDSCAPE_TO_LLM:-1}
+      # ⚠️ 무효(2026-08-12) — 페이지수준 라우팅으로 소비자 소멸. 삭제는 Phase 4.
       KBP_GATE_VL_RATIO: ${KBP_GATE_VL_RATIO:-0.5}
       KBP_GATE_VL_LANE: ${KBP_GATE_VL_LANE:-vl}
       KBP_GATE_OCR_LANE: ${KBP_GATE_OCR_LANE:-paddle_gw}
@@ -283,6 +284,7 @@ services:
       KBP_GW_DEGEN_MIN_CHARS: ${KBP_GW_DEGEN_MIN_CHARS:-500}
       KBP_DEGEN_COMPRESS_MAX: ${KBP_DEGEN_COMPRESS_MAX:-0.16}
       KBP_DEGEN_SOFT_RULES: ${KBP_DEGEN_SOFT_RULES:-R3,R4}
+      # ⚠️ 무효(2026-08-12) — 페이지수준 라우팅으로 소비자 소멸. 삭제는 Phase 4.
       KBP_GATE_DEFAULT_LANE: ${KBP_GATE_DEFAULT_LANE:-odl}
       KBP_TRIAGE_LOG_TABLE: ${KBP_TRIAGE_LOG_TABLE:-1}
       # PAGE_HYBRID 순서도 조항 오버라이드(선택, 빈 문자열이면 코드 기본값 사용).
@@ -290,7 +292,11 @@ services:
       # VL 계층구조(헤딩#/병합셀/도형 상하위) 규칙 오버라이드(선택, 빈 값이면 코드 기본값).
       KBP_PROMPT_HIERARCHY_RULE: ${KBP_PROMPT_HIERARCHY_RULE:-}
       GUIDED_JSON_MODE: response_format   # OpenRouter/OpenAI 호환 (vLLM extra_body 아님)
-      KBP_VL_MAX_CONCURRENT: "3"
+      # VL 동시 호출 = 게이트웨이 동시 POST. 리터럴이면 루트 .env 값이 무시된다.
+      KBP_VL_MAX_CONCURRENT: ${KBP_VL_MAX_CONCURRENT:-8}
+      KBP_PADDLE_GW_DPI: ${KBP_PADDLE_GW_DPI:-150}
+      # ⚠️ 빈 값이면 미설정과 정반대(reasoning 켬) — 기본을 1 로 못박는다(vl_api.py).
+      KBP_VL_DISABLE_REASONING: ${KBP_VL_DISABLE_REASONING:-1}
       # ── VL 모델·토큰 (Plan A). 값 없이 키만 넣으면 빈 문자열이 "설정됨"이 되어
       #    코드 기본값이 무력화되고 model="" 로 VL 이 전량 실패한다 → 반드시 기본값 포함.
       MODEL_NAME: ${MODEL_NAME:?VL 모델명을 .env 에 지정하세요(코드 기본값 없음)}

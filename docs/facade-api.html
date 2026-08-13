@@ -1127,7 +1127,7 @@
               <tr>
                 <td><strong>문서 1건 내부</strong></td>
                 <td>parse-svc 페이지 병렬</td>
-                <td>VL·paddle_gw 페이지 호출 동시 <strong>3</strong>(<code>KBP_VL_MAX_CONCURRENT</code>), 모달 LLM 동시 <strong>3</strong>(<code>KBP_MODAL_MAX_WORKERS</code>)</td>
+                <td>VL·paddle_gw 페이지 호출 동시 <strong>8</strong>(<code>KBP_VL_MAX_CONCURRENT</code>), 모달 LLM 동시 <strong>3</strong>(<code>KBP_MODAL_MAX_WORKERS</code>)</td>
               </tr>
               <tr>
                 <td><strong>청킹</strong></td>
@@ -1206,7 +1206,7 @@
             <thead><tr><th>구간</th><th class="col-narrow">상한</th><th>출처</th></tr></thead>
             <tbody>
               <tr><td><strong>parse-svc</strong></td><td>사실상 <strong>1건</strong></td><td>런처도 단일 워커이고 <code>/parse</code> 가 동일한 async-blocking 구조 — <code>parse_service/app.py:366</code></td></tr>
-              <tr><td>VL OCR 페이지 호출</td><td>3</td><td><code>KBP_VL_MAX_CONCURRENT</code> — <code>parsers/ocr/__init__.py:34</code>, <code>parsers/pdf/paddle_gw.py:178</code></td></tr>
+              <tr><td>VL OCR 페이지 호출</td><td>8</td><td><code>KBP_VL_MAX_CONCURRENT</code> — <code>parsers/ocr/__init__.py</code>, <code>parsers/pdf/paddle_gw.py</code></td></tr>
               <tr><td>모달 LLM</td><td>3</td><td><code>KBP_MODAL_MAX_WORKERS</code> — <code>parse_service/app.py:212</code></td></tr>
               <tr><td>adaptive_chunk</td><td>허브 자체 큐</td><td>—</td></tr>
               <tr><td>edgequake</td><td>자체 태스크 큐</td><td>—</td></tr>

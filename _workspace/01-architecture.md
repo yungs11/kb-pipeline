@@ -55,18 +55,18 @@
 
 | 확장자 | 도메인 | 파서(in-process) | `<table>` HTML | `chunk_needed` | 비고 |
 |--------|--------|------------------|----------------|----------------|------|
-| PDF | `pdf` | **문서수준 게이트**(triage) → 순수텍스트=**OpenDataLoader**(`markdown_with_html=True`) / 스캔·혼합=**MinerU**(hybrid-http-client) | ✅ (06=70개, pipe=0) | True | JRE 21 의존(ODL). 문서당 .md 1개 → `<<<ODL_PAGE_BREAK>>>` sentinel 로 페이지 복원. 게이트: `parse_service/parsers/pdf/gate.py` (triage 버킷 집계). MinerU 는 지연 import(로컬 미설치 허용), 실패 시 ODL/VL 폴백 |
+| PDF | `pdf` | **문서수준 게이트**(triage) → 순수텍스트=**OpenDataLoader**(`markdown_with_html=True`) / 스캔=**PaddleOCR-VL 게이트웨이**(원격 GPU) | ✅ (06=70개, pipe=0) | True | JRE 21 의존(ODL). 문서당 .md 1개 → `<<<ODL_PAGE_BREAK>>>` sentinel 로 페이지 복원. 게이트: `parse_service/parsers/pdf/gate.py`(triage 버킷 집계). 게이트웨이 실패 시 ODL/VL 폴백 |
 | XLSX/XLSM/XLS | `excel` | **excel_parser_rag**(vendored, `auto`→전결 openpyxl / 그 외 kordoc) | ✅ | **False** | LLM 없이 parse+chunk 결합 → native 청크. `chunk_strategy=excel_rag_parser` |
 | DOCX·HWP·HWPX·DOC·PPT·PPTX·HTML | `pdf` | **원격 변환 API → PDF → ODL/GW/VL** | ✅ | True | `run_parse` 가 변환 후 `.pdf` 이름으로 PDF 레인에 넣는다(2026-08-06) |
 | 단일 이미지 | `ocr` | **in-process VL OCR**(`parsers/ocr`) | ✅ + elements[] | True | 이미지→base64 → **PAGE_HYBRID**(전사 + 시각 서술) VL 호출. `IMAGE_EXTS`={png,jpg,jpeg,gif,bmp,tif,tiff,webp} |
 | TXT·MD·CSV·JSON | `text` | 그대로 블록화(utf-8-sig/utf-16/cp949) | — | True | 변환·파서 없음. `page_count=1` |
 | 그 외(폴백) | `fallback` | **kordoc** CLI | ✅ | True | 미지 확장자(hwpx 등)는 kordoc 로(구 markitdown 폴백 제거) |
-| 스캔/혼합 PDF | (pdf 내부, MinerU 레인) | **MinerU** hybrid (PaddleOCR 로컬 layout + **VLM 원격**) | ✅ | True | 게이트가 `OCR_NEEDED` 하나라도 있으면 `parse_method='ocr'` 강제(스캔 텍스트 유실 방지), 스캔 없는 텍스트+이미지 혼합만 `'auto'`. content_list→`elements_to_blocks`. VLM=`MINERU_VLM_SERVER_URL`(별도 GPU). 미설정/실패/빈결과 시 **ODL/in-process VL 폴백**(가용성). 배포서버 전용(`docs/mineru-deploy-notes.md`) |
-| 스캔 PDF 폴백 | (pdf 내부) | **in-process VL OCR** | ✅ | True | MinerU 미가동(로컬/실패) 시 폴백. 글자 거의 없는 페이지만 렌더 → VL OCR 보충(best-effort 비치명) |
+| 스캔 PDF | (pdf 내부, `paddle_gw` 레인) | **PaddleOCR-VL 게이트웨이**(원격 GPU — layout + VL 인식 + 표 조립) | ✅ | True | 게이트가 `OCR_NEEDED` 하나라도 있으면 이 레인(문서 단위 — 네이티브 페이지도 함께 전송). 페이지 이미지 1장씩 `/tasks` 비동기 호출. **layout 이 image/figure/chart 를 (면적 5%↑) 검출한 스캔 페이지는 전면 VL 로 교체하고 paddle 표는 승계**(Plan A, 2026-08-03 — `_hybrid_scan_pages`). 미설정/실패/빈결과 시 **ODL/in-process VL 폴백**(가용성) |
+| 스캔 PDF 폴백 | (pdf 내부) | **in-process VL OCR** | ✅ | True | 게이트웨이 미가동/실패 시 폴백. 글자 거의 없는 페이지만 렌더 → VL OCR 보충(best-effort 비치명) |
 
 - **표준 중간표현**: "markdown + inline HTML 표". 표는 절대 pipe 로 납작화 금지.
 - 문서 ID 폴백 = `sha256(file_bytes).hexdigest()[:16]`(orchestrator 동일 식 → MinIO 키 일치). 파일명 정규화 = `tools.safe_basename`(경로 탈출 차단, 구 `parsing._safe_basename` 이동). 비표시문자 제거 = PUA(U+E000–U+F8FF).
-- **VL OCR 계약(in-process, `parsers/ocr/vl_api.py`)**: OpenAI 호환 chat/completions(`MODEL_API_URL`/`MODEL_API_KEY`/`MODEL_NAME`), guided-json(`GUIDED_JSON_MODE=response_format` OpenRouter 호환), 응답 스키마 `elements[].{category(table|figure),content{html,markdown,text}}`. 동시성 `KBP_VL_MAX_CONCURRENT`(기본 3), 페이지 실패 비치명. 순수 텍스트 figure 는 text 블록으로 재분류(markdown 유실 방지).
+- **VL OCR 계약(in-process, `parsers/ocr/vl_api.py`)**: OpenAI 호환 chat/completions(`MODEL_API_URL`/`MODEL_API_KEY`/`MODEL_NAME`), guided-json(`GUIDED_JSON_MODE=response_format` OpenRouter 호환), 응답 스키마 `elements[].{category(table|figure),content{html,markdown,text}}`. 동시성 `KBP_VL_MAX_CONCURRENT`(기본 8), 페이지 실패 비치명. 순수 텍스트 figure 는 text 블록으로 재분류(markdown 유실 방지).
 
 > **⚠️ OCR 실제 origin = 원격 VL(`MODEL_API_URL`) + 스캔 게이트웨이(`KBP_PADDLE_OCR_GATEWAY_URL`), `:18050` 아님 — `KBP_OCR_URL` 은 dead (2026-07-27 코드 대조 확정, 제거됨)**
 > 흔한 오해: parse-svc `healthz` 가 (구) `{"deps":{"ocr":"http://localhost:18050"}}` 를 표시하고 `run_parse` 가 `ocr_url` 을 라우터→PDF/OCR 파서로 스레딩하므로 "파싱이 :18050 을 탄다"고 착각하기 쉽다. **실제로는 안 탄다.** 최종 소비자 `ocr_elements_sync`(`parsers/ocr/__init__.py:88`, `prompt_override` 만 받음)·`_ocr_elements_for_page`(`parsers/pdf/__init__.py:43-50`, 3번째 인자는 diagram 프롬프트 override 이지 URL 아님) 가 **`ocr_url` 을 전혀 소비하지 않는다**. excel 도 `excel_url 은 하위호환용 무시 파라미터`(`parsers/excel/__init__.py:46` 주석).

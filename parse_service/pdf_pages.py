@@ -28,13 +28,20 @@ class RenderedPage:
 
 
 def render_pdf_pages(
-    pdf_bytes: bytes, *, dpi: int = 300, jpg_quality: int = 90
+    pdf_bytes: bytes, *, dpi: int = 300, jpg_quality: int = 90,
+    page_numbers: set[int] | None = None,
 ) -> list[RenderedPage]:
     """원본 PDF 를 페이지별 JPEG(알파 없음) + 텍스트로 렌더한다.
 
     PyMuPDF(``fitz``)는 함수 내부에서 lazy import 한다. PDF 가 아니거나 열기 실패면 빈
     리스트를 반환한다(호출자가 페이지 매핑 skip — 적재 실패로 번지지 않음). 손상 PDF/렌더
     오류도 동일하게 빈 리스트(비치명).
+
+    ``page_numbers`` (1-based) 를 주면 그 페이지만 렌더한다. **``is not None`` 으로 판정**한다 —
+    빈 set 을 falsy 로 취급하면 "아무것도 렌더하지 말라"가 "전부 렌더"로 뒤집힌다.
+    필터는 ``get_pixmap`` **前** 에 ``continue`` 로 걸어 래스터화 자체를 건너뛴다(비용 절감이 목적).
+    ``page_number`` 는 언제나 **문서 절대 1-based** 다 — 부분집합을 재열거해 1..k 로 다시 매기면
+    상류(paddle_gw dict 키, ``odl_md[pno-1]``)가 다른 페이지를 가리킨다.
     """
     try:
         import fitz  # PyMuPDF
@@ -45,6 +52,8 @@ def render_pdf_pages(
     try:
         with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
             for i, page in enumerate(doc):
+                if page_numbers is not None and (i + 1) not in page_numbers:
+                    continue  # 래스터화 前 스킵
                 pix = page.get_pixmap(dpi=dpi, alpha=False)
                 jpeg = pix.tobytes(output="jpeg", jpg_quality=jpg_quality)
                 text = page.get_text("text") or ""

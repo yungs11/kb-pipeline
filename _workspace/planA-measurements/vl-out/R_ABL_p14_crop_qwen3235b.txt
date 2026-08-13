@@ -1,0 +1,5 @@
+시작 → Agent Orchestration(Use-case Scenario 1, 2, 3) → Agent Studio(Workflow, Designer) → Application Server(Portal, Notification) → 사용자/관리자(For User, For Admin) → Knowledge Studio(Query Mgr., Ontology, Mapping Rule, OntoGen(Query, Model)) → MCP based Enterprise Data Federation(Document Studio, Access & Authentication Control, NL2SQL, MCP×5) → Deep Research Engine(Agentic RAG, Planner) → Search Studio(Vector DB) → Knowledge Grounding(Graph RAG, SparQL) → Model Factory(Intelligent Model Router, Deep Models, VLM Models, Vector EBD Models, Foundation Models) → Legacy Systems(Policy Administration System (PAS), Claims, Underwriting, ...) → Master Table → 생명보험 Datamart(고객, 계약, 상품, 계리, 심사) → MCP based Enterprise Data Federation → Knowledge Studio → Agent Studio → Agent Orchestration → 끝
+
+※ 스윔레인: Agent Orchestration, Agent Studio, Application Server, Knowledge Studio, MCP based Enterprise Data Federation, Deep Research Engine, Model Factory, Legacy Systems, Master Table, 생명보험 Datamart
+
+※ 기타 텍스트: Account Manager(ID/PW, Config., History, Data), Platform Manager(Res. Mng., K8S Mng., Sys. Logs)

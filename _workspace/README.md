@@ -15,6 +15,7 @@
 | [`01-architecture.md`](01-architecture.md) | **아키텍처** — 전체 흐름 + 컴포넌트별(facade / parser / chunker / edgequake) 설계, 저장소·RLS, 데이터 계약 | SoT.md §1–5, SoT.v1.md, process-definition §2–5 |
 | [`02-changes.md`](02-changes.md) | **변경내용** — v1→v2 결정 변천, edgequake fork 버그수정 3건, KV GIN 인덱스 결정, 정정 사실 | SoT.md §0/§11, dev_wiki.md, SoT.v1.md |
 | [`03-dev-progress.md`](03-dev-progress.md) | **개발진행사항** — W0~W6 작업항목 상태, E2E 검증, 타이밍 모니터링 plan, 리스크/협의사항 | SoT.md §6/§8/§10/§11, kb-stage-monitoring.md, process-definition §6 |
+| [`04-planA-handoff.md`](04-planA-handoff.md) | **Plan A 인수인계** — 스캔 레인 layout 기반 그림·차트 처리. 설계 완료/구현 미착수. 실측 R1~R11, 반복된 실패 유형, 범위 대장, 검증 절차 | `~/.claude/plans/mighty-whistling-quiche.md`(활성 plan), `planA-measurements/` |
 
 ## 핵심 아키텍처 결정 (ADR)
 
