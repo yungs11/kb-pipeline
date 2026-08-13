@@ -18,16 +18,25 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-# facade 와 **동일한** env 를 쓴다(같은 DB·같은 MinIO 를 봐야 한다).
-ENV_FILE="$ROOT/scripts/facade.env"
-if [ -f "$ENV_FILE" ]; then set -a; . "$ENV_FILE"; set +a; fi
+# facade 와 **동일한** env 를 쓴다(같은 DB·같은 MinIO 를 봐야 한다) — 그래서 로더도
+# `run-facade.sh` 와 **같은 것**을 쓴다(2026-08-13). 전엔 여기만 `scripts/facade.env` 를
+# 직접 source 해서 루트 `.env` 를 아예 안 읽었다 — 같은 서비스의 두 프로세스가 서로 다른
+# env 규칙으로 돌던 셈이다. parse-svc 에서 똑같은 이중 파일 구조가 옛 OCR 게이트웨이 주소를
+# 살려둔 사고를 냈다. CLI > .env > 레거시 facade.env > 파생 기본값.
+# shellcheck source=scripts/lib/load-dev-env.sh
+. "$ROOT/scripts/lib/load-dev-env.sh"
+_DEV_ENV_LEGACY=""; _DEV_ENV_MAIN=""
+_dev_env_load "$ROOT" "$ROOT/scripts/facade.env"
+_dev_env_host_addrs
+_dev_env_report "$ROOT"
 
-: "${KBP_PG_DSN:?missing — scripts/facade.env must set KBP_PG_DSN}"
+# KBP_PG_DSN 은 미설정이면 `.env` 의 POSTGRES_* 로 조립된다(_dev_env_host_addrs).
+: "${KBP_PG_DSN:?missing — set POSTGRES_* (or KBP_PG_DSN) in the repo-root .env}"
 # staging 업로드가 여기 없으면 /parse·/ingest 접수가 전면 실패한다. 조용히 죽는 대신
 # 기동 시점에 잡는다.
-: "${MINIO_ENDPOINT:?missing — scripts/facade.env must set MINIO_ENDPOINT (호스트 dev 는 localhost:9000)}"
-: "${MINIO_ACCESS_KEY:?missing — scripts/facade.env must set MINIO_ACCESS_KEY}"
-: "${MINIO_SECRET_KEY:?missing — scripts/facade.env must set MINIO_SECRET_KEY}"
+: "${MINIO_ENDPOINT:?missing — set MINIO_ENDPOINT in the repo-root .env (호스트 dev 는 localhost:9000)}"
+: "${MINIO_ACCESS_KEY:?missing — set MINIO_ACCESS_KEY in the repo-root .env}"
+: "${MINIO_SECRET_KEY:?missing — set MINIO_SECRET_KEY in the repo-root .env}"
 
 PID_FILE="${KBP_WORKER_PID_FILE:-/tmp/kbp_facade_worker.pid}"
 LOG="${KBP_WORKER_LOG:-/tmp/kbp_facade_worker.log}"

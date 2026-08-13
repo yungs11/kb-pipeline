@@ -33,9 +33,34 @@
 - 해석: empty는 terminal failure로 단정할 수 없지만 I37처럼 non-empty truncation도 있으므로
   `non-empty = 성공`으로 판정하지 않는다.
 
+## 현행 원본 대조 분석 — 16쪽 한눈에 보기
+
+VL 최초 empty 5건은 retry-01 판정을 사용한다. 아래 값은 과거 label이 아니라 이 문서에
+삽입된 원본 이미지와 현재 GW/VL 출력 전문을 직접 대조한 결과다.
+
+| ID | GW | VL (retry 반영) | Winner | VL beneficial | 핵심 비교 근거 |
+|---|---|---|---|---:|---|
+| I03 | PASS / minor | PASS / minor | TIE | false | 날짜 보존; 양쪽 경미한 오류 |
+| I10 | PASS / minor | PASS / critical / hallucination | GW | false | VL `③항→⑨항` |
+| I14 | PASS / critical | PASS / clean | VL | true | GW `1,000,000→1,000.000` |
+| I17 | BORDERLINE / critical | PASS / clean | VL | true | VL이 사업목적 용어·날짜 복구 |
+| I18 | PASS / minor | PASS / minor | GW | false | VL wording error가 더 많음 |
+| I19 | PASS / critical | PASS / clean | VL | true | VL이 `사채/부언/없애기/액면` 복구 |
+| I20 | PASS / minor | PASS / minor / suspect | VL | false | VL `가처분이의→가치분이의` |
+| I24 | FAIL / critical | FAIL / truncated | BOTH_FAIL | false | 중국어 표 / header 절단 |
+| I26 | BORDERLINE / critical / partial | PASS / clean | VL | true | VL이 누락 당사자 복구 |
+| I35 | BORDERLINE / critical / partial | PASS / clean | VL | true | VL이 사건번호·문맥 복구 |
+| I37 | FAIL / critical | FAIL / truncated | BOTH_FAIL | false | GW 전면 훼손; VL ⑤항 중간 절단 |
+| I41 | PASS / critical | PASS / critical | TIE | false | 양쪽 `테스타디앤씨→테스타디엔씨` |
+| I42 | PASS / critical / partial | PASS / critical | VL | false | VL에도 `용죽1로→용죽로` 잔존 |
+| I46 | BORDERLINE / critical | PASS / clean | VL | true | VL이 원고 `손세라` 복구 |
+| I49 | PASS / minor | FAIL / truncated | GW | false | VL 첫 문장 절단 |
+| I56 | BORDERLINE / critical | BORDERLINE / critical / hallucination | BOTH_FAIL | false | 양쪽 신원 훼손; VL 숫자 생성·혼합 |
+
 ## I03 · source index 3 · original p22
 
-- historical GW label: `EXCLUDED_INVALID_POSITIONAL_JOIN` — 현재 doc/page의 근거가 아님
+- current original-grounded analysis: **GW `RETRIEVAL_PASS / MINOR_ERROR` · VL `RETRIEVAL_PASS / MINOR_ERROR` · winner `TIE` · `VL_BENEFICIAL=false`**
+- comparison evidence: 양쪽 모두 `2016.11.14/2016.11.16`을 보존. GW에는 barcode noise, VL은 `일반인으로서는`을 `일반인으로서도`로 변경.
 - current v1: `accept_gw` — no hard-fail reason
 - chars: GW 705 / VL 698 · errors: GW `-'` / VL `-'`
 - exact input: [`page_images/I03_01_운정지역주택조합_대리사무_채권자대위권등_신창근외17_상대방_소장_pdf_p22.jpg`](page_images/I03_01_운정지역주택조합_대리사무_채권자대위권등_신창근외17_상대방_소장_pdf_p22.jpg) · sha256 `e7f455166c01b0ebb422a4e386dccb9bf2b9e24b3afb92eaadce829aab496fe6`
@@ -76,7 +101,8 @@
 
 ## I10 · source index 10 · original p34
 
-- historical GW label: `EXCLUDED_INVALID_POSITIONAL_JOIN` — 현재 doc/page의 근거가 아님
+- current original-grounded analysis: **GW `RETRIEVAL_PASS / MINOR_ERROR` · VL `RETRIEVAL_PASS / CRITICAL_ERROR / HALLUCINATION_CONFIRMED` · winner `GW` · `VL_BENEFICIAL=false`**
+- comparison evidence: 원본 `제4조 ③항`을 VL이 `제4조 ⑨항`으로 변경하고 Cyrillic `m`을 생성.
 - current v1: `accept_gw` — no hard-fail reason
 - chars: GW 1028 / VL 1002 · errors: GW `-'` / VL `-'`
 - exact input: [`page_images/I10_01_세종시_대평동_관토신_서울중앙_분양대금등반환_소미영_소장_pdf_p34.jpg`](page_images/I10_01_세종시_대평동_관토신_서울중앙_분양대금등반환_소미영_소장_pdf_p34.jpg) · sha256 `0f708a6f6122191669962f724e6f153f6bf37eb29f5d21ebd038ff775a5a4686`
@@ -172,9 +198,10 @@
 
 ## I14 · source index 14 · original p31
 
-- historical GW label: `EXCLUDED_INVALID_POSITIONAL_JOIN` — 현재 doc/page의 근거가 아님
+- current original-grounded analysis: **GW `RETRIEVAL_PASS / CRITICAL_ERROR` · VL retry-01 `RETRIEVAL_PASS / NO_MATERIAL_ERROR` · winner `VL` · `VL_BENEFICIAL=true`**
+- comparison evidence: 원본 자본금 `1,000,000`; GW `1,000.000`; VL retry는 `1,000,000` 보존.
 - current v1: `accept_gw` — no hard-fail reason
-- chars: GW 641 / VL 0 · errors: GW `-'` / VL `empty'`
+- initial run metrics (history): GW 641 chars / VL 0 chars · errors: GW `-'` / VL `empty'`; 현행 비교는 위 VL retry-01 판정과 아래 전문 사용
 - VL empty retry-01: **1,395 chars · `RETRIEVAL_PASS` · `VL_BENEFICIAL=true`** —
   자본금 `1,000,000`을 보존해 GW의 `1,000.000` critical numeric error를 복구.
   [retry output](retries/vl-empty-retry-01/normalized/I14_01_고양시_향동동_관토신_서울중앙_기타_금전_정재석외2_소장_pdf_p31_vl.md) ·
@@ -245,9 +272,10 @@
 
 ## I17 · source index 17 · original p52
 
-- historical GW label: `EXCLUDED_INVALID_POSITIONAL_JOIN` — 현재 doc/page의 근거가 아님
+- current original-grounded analysis: **GW `RETRIEVAL_BORDERLINE / CRITICAL_ERROR` · VL retry-01 `RETRIEVAL_PASS / NO_MATERIAL_ERROR` · winner `VL` · `VL_BENEFICIAL=true`**
+- comparison evidence: VL retry가 사업목적 용어와 날짜를 복구. 말소/추가 이력의 표 구조는 평탄화됐지만 검색 의미는 유지.
 - current v1: `accept_gw` — no hard-fail reason
-- chars: GW 1741 / VL 0 · errors: GW `-'` / VL `empty'`
+- initial run metrics (history): GW 1741 chars / VL 0 chars · errors: GW `-'` / VL `empty'`; 현행 비교는 위 VL retry-01 판정과 아래 전문 사용
 - VL empty retry-01: **3,960 chars · `RETRIEVAL_PASS` · `VL_BENEFICIAL=true`** —
   사업목적 용어와 날짜를 보존해 GW의 광범위한 term corruption을 복구. 말소/추가 이력은
   표 열로 평탄화됐지만 검색 의미는 유지됨.
@@ -314,9 +342,10 @@
 
 ## I18 · source index 18 · original p128
 
-- historical GW label: `EXCLUDED_INVALID_POSITIONAL_JOIN` — 현재 doc/page의 근거가 아님
+- current original-grounded analysis: **GW `RETRIEVAL_PASS / MINOR_ERROR` · VL retry-01 `RETRIEVAL_PASS / MINOR_ERROR` · winner `GW` · `VL_BENEFICIAL=false`**
+- comparison evidence: 양쪽 모두 30일 답변기한과 부본 수를 보존. VL에는 `증거조기기일`, `허가하여 달리는` 등의 wording error가 있어 GW가 더 깨끗함.
 - current v1: `accept_gw` — no hard-fail reason
-- chars: GW 1388 / VL 0 · errors: GW `-'` / VL `empty'`
+- initial run metrics (history): GW 1388 chars / VL 0 chars · errors: GW `-'` / VL `empty'`; 현행 비교는 위 VL retry-01 판정과 아래 전문 사용
 - VL empty retry-01: **1,887 chars · `RETRIEVAL_PASS` · `VL_BENEFICIAL=false`** —
   30일 답변기한과 부본 수 요구를 보존했지만 `증거조기기일`, `허가하여 달리는` 등의
   minor wording error가 있어 GW가 더 깨끗함.
@@ -367,7 +396,8 @@
 
 ## I19 · source index 19 · original p35
 
-- historical GW label: `EXCLUDED_INVALID_POSITIONAL_JOIN` — 현재 doc/page의 근거가 아님
+- current original-grounded analysis: **GW `RETRIEVAL_PASS / CRITICAL_ERROR` · VL `RETRIEVAL_PASS / NO_MATERIAL_ERROR` · winner `VL` · `VL_BENEFICIAL=true`**
+- comparison evidence: GW `사체/부인하면/없에기/엑면금액`; VL이 원본의 `사채/부언하면/없애기/액면금액`을 복구.
 - current v1: `accept_gw` — no hard-fail reason
 - chars: GW 1212 / VL 1199 · errors: GW `-'` / VL `-'`
 - exact input: [`page_images/I19_01_양주시_옥정동_관토신_책준_서울중앙_분양대금반환등_장성근_소장_pdf_p35.jpg`](page_images/I19_01_양주시_옥정동_관토신_책준_서울중앙_분양대금반환등_장성근_소장_pdf_p35.jpg) · sha256 `4ba852eef9680cb1e1ee59ba35866fd1ec19954f5b92dabebb23bbca03fbc5ca`
@@ -427,7 +457,8 @@
 
 ## I20 · source index 20 · original p41
 
-- historical GW label: `EXCLUDED_INVALID_POSITIONAL_JOIN` — 현재 doc/page의 근거가 아님
+- current original-grounded analysis: **GW `RETRIEVAL_PASS / MINOR_ERROR` · VL `RETRIEVAL_PASS / MINOR_ERROR / HALLUCINATION_SUSPECT` · winner `VL` · `VL_BENEFICIAL=false`**
+- comparison evidence: VL body가 더 깨끗하지만 원본 `가처분이의`를 `가치분이의`로 변경. GW 오류가 critical이 아니어서 target 정의상 beneficial 아님.
 - current v1: `accept_gw` — no hard-fail reason
 - chars: GW 995 / VL 1040 · errors: GW `-'` / VL `-'`
 - exact input: [`page_images/I20_01_인천시_청라동_관토신_책준_서울중앙_가처분이의_주_디벨럽팩토리_심문기일통지서_가처_p41.jpg`](page_images/I20_01_인천시_청라동_관토신_책준_서울중앙_가처분이의_주_디벨럽팩토리_심문기일통지서_가처_p41.jpg) · sha256 `99e68b21ef9b9181c4f73ea642aeb3f59a8a9b0192e376e05f03913932f7909b`
@@ -496,7 +527,8 @@
 
 ## I24 · source index 24 · original p419
 
-- historical GW label: `EXCLUDED_INVALID_POSITIONAL_JOIN` — 현재 doc/page의 근거가 아님
+- current original-grounded analysis: **GW `RETRIEVAL_FAIL / CRITICAL_ERROR / SEVERE_OMISSION` · VL `RETRIEVAL_FAIL / CRITICAL_ERROR / TRUNCATED` · winner `BOTH_FAIL` · `VL_BENEFICIAL=false`**
+- comparison evidence: GW는 무관한 중국어 표를 만들고 VL은 header 뒤에서 절단. 현재 v1 quarantine 대상.
 - current v1: `quarantine` — 한자 오염: 한자 130자, 비율 0.54
 - chars: GW 472 / VL 209 · errors: GW `-'` / VL `-'`
 - exact input: [`page_images/I24_01_경산삼남지역주택조합_대리사무_대구지법_손해배상_기_강성대외95_소장_pdf_p419.jpg`](page_images/I24_01_경산삼남지역주택조합_대리사무_대구지법_손해배상_기_강성대외95_소장_pdf_p419.jpg) · sha256 `c261a6dce840347daef024a373b4a9097a442dd5c7b30ae333dc31c4109f56dd`
@@ -551,7 +583,8 @@
 
 ## I26 · source index 26 · original p270
 
-- historical GW label: `EXCLUDED_INVALID_POSITIONAL_JOIN` — 현재 doc/page의 근거가 아님
+- current original-grounded analysis: **GW `RETRIEVAL_BORDERLINE / CRITICAL_ERROR / PARTIAL` · VL `RETRIEVAL_PASS / NO_MATERIAL_ERROR` · winner `VL` · `VL_BENEFICIAL=true`**
+- comparison evidence: GW가 피고·피항소인 B와 승계참가인 D를 누락; VL은 당사자와 금액을 보존.
 - current v1: `accept_gw` — no hard-fail reason
 - chars: GW 345 / VL 441 · errors: GW `-'` / VL `-'`
 - exact input: [`page_images/I26_01_창원시_팔용동_관토신_서울중앙_손해배상_등_이경연외2_소장_pdf_p270.jpg`](page_images/I26_01_창원시_팔용동_관토신_서울중앙_손해배상_등_이경연외2_소장_pdf_p270.jpg) · sha256 `b430eca3848e5a0ee17e865b8d9143a799eea834ccc50699b3e6de48f468ed42`
@@ -641,7 +674,8 @@
 
 ## I35 · source index 35 · original p18
 
-- historical GW label: `EXCLUDED_INVALID_POSITIONAL_JOIN` — 현재 doc/page의 근거가 아님
+- current original-grounded analysis: **GW `RETRIEVAL_BORDERLINE / CRITICAL_ERROR / PARTIAL` · VL `RETRIEVAL_PASS / NO_MATERIAL_ERROR` · winner `VL` · `VL_BENEFICIAL=true`**
+- comparison evidence: GW가 사건번호 `2024가단5205920`과 문서 문맥을 누락; VL이 복구.
 - current v1: `accept_gw` — 빈 페이지(ink=0.0158) — 내용 없음
 - chars: GW 40 / VL 201 · errors: GW `-'` / VL `-'`
 - exact input: [`page_images/I35_01_남양주시_금곡리_대리사무_서울중앙_추심금_김성수_소장_pdf_p18.jpg`](page_images/I35_01_남양주시_금곡리_대리사무_서울중앙_추심금_김성수_소장_pdf_p18.jpg) · sha256 `4b11d0cbe575fe106d2285f7e4f83c5f1d84dfe944bbf0d2dfef0d8470e2f68e`
@@ -687,9 +721,10 @@
 
 ## I37 · source index 37 · original p160
 
-- historical GW label: `EXCLUDED_INVALID_POSITIONAL_JOIN` — 현재 doc/page의 근거가 아님
+- current original-grounded analysis: **GW `RETRIEVAL_FAIL / CRITICAL_ERROR` · VL retry-01 `RETRIEVAL_FAIL / CRITICAL_ERROR / TRUNCATED` · winner `BOTH_FAIL` · `VL_BENEFICIAL=false`**
+- comparison evidence: GW는 당사자 기호와 조항을 광범위하게 훼손. VL retry는 ⑤항 중간에서 절단되어 페이지 후반 누락.
 - current v1: `accept_gw` — no hard-fail reason
-- chars: GW 1184 / VL 0 · errors: GW `-'` / VL `empty'`
+- initial run metrics (history): GW 1184 chars / VL 0 chars · errors: GW `-'` / VL `empty'`; 현행 비교는 위 VL retry-01 판정과 아래 전문 사용
 - VL empty retry-01: **1,093 chars · `RETRIEVAL_FAIL` · `VL_BENEFICIAL=false`** —
   제11조 문구 일부는 GW보다 크게 개선됐으나 ⑤항 중간에서 절단되어 페이지 후반을 누락.
   non-empty지만 최종 판정은 `BOTH_FAIL`.
@@ -743,7 +778,8 @@
 
 ## I41 · source index 41 · original p10
 
-- historical GW label: `EXCLUDED_INVALID_POSITIONAL_JOIN` — 현재 doc/page의 근거가 아님
+- current original-grounded analysis: **GW `RETRIEVAL_PASS / CRITICAL_ERROR` · VL `RETRIEVAL_PASS / CRITICAL_ERROR` · winner `TIE` · `VL_BENEFICIAL=false`**
+- comparison evidence: 원본 `테스타디앤씨`를 양쪽 모두 `테스타디엔씨`로 변경. 금액은 모두 보존.
 - current v1: `accept_gw` — no hard-fail reason
 - chars: GW 434 / VL 475 · errors: GW `-'` / VL `-'`
 - exact input: [`page_images/I41_01_하남미사지구_지식산언센터_관토신_서울중앙_하자보수비등_미사테스타타워관리단_소장_p_p10.jpg`](page_images/I41_01_하남미사지구_지식산언센터_관토신_서울중앙_하자보수비등_미사테스타타워관리단_소장_p_p10.jpg) · sha256 `e5092a5bebeada5832009ab8e20a436d6ad18b8c3ef583ebeaddaacf305c2af0`
@@ -791,7 +827,8 @@
 
 ## I42 · source index 42 · original p336
 
-- historical GW label: `EXCLUDED_INVALID_POSITIONAL_JOIN` — 현재 doc/page의 근거가 아님
+- current original-grounded analysis: **GW `RETRIEVAL_PASS / CRITICAL_ERROR / PARTIAL` · VL `RETRIEVAL_PASS / CRITICAL_ERROR` · winner `VL` · `VL_BENEFICIAL=false`**
+- comparison evidence: GW는 수취인 주소를 절단; VL은 더 완전하지만 원본 `용죽1로`를 `용죽로`로 변경해 critical address error가 남음.
 - current v1: `accept_gw` — no hard-fail reason
 - chars: GW 660 / VL 684 · errors: GW `-'` / VL `-'`
 - exact input: [`page_images/I42_01_평택시_용이동_관토신_하자보수에갈음하는손해배상등_평택비전지웰푸르지오입주자대표회의__p336.jpg`](page_images/I42_01_평택시_용이동_관토신_하자보수에갈음하는손해배상등_평택비전지웰푸르지오입주자대표회의__p336.jpg) · sha256 `a6352a5751e9fce4b2827a791e40fbd99dd17ba0e982f928362aca94b1fb353b`
@@ -897,9 +934,10 @@ G-well PRUGIO 평택비전지웰푸르지오 입주자대표회의
 
 ## I46 · source index 46 · original p65
 
-- historical GW label: `EXCLUDED_INVALID_POSITIONAL_JOIN` — 현재 doc/page의 근거가 아님
+- current original-grounded analysis: **GW `RETRIEVAL_BORDERLINE / CRITICAL_ERROR` · VL retry-01 `RETRIEVAL_PASS / NO_MATERIAL_ERROR` · winner `VL` · `VL_BENEFICIAL=true`**
+- comparison evidence: 원본 원고 `손세라`; GW `순세라`; VL retry는 `손세라`와 보이는 날짜·금액을 보존.
 - current v1: `accept_gw` — no hard-fail reason
-- chars: GW 500 / VL 0 · errors: GW `-'` / VL `empty'`
+- initial run metrics (history): GW 500 chars / VL 0 chars · errors: GW `-'` / VL `empty'`; 현행 비교는 위 VL retry-01 판정과 아래 전문 사용
 - VL empty retry-01: **1,591 chars · `RETRIEVAL_PASS` · `VL_BENEFICIAL=true`** —
   원고 `손세라`와 표의 날짜·금액을 보존해 GW의 `순세라` identity error를 복구.
   [retry output](retries/vl-empty-retry-01/normalized/I46_01_동탄2신도시_관토신_서울중앙_분양대금반환_김은현외17_소장_pdf_p65_vl.md) ·
@@ -930,7 +968,8 @@ G-well PRUGIO 평택비전지웰푸르지오 입주자대표회의
 
 ## I49 · source index 49 · original p4
 
-- historical GW label: `EXCLUDED_INVALID_POSITIONAL_JOIN` — 현재 doc/page의 근거가 아님
+- current original-grounded analysis: **GW `RETRIEVAL_PASS / MINOR_ERROR` · VL `RETRIEVAL_FAIL / CRITICAL_ERROR / TRUNCATED` · winner `GW` · `VL_BENEFICIAL=false`**
+- comparison evidence: GW는 `2023.6.30/2023.12.30`과 사건번호를 보존; VL은 첫 문장에서 절단.
 - current v1: `accept_gw` — no hard-fail reason
 - chars: GW 742 / VL 82 · errors: GW `-'` / VL `-'`
 - exact input: [`page_images/I49_05_안산시_성곡동_관토신_책준_안산지원_매매대금반환_박신숙_판결문_pdf_p4.jpg`](page_images/I49_05_안산시_성곡동_관토신_책준_안산지원_매매대금반환_박신숙_판결문_pdf_p4.jpg) · sha256 `19f71e068bb455215ec1bde78810c45b0b07676efeefb749135a0e93ac10152b`
@@ -981,7 +1020,8 @@ G-well PRUGIO 평택비전지웰푸르지오 입주자대표회의
 
 ## I56 · source index 56 · original p44
 
-- historical GW label: `EXCLUDED_INVALID_POSITIONAL_JOIN` — 현재 doc/page의 근거가 아님
+- current original-grounded analysis: **GW `RETRIEVAL_BORDERLINE / CRITICAL_ERROR` · VL `RETRIEVAL_BORDERLINE / CRITICAL_ERROR / HALLUCINATION_CONFIRMED` · winner `BOTH_FAIL` · `VL_BENEFICIAL=false`**
+- comparison evidence: 양쪽 모두 당사자명·주소를 훼손하고, VL은 등록번호 숫자를 생성/혼합하며 대표자를 변경. 금액만 보존.
 - current v1: `accept_gw` — no hard-fail reason
 - chars: GW 2124 / VL 1794 · errors: GW `-'` / VL `-'`
 - exact input: [`page_images/I56_01_고양시_향동동_관토신_서울중앙_분양대금반환_등_이동배_외4_소장_pdf_p44.jpg`](page_images/I56_01_고양시_향동동_관토신_서울중앙_분양대금반환_등_이동배_외4_소장_pdf_p44.jpg) · sha256 `2a507c5c3c473a2c71670d720e5456332256c59d00661b96ef433d4a5380ac3c`
