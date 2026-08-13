@@ -225,6 +225,41 @@ Rust, `crates/edgequake-pipeline`. passthrough 로 facade 청크를 받아 추�
 {"type":"equation", "latex":"…", "text_format":"latex", "page_idx":0}
 ```
 
+### 7.1-B PageTrace — 페이지별 관측 (Phase 2b-1, 2026-08-13)
+
+`/parse` 응답의 **`page_traces`** — "이 페이지가 어느 레인으로 갔고, **무엇이 최종 blocks 를
+만들었고**, 무슨 일이 있었나". `page_verdicts`(게이트 대상 **부분집합**)와 **공존**한다.
+
+```
+{"page_number", "bucket", "lane", "source", "attempts", "chars",
+ "verdict", "state", "verdict_reason"}
+```
+
+**`source` 어휘** — 무엇이 최종 blocks 를 만들었나:
+
+| 값 | 뜻 |
+|---|---|
+| `gw` | 게이트웨이 산출물 그대로 |
+| `gw_hybrid` | hybrid 가 전면 VL 로 교체 — **`gw` 와 구분 필수**(내용이 게이트웨이 것이 아니다) |
+| `vl` | VL 전사 |
+| `vl_md_fallback` | VL 이 비어 ODL md 가 채움(2a 현행 동작 — 2b-2 가 제거 검토) |
+| `odl_md` | odl 레인 정상 경로 |
+| `skip` | SKIP 페이지 — **내용 없음이 정상** |
+| `unclassified` | 방어코드. 값이 나오면 **라우팅 버그 신호** |
+| **`empty`** | 어느 경로도 못 구했다 = **품질 상한 지표** |
+
+⚠️ **`skip`·`unclassified` 는 `empty` 로 덮지 않는다**(`_EMPTY_IS_NORMAL`) —
+정상적으로 비는 경로와 실패를 섞으면 "품질 상한" 이 거짓이 된다.
+게이트 quarantine 도 `source` 를 바꾸지 않는다(blocks 를 비울 뿐 — `verdict` 로 표현).
+
+**`source` 확정 시점 = `RouteResult` 생성 뒤**. 병합 루프 뒤에 blocks 를 바꾸는 곳이 셋이다:
+`_supplement_diagram_pages`(append) · 게이트 quarantine(비움) ·
+**`filter_degenerate_pages`(`parse()` 안, 생성 **뒤** → `_refresh_trace_sources` 가 갱신)**.
+
+**`attempts`** — `(stage, outcome, meta)`. `meta` 에 `model`·`tokens`·`finish`.
+**`finish` 가 처방을 가른다**: `length`(상한 소진 → 상한을 올린다) vs
+`stop`+짧은 응답(서빙이 스스로 끊음 → 서빙을 본다). `provider` 는 안 남긴다(폐쇄망 자체 서빙).
+
 ### 7.2 청크 메타데이터 (chunk → 적재)
 `{doc_id, kb_id, chunk_order_index, page_idx, titles_context, block_type, modal_id?}` — `modal_id`=모달청크 식별, `source_id`=edgequake chunk id 와 정합.
 
