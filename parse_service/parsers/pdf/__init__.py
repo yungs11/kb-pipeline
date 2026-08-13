@@ -737,11 +737,17 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
                     vl_by_pno[n] = [] if failed else els
                     vl_blocks_by_pno[n] = blocks
                     last_outcome[n] = outcome
-                # 재시도 대상 = **vl 레인 중 아직 blocks 를 못 얻은 것**.
-                # thin·강등 paddle 은 1회로 끝낸다(사용자 확정 배분).
+                # 재시도 대상 = **아직 blocks 를 못 얻은 모든 전사 페이지**.
+                # **실패 범위와 재시도 범위를 같게 맞춘다**(2026-08-14 조정) — "VL 이
+                # 실패하면 문서가 죽는다" 면 "VL 실패는 재시도한다" 도 같은 집합이어야
+                # 규칙이 하나로 설명된다. 이전에는 `n in vl_pnos` 로 좁혀서 thin·강등
+                # paddle 이 **1회로 끝났는데**, 하필 강등 paddle 은 게이트웨이 장애를
+                # 이미 한 번 겪은 페이지라 **오탐이 가장 나기 쉬운 자리에 기회가 가장
+                # 적었다.** 절단 회복률 80% 실측(정의서 15p)이 그 기회의 값을 보여준다.
+                # 비용은 정상 시 0 — 대상이 **실패한 페이지뿐**이라 vl:ok 면 안 늘어난다.
                 # 마지막 시도가 **절단류**인 페이지만 추가 1회를 더 받는다.
                 todo = [(n, rp) for n, rp in todo
-                        if n in vl_pnos and not vl_blocks_by_pno.get(n)
+                        if not vl_blocks_by_pno.get(n)
                         and _attempt < (attempts_trunc
                                         if last_outcome.get(n) in _TRUNCATION_OUTCOMES
                                         else attempts_max)]

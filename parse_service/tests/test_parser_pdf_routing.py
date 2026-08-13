@@ -333,7 +333,8 @@ def test_thin_page_vl_failure_fails_document(wire, monkeypatch):
     평문은 표·레이아웃이 다 날아갔는데 **자수는 멀쩡해 성공으로 보인다.**
     사용자 결정(2026-08-14): VL 실패는 폴백하지 말고 멈춘다.
 
-    thin 은 재시도 대상이 아니다(2회차는 vl 레인 한정) — 호출 1회로 끝난다.
+    **재시도 범위 = 실패 범위**(2026-08-14 조정) — VL 을 부른 페이지면 레인과 무관하게
+    재시도를 받는다. 절단이므로 총 3회.
     """
     calls = []
 
@@ -347,7 +348,7 @@ def test_thin_page_vl_failure_fails_document(wire, monkeypatch):
     wire["set_md"](["   "])
     with pytest.raises(ParserError, match="vl_failed"):
         pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
-    assert len(calls) == 1, "thin 은 재시도 대상이 아니다(2회차는 vl 레인 한정)"
+    assert len(calls) == 3, f"thin 도 재시도를 받는다(절단이므로 3회): {calls}"
 
 
 def test_native_fallback_survives_degen_filter_on_toc(wire, monkeypatch):
@@ -811,3 +812,27 @@ def test_attempts_env_scales_both_limits(wire, monkeypatch):
     with pytest.raises(ParserError, match="vl_failed"):
         pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
     assert len(calls) == 2, f"기본 1 → 절단 2: {calls}"
+
+
+def test_demoted_paddle_page_also_gets_retries(wire, monkeypatch):
+    """**강등 paddle 페이지도 재시도를 받는다** — 실패 범위와 재시도 범위를 맞춘다.
+
+    강등은 게이트웨이가 죽어 VL 로 내려온 스캔 페이지다. 즉 **이미 한 번 사고를 겪은
+    페이지**인데, 예전에는 재시도 대상이 `vl_pnos` 뿐이라 여기서 VL 이 한 번만 불렸다 —
+    인프라 두 곳이 동시에 삐끗하면 문서가 통째로 죽었다. **오탐이 가장 나기 쉬운 자리에
+    기회가 가장 적은** 배분이었다(2026-08-14 조정).
+
+    절단 회복률 80% 실측(정의서 15p)이 그 기회의 값을 보여준다.
+    """
+    calls = []
+    monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages",
+                        lambda jobs, ocr_url=None, **k: calls.append(len(jobs)) or [
+                            ([{"category": "text", "content": {"markdown": _BAD_VL}, "page": 0}], [])
+                            for _ in jobs])
+    wire["set_gate"](_decision({1: "paddle_gw"}))
+    # status=="error" 가 demote 조건이다(§4a).
+    wire["set_gw"]([{"page_number": 1, "blocks": [], "layout": [], "page_size": None,
+                     "status": "error", "error": "TimeoutError: poll"}])
+    with pytest.raises(ParserError, match="vl_failed"):
+        pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    assert len(calls) == 3, f"강등 페이지도 절단이면 3회 받는다: {calls}"
