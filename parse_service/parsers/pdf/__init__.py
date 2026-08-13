@@ -699,8 +699,10 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
     # ── 8) trace 조립(Phase 2b-1 관측) ────────────────────────────────────────
     # **`source` 는 여기서 최종 확정한다** — 병합 루프 뒤에 blocks 를 바꾸는 곳이 있다:
     #   · `_supplement_diagram_pages`(append) — 비었던 페이지가 채워질 수 있다
-    #   · 게이트 quarantine — blocks 를 비운다. 단 `source` 는 **안 바꾼다**(무엇이
-    #     처리했나는 그대로다). `verdict`/`state` 로 표현한다.
+    #   · 게이트 quarantine — blocks 를 비운다. 그 결과 아래 728행이 `source` 를
+    #     `empty` 로 덮는다(quarantine 은 `_EMPTY_IS_NORMAL` 이 아니다). 무엇이
+    #     처리했었나는 `verdict`/`state` 에 남아 구분은 가능하다
+    #     (`source=empty` + `verdict=quarantine`). 2026-08-14 실측 확인.
     # ⚠️ `filter_degenerate_pages` 는 `parse()` 안, RouteResult 생성 **뒤**라 여기서
     #    못 잡는다 — `parse()` 가 삭제 후 갱신한다(아래 `_refresh_trace_sources`).
     if odl_error:
@@ -749,7 +751,12 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
 
 
 #: 정상적으로 빈 blocks 로 끝나는 경로 — `empty`(실패)로 덮어쓰지 않는다.
-#: 게이트 quarantine 은 `source` 를 안 바꾸므로(verdict 로 표현) 여기 없어도 된다.
+#: ⚠️ 게이트 quarantine 은 **여기 없다** — 그래서 `source` 가 `empty` 로 덮인다.
+#: 2026-08-14 실측(VL 전면 실패 주입, 3레인 합성 7p): `empty` 가 나오는 경로는
+#: quarantine **하나뿐**이었다(스캔 2p). VL 레인은 VL 이 죽어도 네이티브 텍스트가
+#: 받아내 `vl_md_fallback` 로 살고, odl 레인은 애초에 VL 을 안 쓴다.
+#: → 2b-2 의 "문서 실패" 규칙을 `empty` 기준으로 세우면 곧 **quarantine 기준**이 된다.
+#:   quarantine 은 v1 이 의도적으로 비운 것이므로 그 승격은 설계 결정이다(사용자 판단 대기).
 _EMPTY_IS_NORMAL = frozenset({"skip", "unclassified"})
 
 
