@@ -3,13 +3,14 @@
 SKIP→skip / OCR_NEEDED→paddle_gw / TEXT_ONLY·LLM_NEEDED→odl.
 문서수준 `vl` 레인은 삭제됐다(그림 비율만 보고 문서 전체를 VL 로 넘겨 표를 깨뜨리던 경로).
 """
+import json
 import logging
 
 import pytest
 
 import parse_service.parsers.pdf as pdf_parser
 import parse_service.parsers.pdf.paddle_gw as pg
-from parse_service.parsers import RouteResult
+from parse_service.parsers import ParserError, RouteResult
 from parse_service.parsers.pdf.gate import RouteDecision
 from parse_service.parsers.pdf.triage import Bucket, PageSignals
 
@@ -311,23 +312,28 @@ def test_transcribe_rejects_truncated_response(wire, monkeypatch, raw):
                             for _ in jobs])
     wire["set_gate"](_decision({1: "odl"}))
     wire["set_md"](["   "])
-    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
-    text = _texts(res.pages, 1)
-    assert "```json" not in text and "[Error:" not in text, \
-        f"잘린 raw JSON·에러 플레이스홀더가 본문이 되면 안 된다: {text!r}"
-    assert "native-text-p1" in text, "네이티브 텍스트가 있으면 그것으로 폴백한다"
+    # 2b-2: 폴백을 지웠으므로 **문서 실패**가 정답이다. 그래도 raw JSON 은 어디에도
+    # 실리면 안 된다 — 탐지기(_looks_like_failed_vl)를 지우면 이게 본문이 된다.
+    with pytest.raises(ParserError) as ei:
+        pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    dumped = json.dumps(ei.value.traces, ensure_ascii=False)
+    assert "```json" not in dumped and "[Error:" not in dumped, \
+        f"잘린 raw JSON·에러 플레이스홀더가 어디에도 실리면 안 된다: {dumped[:200]!r}"
+    assert ei.value.traces[0]["source"] == "empty" and ei.value.traces[0]["chars"] == 0
 
 
 _BAD_VL = '```json\n{\n  "elements": [\n    {\n      "content": {'
 
 
-def test_transcribe_failure_falls_back_to_native_text(wire, monkeypatch):
-    """VL 전사 실패 페이지는 **네이티브 텍스트로 폴백**한다(빈 페이지 금지).
+def test_thin_page_vl_failure_fails_document(wire, monkeypatch):
+    """thin 페이지에서 VL 이 실패하면 **문서 파싱 실패**다 — 네이티브 폴백은 없다(2b-2).
 
-    실패 원인은 절단이 아니라 모델측 퇴화다(2026-08-04 실측: arXiv p5 목차가 leader dot
-    반복 루프에 빠져 `finish_reason="stop"`, `completion_tokens=226`/상한 8000).
-    **재시도는 무효**였다 — 회복률 0%(5/5). `temperature=0.1` 이라 같은 이미지는 같은 실패를
-    반복한다. 이 경로는 정의상 네이티브 텍스트가 있는 odl 레인이므로 그것을 쓴다.
+    **정책 반전 기록**: 이 테스트는 원래 "네이티브 텍스트로 폴백한다" 를 지켰다.
+    그 폴백이 바로 "122b 가 아픈데 결과물이 정상으로 보이는" 원인이었다 — PyMuPDF
+    평문은 표·레이아웃이 다 날아갔는데 **자수는 멀쩡해 성공으로 보인다.**
+    사용자 결정(2026-08-14): VL 실패는 폴백하지 말고 멈춘다.
+
+    thin 은 재시도 대상이 아니다(2회차는 vl 레인 한정) — 호출 1회로 끝난다.
     """
     calls = []
 
@@ -339,12 +345,9 @@ def test_transcribe_failure_falls_back_to_native_text(wire, monkeypatch):
     monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages", fake_batch)
     wire["set_gate"](_decision({1: "odl"}))
     wire["set_md"](["   "])
-    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
-
-    assert len(calls) == 1, "재시도하지 않는다(temperature 0.1 — 같은 실패 반복)"
-    text = _texts(res.pages, 1)
-    assert "native-text-p1" in text, f"네이티브 텍스트로 폴백해야 한다: {text!r}"
-    assert "```json" not in text, "잘린 raw JSON 이 본문이 되면 안 된다"
+    with pytest.raises(ParserError, match="vl_failed"):
+        pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    assert len(calls) == 1, "thin 은 재시도 대상이 아니다(2회차는 vl 레인 한정)"
 
 
 def test_native_fallback_survives_degen_filter_on_toc(wire, monkeypatch):
@@ -373,14 +376,21 @@ def test_native_fallback_survives_degen_filter_on_toc(wire, monkeypatch):
                         lambda fb, page_numbers=None, **k: [_RP(1, text=toc)])
     wire["set_gate"](_decision({1: "odl"}))
     wire["set_md"](["   "])
-    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    # 2b-2: 네이티브 폴백이 사라졌으므로 이 페이지는 빈 채로 실패한다.
+    # 이 테스트가 지키는 것은 **degen 오탐이 없다**는 사실(위 단언)이고, 그건 그대로다.
+    with pytest.raises(ParserError, match="vl_failed"):
+        pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
 
-    text = _texts(res.pages, 1)
-    assert "Chapter 7 Title" in text, f"목차 본문이 살아남아야 한다: {text[:120]!r}"
 
+def test_escape_hatch_keeps_empty_page_instead_of_failing(wire, monkeypatch):
+    """`KBP_FAIL_ON_EMPTY_PAGE=0` 이면 실패시키지 않는다 — **탈출구**(폐쇄망 되돌리기).
 
-def test_transcribe_failure_without_native_text_yields_empty(wire, monkeypatch):
-    """네이티브 텍스트마저 없으면 빈 결과 — 잘린 raw JSON 을 싣지 않는다."""
+    ⚠️ 끈다고 **이전 동작이 복원되지 않는다** — 폴백은 이미 삭제됐으므로
+    끄면 "빈 본문이 조용히 적재" 된다. 그 대가를 알고 켜야 한다.
+    가드는 읽는 코드가 있어야 가드다 — 선언만 하고 소비처가 없으면 grep 검증이
+    0줄인 채로 통과해버린다(CLAUDE.md).
+    """
+    monkeypatch.setenv("KBP_FAIL_ON_EMPTY_PAGE", "0")
     monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages",
                         lambda jobs, ocr_url=None, **k: [
                             ([{"category": "text", "content": {"markdown": _BAD_VL}, "page": 0}], [])
@@ -390,7 +400,8 @@ def test_transcribe_failure_without_native_text_yields_empty(wire, monkeypatch):
     wire["set_gate"](_decision({1: "odl"}))
     wire["set_md"](["   "])
     res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
-    assert _texts(res.pages, 1) == "", "네이티브 텍스트도 없으면 빈 결과여야 한다"
+    assert _texts(res.pages, 1) == "", "잘린 raw JSON 은 여전히 본문이 되면 안 된다"
+    assert res.page_traces[0]["source"] == "empty"
 
 
 def test_odl_process_failure_falls_back_to_vl(wire, monkeypatch):
@@ -722,10 +733,15 @@ def test_page_traces_vl_error_distinguished_from_empty(wire, monkeypatch):
     monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages", boom)
     wire["set_gate"](_decision({1: "vl"}))
     wire["set_md"]([""])
-    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
-    atts = res.page_traces[0]["attempts"]
+    # 2b-2: vl 레인 실패는 문서 실패다. 그래도 **관측은 살아 있어야** 한다 —
+    # 실패한 문서에서만 trace 가 0 이 되면 "실패를 드러낸다" 는 목적이 무효가 된다.
+    with pytest.raises(ParserError) as ei:
+        pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    atts = ei.value.traces[0]["attempts"]
     assert any(a[1] == "error" and "RuntimeError" in str(a[2].get("error", ""))
                for a in atts), f"배치 전체 실패 사유가 남아야 한다: {atts}"
+    assert sum(1 for a in atts if a[0] == "vl") == 2, \
+        f"vl 레인은 총 2회 호출한다(최초 1 + 재시도 1): {atts}"
 
 
 def test_page_traces_gw_hybrid_distinguished_from_gw(wire, monkeypatch):
@@ -741,3 +757,57 @@ def test_page_traces_gw_hybrid_distinguished_from_gw(wire, monkeypatch):
                      "layout": [], "page_size": None, "status": "ok", "error": ""}])
     res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
     assert res.page_traces[0]["source"] == "gw_hybrid"
+
+
+def test_truncation_gets_one_extra_retry(wire, monkeypatch):
+    """**절단만** 재시도를 한 번 더 받는다(기본 2 → 절단 3).
+
+    절단은 모델 퇴화가 아니라 **프로바이더 사정**일 수 있어 재호출에서 다른
+    프로바이더에 걸리면 살아난다 — 2026-08-14 실측: 정의서 p9·p12 가 2회 다
+    절단됐는데, 같은 문서가 다른 실행에선 15/15 성공했다(프로바이더 복권).
+    전송오류·빈응답은 그 성질이 아니므로 기본 횟수 그대로다.
+    """
+    calls = []
+
+    def truncating(jobs, ocr_url=None, **k):
+        calls.append(len(jobs))
+        return [([{"category": "text", "content": {"markdown": _BAD_VL}, "page": 0}], [])
+                for _ in jobs]
+
+    monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages", truncating)
+    wire["set_gate"](_decision({1: "vl"}))
+    wire["set_md"]([""])
+    with pytest.raises(ParserError, match="vl_failed"):
+        pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    assert len(calls) == 3, f"절단은 총 3회(기본 2 + 1): {calls}"
+
+
+def test_empty_response_does_not_get_the_extra_retry(wire, monkeypatch):
+    """빈 응답(B형)은 추가 1회를 **안 받는다** — 절단과 성질이 다르다."""
+    calls = []
+
+    def empty(jobs, ocr_url=None, **k):
+        calls.append(len(jobs))
+        return [([], []) for _ in jobs]
+
+    monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages", empty)
+    wire["set_gate"](_decision({1: "vl"}))
+    wire["set_md"]([""])
+    with pytest.raises(ParserError, match="vl_failed"):
+        pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    assert len(calls) == 2, f"빈 응답은 기본 2회: {calls}"
+
+
+def test_attempts_env_scales_both_limits(wire, monkeypatch):
+    """`KBP_VL_PAGE_ATTEMPTS` 를 올리면 절단 한도도 **파생해서** 따라 오른다(+1)."""
+    monkeypatch.setenv("KBP_VL_PAGE_ATTEMPTS", "1")
+    calls = []
+    monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages",
+                        lambda jobs, ocr_url=None, **k: calls.append(len(jobs)) or [
+                            ([{"category": "text", "content": {"markdown": _BAD_VL}, "page": 0}], [])
+                            for _ in jobs])
+    wire["set_gate"](_decision({1: "vl"}))
+    wire["set_md"]([""])
+    with pytest.raises(ParserError, match="vl_failed"):
+        pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    assert len(calls) == 2, f"기본 1 → 절단 2: {calls}"

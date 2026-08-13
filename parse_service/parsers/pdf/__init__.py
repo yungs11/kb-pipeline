@@ -5,6 +5,7 @@ import logging
 import collections
 import os
 import re
+import time
 
 from parse_service.parsers import RouteResult, ParserError
 from parse_service.tools import ToolError
@@ -103,6 +104,12 @@ def _strip_leader_dots(text: str) -> str:
     `degen_filter` 쪽 임계는 건드리지 않는다 — 그 오탐은 별건이다.
     """
     return _LEADER_SPACED.sub(" ", _LEADER_RUN.sub(" ", text))
+
+
+#: `_looks_like_failed_vl` 이 내는 값 = **A형**(응답은 왔는데 망가진 형태).
+#: 이 유형만 재시도를 한 번 더 받는다 — 원인이 모델 퇴화가 아니라 **프로바이더** 일 수
+#: 있어 재호출에서 다른 프로바이더에 걸리면 살아나기 때문이다(2026-08-14 실측).
+_TRUNCATION_OUTCOMES = frozenset({"truncated", "error_placeholder"})
 
 
 def _looks_like_failed_vl(elements: list[dict]) -> str | None:
@@ -398,7 +405,61 @@ def parse(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteResult:
         # 퇴화 필터는 `RouteResult` 생성 **뒤**에 blocks 를 지운다 — trace 의
         # `source`/`chars` 가 그대로면 "품질 상한 = empty 비율" 이 거짓이 된다(2b-1 §1).
         _refresh_trace_sources(res)
+    _fail_if_vl_empty(res, filename)
     return res
+
+
+#: VL 시도가 **성공으로 끝나지 않은** 것으로 보는 outcome. 판정은 "ok 가 하나도 없다" 로
+#: 하므로 이 집합은 로그·진단용이다.
+_VL_FAILURE_OUTCOMES = frozenset({
+    "error", "truncated", "error_placeholder", "empty_result",
+    "not_rendered", "budget_exhausted",
+})
+
+
+def _fail_if_vl_empty(res: RouteResult, filename: str) -> None:
+    """VL 이 끝내 아무것도 못 낸 페이지가 있으면 **문서 전체를 실패**시킨다(Phase 2b-2).
+
+    판정식 — 페이지 p 가 실패:
+        source(p) == "empty"                    # 결국 아무 내용도 못 냈다
+        ∧ p 고유 attempts 에 stage=="vl" 이 있다  # VL 을 부르긴 했다
+        ∧ 그중 outcome=="ok" 가 **하나도 없다**   # 재시도로도 못 살렸다
+
+    **세 조건이 모두 필요하다.**
+    · `empty` 단독 → `skip`(내용 없음이 정상)·미분류·퇴화필터 전량제거(`all_removed`)가
+      섞여 **정상 문서가 죽는다.**
+    · "실패 발자국이 하나라도 있으면" → 1회차 실패 후 **재시도로 살아난** 페이지가
+      이후 퇴화필터로 비면 죽는다(leader-dot 목차가 그 최빈 조합이다).
+    · `stage=="vl"` 한정 → 게이트 quarantine 의 발자국은 `hybrid_vl` 이라 **자동 제외**된다.
+      quarantine 은 v1 이 의도적으로 비운 것이므로 실패가 아니다(사용자 확정).
+    """
+    traces = res.page_traces or []
+    if not traces:
+        return
+    bad = []
+    for t in traces:
+        if t.get("source") != "empty":
+            continue
+        pno = t.get("page_number")
+        # pno=0 문서사건(`_att(0,"odl","failed")`)은 **전 페이지 trace 에 복제**된다.
+        # 그대로 세면 ODL 이 실패한 문서(현행 계약상 VL 로 정상 산출)가 오발 실패한다.
+        vl = [a for a in (t.get("attempts") or [])
+              if len(a) >= 2 and a[0] == "vl" and (a[2] or {}).get("attempt")]
+        if not vl or any(a[1] == "ok" for a in vl):
+            continue
+        bad.append((pno, [a[1] for a in vl]))
+    if not bad:
+        return
+    # **탈출구** — 켜고 끄는 스위치가 없으면 폐쇄망에서 되돌릴 방법이 없다.
+    # ⚠️ 끄면 "이전 동작 복원" 이 아니라 **빈 본문이 조용히 적재**된다(폴백은 이미 없다).
+    if os.environ.get("KBP_FAIL_ON_EMPTY_PAGE", "1") == "0":
+        log.warning("KBP_FAIL_ON_EMPTY_PAGE=0 — VL 실패 %d페이지를 실패로 올리지 않는다: %s (%s)",
+                    len(bad), bad, filename)
+        return
+    detail = ", ".join(f"p{p}({'/'.join(o)})" for p, o in bad)
+    log.error("VL 전사 실패로 문서 파싱 실패 — %d페이지: %s (%s)", len(bad), detail, filename)
+    raise ParserError(f"vl_failed: {len(bad)} page(s) empty — {detail}",
+                      traces=traces)
 
 
 def _refresh_trace_sources(res: RouteResult) -> None:
@@ -586,60 +647,104 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
     by_pno = {rp.page_number: rp for rp in (rendered or [])}
 
     vl_by_pno: dict[int, list[dict]] = {}
+    # Phase 2b-2: blocks 를 step4 에서 확정한다 — 재시도 판정 기준이 "최종 blocks" 인데
+    # 그게 step5 에서 생기면 재호출에 필요한 jpeg/prompt 가 스코프 밖이기 때문이다.
+    vl_blocks_by_pno: dict[int, list[dict]] = {}
     if transcribe_pnos:
         # jobs 와 되매핑 키를 **같은 필터에서 동시에** 만든다 — 따로 만들면 렌더 부재 페이지에서
         # 한 칸씩 밀려 다른 페이지의 전사가 붙는다.
         pairs = [(n, by_pno[n]) for n in sorted(transcribe_pnos) if n in by_pno]
+        # 렌더가 안 된 페이지는 배치에도 _att 에도 안 들어가 **발자국 없이 빈 채 통과**한다
+        # (render_pdf_pages 는 한 페이지 예외로 문서 전체 [] 를 낸다 — 전 페이지 규모).
+        # 폴백 제거 후 그 페이지는 source="empty" 인데 vl 발자국이 없어 실패 판정이
+        # 발화하지 않는다 → 목표의 정면 사각지대. hybrid 의 render_failed 와 대칭으로 남긴다.
+        for _n in sorted(transcribe_pnos - {n for n, _ in pairs}):
+            _att(_n, "vl", "not_rendered")
         if pairs:
             # **max_tokens 를 반드시 넘긴다** — 기본값 2000 으로는 조밀한 본문 페이지가 절단된다
             # (2026-08-04 실측: arXiv 논문 p6 2526자가 응답 절단으로 빈 페이지가 됐고, 상한을
             # 올리자 1438자로 복구). hybrid 경로와 같은 상한을 쓴다.
             # ※ 상한을 올려도 남는 실패가 있다 — 아래 재시도 블록의 모델측 퇴화 참조.
             page_max_tokens = int(os.environ.get("KBP_VL_PAGE_MAX_TOKENS", "8000"))
-            try:
-                _paired = _ocr_elements_for_pages(
-                    [(rp.jpeg, f"page-{n}.jpeg") for n, rp in pairs], ocr_url,
-                    max_tokens=page_max_tokens)
-                batch = [els for els, _m in _paired]
-                batch_metas = [m for _e, m in _paired]
-            except Exception as exc:  # noqa: BLE001 — 배치 전체 실패도 비치명
-                # **삼킴 3층**(2b-1): 배치 전체 실패는 meta 자체가 없다 —
-                # 여기서 호출부가 사유를 만들어 준다.
-                log.exception("VL 전사 배치 실패 (%s)", filename)
-                batch = [[] for _ in pairs]
-                batch_metas = [[{"error": f"{type(exc).__name__}: {str(exc)[:120]}"}]
-                               for _ in pairs]
-            for (n, rp), els, metas in zip(pairs, batch, batch_metas):
-                for _m in (metas or [None]):
-                    md_ = (_m.to_dict() if hasattr(_m, "to_dict")
-                           else (_m if isinstance(_m, dict) else {}))
-                    _att(n, "vl", "error" if md_.get("error") else "ok", md_)
-                # 절단·에러 플레이스홀더는 "성공처럼 보이는 실패" 다 — 잘린 raw JSON 이 그대로
-                # 본문 블록이 되는 것을 막는다(hybrid 경로와 동일 판정).
-                failed = _looks_like_failed_vl(els)
-                if not failed:
-                    vl_by_pno[n] = els
-                    continue
-                # ── VL 실패 → **네이티브 텍스트 폴백** ────────────────────────────────
-                # 실패 원인은 절단이 아니라 모델측 퇴화다(2026-08-04 실측: arXiv p5 목차가
-                # leader dot `. . . .` 반복 루프에 빠졌다가 finish_reason="stop",
-                # completion_tokens=226/상한 8000 으로 스스로 끊음).
-                # **재시도는 무효였다** — 실측 회복률 0%(5/5 실패). `temperature=0.1`
-                # (vl_api.py:196)이라 같은 이미지는 같은 실패를 반복한다.
-                # 반면 이 경로에 오는 페이지는 **정의상 네이티브 텍스트를 가진 odl 레인**이라
-                # (p5 4002자·p6 2527자) PyMuPDF 추출본이 빈 페이지보다 낫다. 렌더 시 이미
-                # 뽑아둔 `RenderedPage.text`(pdf_pages.py:59)를 쓰므로 추가 비용이 없다.
-                native = _strip_leader_dots(getattr(rp, "text", "") or "").strip()
-                if native:
-                    log.warning("VL 전사 %s — page %d, 네이티브 텍스트 %d자로 폴백 (%s)",
-                                failed, n, len(native), filename)
-                    vl_by_pno[n] = [{"category": "text",
-                                     "content": {"markdown": native},
-                                     "page": n - 1}]
-                else:
-                    log.warning("VL 전사 %s — page %d, 네이티브 텍스트도 없음 (%s)",
-                                failed, n, filename)
-                    vl_by_pno[n] = []
+            # ── Phase 2b-2: 같은 VL 로 재시도, 폴백 없음 ──────────────────────────
+            # **폴백을 지웠다**(네이티브 텍스트·ODL md 둘 다). 122b 가 아픈데 다른 출처로
+            # 조용히 채워지면 열화를 볼 방법이 없다 — 실패는 실패로 드러낸다.
+            # 호출 시점 env 조회(모듈 상수로 두면 monkeypatch.setenv 가 안 먹는다).
+            attempts_max = max(1, min(5, int(
+                os.environ.get("KBP_VL_PAGE_ATTEMPTS", "2") or "2")))
+            # **절단은 기회를 한 번 더 준다** — A형(절단·에러 플레이스홀더)은 모델 퇴화가
+            # 아니라 **프로바이더 사정**인 경우가 있어 재호출에서 다른 프로바이더에 걸리면
+            # 살아난다(2026-08-14 실측: 정의서 p9·p12 가 2회 다 절단됐는데 같은 문서가 다른
+            # 실행에선 15/15 성공 — 프로바이더 복권). 전송오류·빈응답은 그 성질이 아니다.
+            # **기본값에서 파생**한다 — 별도 env 를 만들면 폐쇄망 선언처가 또 늘고
+            # 두 값이 어긋날 수 있다(기본 2 → 절단 3).
+            attempts_trunc = min(5, attempts_max + 1)
+            last_outcome: dict[int, str] = {}
+            budget_s = float(os.environ.get("KBP_VL_DOC_BUDGET_S", "3600") or "3600")
+            _vl_t0 = time.monotonic()
+            todo = list(pairs)                       # 1회차 = transcribe_pnos 전체
+            for _attempt in range(1, attempts_trunc + 1):
+                if not todo:
+                    break
+                if _attempt > 1 and budget_s > 0 and (time.monotonic() - _vl_t0) >= budget_s:
+                    # 예산은 **배치 시작 전에만** 검사한다(진행 중 중단 없음).
+                    log.warning("VL 예산 %ds 소진 — 재시도 %d회차 포기, %d페이지 (%s)",
+                                int(budget_s), _attempt, len(todo), filename)
+                    for n, _rp in todo:
+                        _att(n, "vl", "budget_exhausted", {"attempt": _attempt})
+                    break
+                counters["vl_page_calls"] += len(todo)   # 재시도 비용도 지표에 잡는다
+                try:
+                    _paired = _ocr_elements_for_pages(
+                        [(rp.jpeg, f"page-{n}.jpeg") for n, rp in todo], ocr_url,
+                        max_tokens=page_max_tokens)
+                    batch = [els for els, _m in _paired]
+                    batch_metas = [m for _e, m in _paired]
+                except Exception as exc:  # noqa: BLE001 — 배치 전체 실패도 비치명
+                    # **삼킴 3층**(2b-1): 배치 전체 실패는 meta 자체가 없다 —
+                    # 여기서 호출부가 사유를 만들어 준다.
+                    log.exception("VL 전사 배치 실패 (%s)", filename)
+                    batch = [[] for _ in todo]
+                    batch_metas = [[{"error": f"{type(exc).__name__}: {str(exc)[:120]}"}]
+                                   for _ in todo]
+                if not (len(batch) == len(batch_metas) == len(todo)):
+                    # zip 은 짧은 쪽에서 조용히 끊긴다 — 페이지가 통째로 관측을 잃는다.
+                    log.error("VL 배치 길이 불일치 todo=%d batch=%d metas=%d (%s)",
+                              len(todo), len(batch), len(batch_metas), filename)
+                    batch = (batch + [[]] * len(todo))[:len(todo)]
+                    batch_metas = (batch_metas + [[]] * len(todo))[:len(todo)]
+                for (n, _rp), els, metas in zip(todo, batch, batch_metas):
+                    md_: dict = {}
+                    for _m in (metas or [None]):
+                        md_ = (_m.to_dict() if hasattr(_m, "to_dict")
+                               else (_m if isinstance(_m, dict) else {}))
+                        if md_.get("error"):
+                            break            # 실패 meta 를 우선 채택(진단 가치가 크다)
+                    # 절단·에러 플레이스홀더는 "성공처럼 보이는 실패" 다 — 잘린 raw JSON 이
+                    # 그대로 본문 블록이 되는 것을 막는다(hybrid 경로와 동일 판정).
+                    # **탐지기는 유지한다** — 이걸 빼면 절단 JSON 이 category=text 블록
+                    # 하나로 통과해 본문에 실린다(폴백만 지우면 목표가 뒤집힌다).
+                    failed = _looks_like_failed_vl(els)
+                    blocks = [] if failed else vl_elements_to_blocks(
+                        els, page_idx=n, adopt_vl_table=True, counters=counters)
+                    # ⚠️ `empty_result` 는 **els(VL 응답) 기준**이다. blocks 기준으로 하면
+                    #    이미지 전용 페이지(blockify 손실)가 문서를 죽인다.
+                    outcome = ("error" if md_.get("error")
+                               else failed or ("empty_result" if not els else "ok"))
+                    _att(n, "vl", outcome,
+                         {**md_, "attempt": _attempt,
+                          **({"blockify_empty": True} if els and not blocks else {})})
+                    vl_by_pno[n] = [] if failed else els
+                    vl_blocks_by_pno[n] = blocks
+                    last_outcome[n] = outcome
+                # 재시도 대상 = **vl 레인 중 아직 blocks 를 못 얻은 것**.
+                # thin·강등 paddle 은 1회로 끝낸다(사용자 확정 배분).
+                # 마지막 시도가 **절단류**인 페이지만 추가 1회를 더 받는다.
+                todo = [(n, rp) for n, rp in todo
+                        if n in vl_pnos and not vl_blocks_by_pno.get(n)
+                        and _attempt < (attempts_trunc
+                                        if last_outcome.get(n) in _TRUNCATION_OUTCOMES
+                                        else attempts_max)]
 
     # ── 5) 병합 ───────────────────────────────────────────────────────────────
     # `traces` 는 **별도 맵**이다 — `entry` dict(PageDoc 6-key 계약)에 키를 추가하면
@@ -668,14 +773,13 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
             #    하나라도 있으면 step 1 이 돌아 odl_md 가 전 페이지 채워지고, 그러면 vl 페이지가
             #    실텍스트 1자만 있어도 md 분기에 걸려 **VL 전사 결과가 통째로 버려진다**
             #    (혼합 문서에서 VL 비용만 태우고 결과 폐기 — 목표 (1)이 무효가 된다).
-            # `elements_to_blocks` 직접 호출 금지 — figure+html 표가 전소된다(위 헬퍼 docstring).
-            # vl 레인은 승계할 paddle 표가 없으므로 adopt_vl_table=True 고정.
-            blocks = vl_elements_to_blocks(vl_by_pno.get(pno) or [], page_idx=pno,
-                                           adopt_vl_table=True, counters=counters)
+            # **step4 가 확정한 blocks 를 그대로 쓴다**(2b-2). 여기서 다시 blockify 하면
+            # (a) A형 절단 응답에 대한 "blocks 강제 비움" 이 무효가 되어 잘린 raw JSON 이
+            # 본문에 실리고, (b) counters 가 이중 계상된다.
+            blocks = vl_blocks_by_pno.get(pno) or []
             src = "vl"
-            if not blocks and _digital_text_len(md) >= _DIGITAL_MIN_CHARS:
-                blocks = hybrid_to_blocks(md, page_idx=pno)   # 2a 폴백 = 현행 유지
-                src = "vl_md_fallback"     # 2b-2 가 제거를 검토하는 분기
+            # ⛔ ODL md 폴백 제거(2b-2) — VL 이 실패했는데 ODL 마크다운으로 채우면
+            #    "122b 가 아픈데 정상으로 보이는" 상태가 된다. 빈 채로 두고 실패시킨다.
 
         elif _digital_text_len(md) >= _DIGITAL_MIN_CHARS:
             blocks = hybrid_to_blocks(md, page_idx=pno)

@@ -23,4 +23,12 @@ class RouteResult:
 
 
 class ParserError(Exception):
-    """파서 실패 — app.py 가 FrontError("parse_failed") 로 매핑."""
+    """파서 실패 — app.py 가 FrontError("parse_failed") 로 매핑.
+
+    ``traces`` (Phase 2b-2): 실패해도 관측을 잃지 않기 위해 `page_traces` 를 싣는다.
+    raise 지점이 trace 조립보다 **뒤**여야 채워진다.
+    """
+
+    def __init__(self, *args, traces: list | None = None):
+        super().__init__(*args)
+        self.traces = traces

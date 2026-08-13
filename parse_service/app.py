@@ -86,11 +86,16 @@ def _route(fb, fn, **kw):
 
 
 class FrontError(Exception):
-    """parse→blockify→modal failed. ``detail`` is the stable reason string."""
+    """parse→blockify→modal failed. ``detail`` is the stable reason string.
 
-    def __init__(self, detail: str):
+    ``traces`` 는 Phase 2b-2 관측 — **실패한 문서에서만 관측이 0 이 되는 것**을 막는다.
+    `detail` 은 문자열 그대로 둔다(하류 `runner.py` 와 `test_parse.py` 가 의존).
+    """
+
+    def __init__(self, detail: str, *, traces: list | None = None):
         super().__init__(detail)
         self.detail = detail
+        self.traces = traces
 
 
 # Locate each 〈MODAL id="X" type="Y"〉…〈/MODAL〉 atomic span in the enriched text.
@@ -324,7 +329,10 @@ def run_parse(file_bytes: bytes, filename: str, *,
         log.exception("parse failed for %s", filename)
         # 원래는 카테고리 문자열("parse_failed")만 넘겨 실제 원인(kordoc 부재 등)이
         # 로그에만 남고 응답 소비자(facade→kb)까지는 안 갔다 — 실제 예외 메시지를 싣는다.
-        raise FrontError(f"parse_failed: {exc}")
+        # traces 를 함께 넘긴다 — 안 넘기면 **실패한 문서에서만** page_traces 가 사라져
+        # "실패를 드러낸다" 는 목적이 정작 실패에서 무효가 된다(Phase 2b-2 D2).
+        raise FrontError(f"parse_failed: {exc}",
+                         traces=getattr(exc, "traces", None))
     except Exception as exc:  # noqa: BLE001
         log.exception("parse-svc front-end failed for %s", filename)
         raise FrontError(f"internal_error: {exc}")
@@ -470,5 +478,9 @@ async def parse(file: UploadFile = File(...), filename: str = Form(...),
             minio=_lazy_minio(),
         )
     except FrontError as exc:
-        return {"status": "failed", "detail": exc.detail}
+        # `detail` 은 문자열 유지(하류 계약) — 관측은 **새 키**로 싣는다.
+        out = {"status": "failed", "detail": exc.detail}
+        if exc.traces:
+            out["page_traces"] = exc.traces
+        return out
     return out

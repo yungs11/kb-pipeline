@@ -335,6 +335,11 @@ services:
       MODEL_NAME: ${MODEL_NAME:?온프렘 서빙 모델명을 .env 에 지정하세요}
       VL_MAX_TOKENS: ${VL_MAX_TOKENS:-8000}
       KBP_VL_PAGE_MAX_TOKENS: ${KBP_VL_PAGE_MAX_TOKENS:-8000}
+      # VL 실패 정책(Phase 2b-2) — KBP_FAIL_ON_EMPTY_PAGE 는 탈출구
+      # 절단(A형)만 파생으로 +1회 더 받는다(기본 2 → 3)
+      KBP_VL_PAGE_ATTEMPTS: ${KBP_VL_PAGE_ATTEMPTS:-2}
+      KBP_VL_DOC_BUDGET_S: ${KBP_VL_DOC_BUDGET_S:-3600}
+      KBP_FAIL_ON_EMPTY_PAGE: ${KBP_FAIL_ON_EMPTY_PAGE:-1}
       KBP_VL_PAGE_DPI: ${KBP_VL_PAGE_DPI:-200}
       KBP_VL_VISUAL_MIN_AREA: ${KBP_VL_VISUAL_MIN_AREA:-0.05}
       # OpenRouter 전용 필드라 폐쇄망에서는 무의미하다. 끄기는 `none` 센티널로 명시한다 —
