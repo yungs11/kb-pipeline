@@ -18,7 +18,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # scripts/ 상위 = �
 cd "$HERE/.."  2>/dev/null || cd "$HERE"                  # 번들 루트로
 BUNDLE_ROOT="$(pwd)"
 COMPOSE_FILE="$BUNDLE_ROOT/docker-compose.airgap.yml"
-IMAGES_GLOB="$BUNDLE_ROOT/images"/kbp-images-*.tar.gz
+# `.tar`(2026-08-13~, 무압축)·`.tar.gz`(그 이전) 둘 다 받는다.
+IMAGES_GLOB="$BUNDLE_ROOT/images"/kbp-images-*.tar
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-300}"    # 서비스별 health 폴링 상한(초)
 
 log()  { printf '\n\033[1;36m▶ %s\033[0m\n' "$*"; }
@@ -39,7 +40,7 @@ fi
 # ── 1) 이미지 로드 ────────────────────────────────────────────────────────────
 log "podman load — 이미지 로드"
 shopt -s nullglob
-tars=( $IMAGES_GLOB )
+tars=( $IMAGES_GLOB $IMAGES_GLOB.gz )
 [ ${#tars[@]} -gt 0 ] || die "이미지 tar 를 찾지 못함: $IMAGES_GLOB"
 for t in "${tars[@]}"; do
   echo "  load $t"

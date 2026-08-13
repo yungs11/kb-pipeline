@@ -111,9 +111,9 @@ cd /path/to/8.kb-pipeline
 
 ```bash
 # 폐쇄망 서버에서
-sha256sum -c kbp-airgap-bundle-amd64.tar.gz.parts.sha256        # 조각 무결성
-cat kbp-airgap-bundle-amd64.tar.gz.part-* > kbp-airgap-bundle-amd64.tar.gz
-sha256sum -c kbp-airgap-bundle-amd64.tar.gz.sha256              # 재결합 무결성
+sha256sum -c kbp-airgap-bundle-amd64.tar.parts.sha256        # 조각 무결성
+cat kbp-airgap-bundle-amd64.tar.part-* > kbp-airgap-bundle-amd64.tar
+sha256sum -c kbp-airgap-bundle-amd64.tar.sha256              # 재결합 무결성
 ```
 
 `SPLIT_SIZE=1g` 로 조각 크기 변경, `KEEP_WHOLE=1` 로 원본 보존.
@@ -162,7 +162,7 @@ podman-compose -p kbp-airgap -f docker-compose.airgap.yml --env-file .env up -d
 ## 4. [Phase B] `.env` 채우기 (가장 중요)
 
 ```bash
-mkdir kbp && tar xzf kbp-airgap-bundle-amd64.tar.gz -C kbp && cd kbp
+mkdir kbp && tar xf kbp-airgap-bundle-amd64.tar -C kbp && cd kbp
 cp .env.airgap.example .env
 vi .env      # 【A. 온프렘 재설정 필수】 블록
 ```

@@ -32,7 +32,9 @@ cd "$HERE/.." 2>/dev/null || cd "$HERE"
 BUNDLE_ROOT="$(pwd)"
 COMPOSE_FILE="$BUNDLE_ROOT/docker-compose.airgap.yml"
 #: 전용 번들(kbp-parse-images-*) 과 전체 번들(kbp-images-*) 둘 다 받는다.
-IMAGES_GLOB="$BUNDLE_ROOT/images"/kbp-*images-*.tar.gz
+#: 확장자도 **둘 다** 받는다 — 2026-08-13 부터 번들은 무압축 `.tar` 다(레이어가 이미
+#: 압축돼 있어 gzip 이득이 0.7% 뿐이었다). 그 이전 반입본(`.tar.gz`)도 계속 로드된다.
+IMAGES_GLOB="$BUNDLE_ROOT/images"/kbp-*images-*.tar
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-300}"
 
 #: 파싱 배치에 필요한 서비스만. 순서는 의존 순(--no-deps 라 우리가 직접 지킨다).
@@ -75,7 +77,7 @@ echo "engine=$ENGINE  compose=${COMPOSE[0]} ${COMPOSE[1]:-}"
 # ── 1) 이미지 로드 ────────────────────────────────────────────────────────────
 log "$ENGINE load — 이미지 로드"
 shopt -s nullglob
-tars=( $IMAGES_GLOB )
+tars=( $IMAGES_GLOB $IMAGES_GLOB.gz )
 if [ ${#tars[@]} -eq 0 ]; then
   # 인터넷이 되는 환경에서는 이미지를 이미 갖고 있을 수 있다(빌드/pull 済). 번들이 없다고
   # 실패시키지 않고, 필요한 이미지가 실제로 있는지로 판정한다.

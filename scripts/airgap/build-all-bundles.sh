@@ -53,6 +53,6 @@ printf "  %-10s %s\n" kbp-parse "$([ $R2 -eq 0 ] && echo ✅ || echo ✗)"
 printf "  %-10s %s\n" kb        "$([ $R3 -eq 0 ] && echo ✅ || echo ✗)"
 echo
 echo "반입 세트:"
-ls -la "$KBP"/dist/*.tar.gz "$KBP"/dist/*.sha256 2>/dev/null | awk '{printf "  %12s  %s\n", $5, $9}'
-ls -la "$KB"/dist/*.tar.gz "$KB"/dist/*.sha256 2>/dev/null | awk '{printf "  %12s  %s\n", $5, $9}'
+ls -la "$KBP"/dist/*.tar "$KBP"/dist/*.sha256 2>/dev/null | awk '{printf "  %12s  %s\n", $5, $9}'
+ls -la "$KB"/dist/*.tar* "$KB"/dist/*.sha256 2>/dev/null | awk '{printf "  %12s  %s\n", $5, $9}'
 [ $R1 -eq 0 ] && [ $R2 -eq 0 ] && [ $R3 -eq 0 ]
