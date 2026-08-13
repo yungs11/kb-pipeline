@@ -2,6 +2,7 @@
 import json
 import pytest
 from parse_service.parsers import ocr as ocr_parser
+from parse_service.parsers.ocr import vl_api
 
 
 @pytest.fixture
@@ -10,7 +11,7 @@ def fake_vl(monkeypatch):
         return json.dumps({"elements": [
             {"category": "figure",
              "content": {"html": "", "markdown": "hello", "text": ""},
-             "id": 0, "page": 1}]}), 0.1
+             "id": 0, "page": 1}]}), vl_api.VLCallMeta(elapsed=0.1)
     monkeypatch.setattr("parse_service.parsers.ocr.vl_api.call_vl_api_with_base64",
                         fake_call)
 

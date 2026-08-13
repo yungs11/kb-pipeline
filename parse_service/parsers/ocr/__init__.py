@@ -68,23 +68,29 @@ async def ocr_file_to_elements(file_bytes: bytes, filename: str,
     else:
         system_p, user_p = prompts.build_system_prompt(), prompts.build_user_prompt()
     all_elements: list[dict] = []
+    call_metas: list["vl_api.VLCallMeta"] = []   # 페이지 순서 정렬 보존
     next_id = 0
 
     # 페이지 VL 호출은 **동시**에 돌린다(`_sem()` 으로 KBP_VL_MAX_CONCURRENT 제한).
     # 이전에는 sequential await 라 세마포어가 아무 일도 하지 않았다 — 코루틴이 하나뿐이었다.
-    async def _call(b64: str) -> str:
+    async def _call(b64: str) -> tuple[str, "vl_api.VLCallMeta"]:
         async with _sem():
-            vl_resp, _t = await vl_api.call_vl_api_with_base64(
+            return await vl_api.call_vl_api_with_base64(
                 b64, user_p, system_p, max_tokens=max_tokens)
-            return vl_resp
 
     responses = await asyncio.gather(*(_call(b) for b in b64_pages),
                                      return_exceptions=True)
     # **파싱은 순서대로** — `next_id` 가 순차 상태이고 elements 순서가 페이지 순서여야 한다.
     for page_num, resp in enumerate(responses, start=1):
         if isinstance(resp, BaseException):     # 페이지 실패 비치명(기존 계약 유지)
+            # **삼킴 1층**(Phase 2b-1): 여기서 예외가 사라지면 상위는 "빈 결과" 와 구분할 수
+            # 없다. `VLCallMeta.error` 로 사유를 실어 올린다 — 동작은 그대로(continue).
             log.error("VL OCR failed page %d", page_num, exc_info=resp)
+            call_metas.append(vl_api.VLCallMeta(
+                error=f"{type(resp).__name__}: {str(resp)[:160]}"))
             continue
+        resp, meta = resp
+        call_metas.append(meta)
         try:
             els, next_id = elements_parser.parse_vision_language_response_to_elements(
                 resp, page_num, next_id)
@@ -106,7 +112,11 @@ async def ocr_file_to_elements(file_bytes: bytes, filename: str,
             and (content.get("markdown") or "").strip()
         ):
             el["category"] = "text"
-    return {"elements": all_elements, "metadata": {"page_cnt": len(b64_pages)}}
+    # `call_metas` 는 **추가 키**다 — 기존 소비자(`["elements"]`)는 영향 없다.
+    # 파일 1건에 페이지 수만큼 VL 을 호출하므로 **복수**다(pptx·다중 이미지).
+    # PDF 전사 경로는 job 1건 = 1페이지라 `[0]` 만 쓴다.
+    return {"elements": all_elements, "metadata": {"page_cnt": len(b64_pages)},
+            "call_metas": call_metas}
 
 
 def ocr_elements_sync(file_bytes: bytes, filename: str,

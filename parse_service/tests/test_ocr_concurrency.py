@@ -62,7 +62,7 @@ def test_pages_run_concurrently(three_pages, monkeypatch):
         started.release()
         await release.wait()      # 세 개가 다 들어올 때까지 잡아둔다
         seen["cur"] -= 1
-        return _resp("ok"), 0.1
+        return _resp("ok"), vl_api.VLCallMeta(elapsed=0.1)
 
     monkeypatch.setattr(vl_api, "call_vl_api_with_base64", fake_call)
 
@@ -87,7 +87,7 @@ def test_concurrency_is_capped(three_pages, monkeypatch):
         seen["max"] = max(seen["max"], seen["cur"])
         await asyncio.sleep(0.01)
         seen["cur"] -= 1
-        return _resp("ok"), 0.1
+        return _resp("ok"), vl_api.VLCallMeta(elapsed=0.1)
 
     monkeypatch.setattr(vl_api, "call_vl_api_with_base64", fake_call)
     asyncio.run(ocr.ocr_file_to_elements(b"x", "a.png"))
@@ -99,7 +99,7 @@ def test_page_failure_is_nonfatal_and_order_preserved(three_pages, monkeypatch):
     async def fake_call(b64, user_p, system_p, max_tokens=None):
         if b64 == "QUJE":                      # 2번째 페이지
             raise RuntimeError("VL down")
-        return _resp("p" + b64[-1]), 0.1
+        return _resp("p" + b64[-1]), vl_api.VLCallMeta(elapsed=0.1)
 
     monkeypatch.setattr(vl_api, "call_vl_api_with_base64", fake_call)
     res = asyncio.run(ocr.ocr_file_to_elements(b"x", "a.png"))
@@ -113,7 +113,7 @@ def test_many_sync_uses_one_event_loop(monkeypatch):
     monkeypatch.setattr(image_utils, "image_file_to_base64_list", lambda p: ["QUJD"])
 
     async def fake_call(b64, user_p, system_p, max_tokens=None):
-        return _resp("ok"), 0.1
+        return _resp("ok"), vl_api.VLCallMeta(elapsed=0.1)
     monkeypatch.setattr(vl_api, "call_vl_api_with_base64", fake_call)
 
     runs = {"n": 0}
@@ -138,7 +138,7 @@ def test_many_job_failure_keeps_index_alignment(monkeypatch):
                         lambda p: ["QUJD"])
 
     async def fake_call(b64, user_p, system_p, max_tokens=None):
-        return _resp("ok"), 0.1
+        return _resp("ok"), vl_api.VLCallMeta(elapsed=0.1)
     monkeypatch.setattr(vl_api, "call_vl_api_with_base64", fake_call)
 
     async def boom(*a, **k):
@@ -165,7 +165,7 @@ def test_many_passes_prompt_and_max_tokens(monkeypatch):
 
     async def fake_call(b64, user_p, system_p, max_tokens=None):
         seen.append((system_p, user_p, max_tokens))
-        return _resp("ok"), 0.1
+        return _resp("ok"), vl_api.VLCallMeta(elapsed=0.1)
     monkeypatch.setattr(vl_api, "call_vl_api_with_base64", fake_call)
 
     ocr.ocr_elements_many_sync([(b"x", "a.png", ("SYS", "USR"), 8000)])
@@ -189,7 +189,7 @@ def test_pdf_batch_seam_runs_pages_concurrently(monkeypatch):
         seen["max"] = max(seen["max"], seen["cur"])
         await asyncio.sleep(0.02)          # 겹칠 시간을 준다
         seen["cur"] -= 1
-        return _resp("page"), 0.1
+        return _resp("page"), vl_api.VLCallMeta(elapsed=0.1)
 
     monkeypatch.setattr(vl_api, "call_vl_api_with_base64", fake_call)
     jobs = [(b"jpeg", f"page-{n}.jpeg") for n in (1, 2, 3)]
@@ -204,7 +204,7 @@ def test_pdf_batch_seam_uses_one_event_loop(monkeypatch):
     monkeypatch.setattr(image_utils, "image_file_to_base64_list", lambda p: ["QUJD"])
 
     async def fake_call(b64, user_p, system_p, max_tokens=None):
-        return _resp("ok"), 0.1
+        return _resp("ok"), vl_api.VLCallMeta(elapsed=0.1)
     monkeypatch.setattr(vl_api, "call_vl_api_with_base64", fake_call)
 
     runs = {"n": 0}

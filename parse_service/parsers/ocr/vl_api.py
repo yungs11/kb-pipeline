@@ -15,6 +15,7 @@ HTTP 연결 안정성(원본 동일):
 import asyncio
 import logging
 import os
+from dataclasses import dataclass
 import time
 from typing import Any, Dict, Optional, Tuple
 
@@ -140,16 +141,21 @@ async def call_vl_api_with_base64(
     system_prompt: str,
     *,
     max_tokens: int | None = None,
-) -> Tuple[str, float]:
+) -> Tuple[str, "VLCallMeta"]:
     """base64 이미지로 Vision-Language 모델 API를 호출합니다.
 
     Returns:
-        (모델 응답 문자열, 호출 소요 시간(초)) 튜플
+        (모델 응답 문자열, `VLCallMeta`) 튜플.
+
+    **2026-08-13(Phase 2b-1)**: 2번째 반환값이 `elapsed`(float) → `VLCallMeta` 로 바뀌었다.
+    `usage.completion_tokens`·`finish_reason` 이 여기서 버려지고 있었는데, 그 둘이
+    "max_tokens 소진" 과 "서빙이 스스로 끊음" 을 가르는 유일한 신호다(V0 실측).
+    `elapsed` 는 `meta.elapsed` 로 그대로 있다.
     """
     payload = _build_payload(base64_image, user_prompt, system_prompt,
                              max_tokens=max_tokens)
     response_json, elapsed_time = await _request_vl_api(payload)
-    return _extract_result(response_json), elapsed_time
+    return _extract_result(response_json), _call_meta(response_json, elapsed_time)
 
 
 def _apply_guided_json(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -236,6 +242,46 @@ def _build_payload(base64_image: str, user_prompt: str, system_prompt: str,
         if _ignore:
             payload["provider"] = {"ignore": _ignore}
     return _apply_guided_json(payload)
+
+
+@dataclass(frozen=True)
+class VLCallMeta:
+    """VL 호출 1회의 진단 메타 — Phase 2b-1 관측용.
+
+    **`finish` 가 처방을 가른다**(2026-08-13 V0 실측):
+      · ``"length"``  = max_tokens 소진 → 상한을 올린다
+      · ``"stop"`` + 짧은 응답 = 서빙이 스스로 끊었다 → 서빙 상태를 본다
+    이 구분이 없으면 "8000 토큰인데 왜 잘려?" 에서 막힌다.
+
+    `error` 는 **예외를 잡는 쪽**이 채운다 — `call_vl_api_with_base64` 는 예외를
+    raise 하므로 자기 자신은 meta 를 돌려줄 수 없다.
+    """
+    model: str | None = None
+    tokens: int | None = None          # usage.completion_tokens
+    finish: str | None = None          # finish_reason
+    elapsed: float | None = None
+    error: str | None = None           # "TimeoutError: …"
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = {"model": self.model, "tokens": self.tokens, "finish": self.finish}
+        if self.error:
+            d["error"] = self.error
+        return {k: v for k, v in d.items() if v is not None}
+
+
+def _call_meta(response_json: Dict[str, Any], elapsed: float) -> VLCallMeta:
+    """응답 JSON 에서 진단 메타를 뽑는다. 파싱 실패해도 예외를 내지 않는다."""
+    try:
+        ch = (response_json.get("choices") or [{}])[0]
+        usage = response_json.get("usage") or {}
+        return VLCallMeta(
+            model=response_json.get("model"),
+            tokens=usage.get("completion_tokens"),
+            finish=ch.get("finish_reason"),
+            elapsed=round(elapsed, 2),
+        )
+    except Exception:  # noqa: BLE001 — 관측이 파싱을 깨면 안 된다
+        return VLCallMeta(elapsed=round(elapsed, 2))
 
 
 def _extract_result(response_json: Dict[str, Any]) -> str:
