@@ -1015,7 +1015,7 @@ doc_guard `40fde0f` 로 정렬 — 사전 = kb 6코드 + `gate_error`(doc_guard 
 |---|---|---|
 | **1** | **독립 버그 5건** | **이 커밋** |
 | 2 | 페이지수준 라우팅 + v1 게이트 재배치 + 가로형 vl 레인 | 보류(`merge-paddle-scan-lane.md` v2, must-fix 7건 유효) |
-| 3 | layout hybrid 활성화 | 발화 문서 4건 확보(다산 p44 image 0.382 등) |
+| ~~3~~ | ~~layout hybrid 활성화~~ | ✅ **머지와 함께 켜짐**(2026-08-13 확인) — on/off 스위치가 없고 면적 임계(`KBP_VL_VISUAL_MIN_AREA=0.05`)만 있다. 남은 것은 **D1 임계 재조정** |
 | 4 | env 정리 + `KBP_GATE_OCR_LANE` 탈출구 교체 | 폐쇄망 마이그레이션 필요 |
 
 ### 1. ODL 예외 계약 복구 — 배포 차단급
