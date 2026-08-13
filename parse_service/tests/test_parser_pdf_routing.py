@@ -56,7 +56,7 @@ def wire(monkeypatch):
     def set_vl(text="VL 전사"):
         def fake_batch(jobs, ocr_url=None, **k):
             rec["vl_jobs"].extend(name for _j, name in jobs)
-            return [[{"category": "text", "content": {"markdown": text}, "page": 0}]
+            return [([{"category": "text", "content": {"markdown": text}, "page": 0}], [])
                     for _ in jobs]
         monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages", fake_batch)
 
@@ -232,7 +232,7 @@ def test_diagram_supplement_uses_diagram_prompt(wire, monkeypatch):
 
     def fake_many(jobs):
         seen.setdefault("override", jobs[0][2])
-        return [[{"category": "text", "content": {"markdown": "START→END"}, "page": 0}]
+        return [([{"category": "text", "content": {"markdown": "START→END"}, "page": 0}], [])
                 for _ in jobs]
 
     import parse_service.parsers.ocr as ocr_mod
@@ -285,7 +285,7 @@ def test_transcribe_passes_page_max_tokens(wire, monkeypatch):
 
     def fake_batch(jobs, ocr_url=None, **k):
         seen["max_tokens"] = k.get("max_tokens")
-        return [[{"category": "text", "content": {"markdown": "전사"}, "page": 0}]
+        return [([{"category": "text", "content": {"markdown": "전사"}, "page": 0}], [])
                 for _ in jobs]
 
     monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages", fake_batch)
@@ -307,7 +307,7 @@ def test_transcribe_rejects_truncated_response(wire, monkeypatch, raw):
     """
     monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages",
                         lambda jobs, ocr_url=None, **k: [
-                            [{"category": "text", "content": {"markdown": raw}, "page": 0}]
+                            ([{"category": "text", "content": {"markdown": raw}, "page": 0}], [])
                             for _ in jobs])
     wire["set_gate"](_decision({1: "odl"}))
     wire["set_md"](["   "])
@@ -333,7 +333,7 @@ def test_transcribe_failure_falls_back_to_native_text(wire, monkeypatch):
 
     def fake_batch(jobs, ocr_url=None, **k):
         calls.append(1)
-        return [[{"category": "text", "content": {"markdown": _BAD_VL}, "page": 0}]
+        return [([{"category": "text", "content": {"markdown": _BAD_VL}, "page": 0}], [])
                 for _ in jobs]
 
     monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages", fake_batch)
@@ -367,7 +367,7 @@ def test_native_fallback_survives_degen_filter_on_toc(wire, monkeypatch):
 
     monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages",
                         lambda jobs, ocr_url=None, **k: [
-                            [{"category": "text", "content": {"markdown": _BAD_VL}, "page": 0}]
+                            ([{"category": "text", "content": {"markdown": _BAD_VL}, "page": 0}], [])
                             for _ in jobs])
     monkeypatch.setattr(pdf_parser, "_render_pages",
                         lambda fb, page_numbers=None, **k: [_RP(1, text=toc)])
@@ -383,7 +383,7 @@ def test_transcribe_failure_without_native_text_yields_empty(wire, monkeypatch):
     """네이티브 텍스트마저 없으면 빈 결과 — 잘린 raw JSON 을 싣지 않는다."""
     monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages",
                         lambda jobs, ocr_url=None, **k: [
-                            [{"category": "text", "content": {"markdown": _BAD_VL}, "page": 0}]
+                            ([{"category": "text", "content": {"markdown": _BAD_VL}, "page": 0}], [])
                             for _ in jobs])
     monkeypatch.setattr(pdf_parser, "_render_pages",
                         lambda fb, page_numbers=None, **k: [_RP(1, text="")])
@@ -624,11 +624,11 @@ def test_vl_lane_keeps_figure_html_table(wire, monkeypatch):
     같은 element 의 산문도 함께 살아야 한다.
     """
     monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages",
-                        lambda jobs, ocr_url=None, **k: [[{
+                        lambda jobs, ocr_url=None, **k: [([{
                             "category": "figure", "page": 0,
                             "content": {"html": "<table><tr><td>셀A</td><td>셀B</td></tr></table>",
                                         "markdown": "표 아래 설명 산문이다."},
-                        }] for _ in jobs])
+                        }], []) for _ in jobs])
     wire["set_gate"](_decision({1: "vl"}))
     wire["set_md"]([""])                       # md 없음 → VL 산출물이 정본
     res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")

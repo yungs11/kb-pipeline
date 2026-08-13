@@ -140,7 +140,7 @@ def ocr_elements_sync(file_bytes: bytes, filename: str,
 Job = tuple  # (file_bytes, filename, prompt_override | None, max_tokens | None)
 
 
-async def ocr_elements_many(jobs: list[Job]) -> list[list[dict]]:
+async def ocr_elements_many(jobs: list[Job]) -> list[tuple[list[dict], list]]:
     """여러 건을 **한 이벤트루프에서** 동시 처리 — jobs 순서대로 elements 리스트를 돌려준다.
 
     호출 건마다 `asyncio.run` 을 돌리면(=`ocr_elements_sync` 를 N 번) 루프가 N 개 생겨
@@ -149,25 +149,30 @@ async def ocr_elements_many(jobs: list[Job]) -> list[list[dict]]:
 
     건별 실패는 비치명 — 그 자리에 빈 리스트가 들어간다(인덱스 정렬 보존).
     """
-    async def _one(job: Job) -> list[dict]:
+    async def _one(job: Job) -> tuple[list[dict], list]:
         file_bytes, filename = job[0], job[1]
         prompt_override = job[2] if len(job) > 2 else None
         max_tokens = job[3] if len(job) > 3 else None
-        return (await ocr_file_to_elements(
-            file_bytes, filename, prompt_override, max_tokens=max_tokens))["elements"]
+        res = await ocr_file_to_elements(
+            file_bytes, filename, prompt_override, max_tokens=max_tokens)
+        return res["elements"], res.get("call_metas") or []
 
     results = await asyncio.gather(*(_one(j) for j in jobs), return_exceptions=True)
-    out: list[list[dict]] = []
+    out: list[tuple[list[dict], list]] = []
     for job, r in zip(jobs, results):
         if isinstance(r, BaseException):
+            # **삼킴 2층**(Phase 2b-1): 예외를 빈 리스트로만 바꾸면 상위가 "빈 응답" 과
+            # 구분하지 못한다. meta 에 사유를 실어 올린다(동작은 그대로 — 건별 실패 비치명).
             log.error("VL OCR job failed (%s)", job[1], exc_info=r)
-            out.append([])
+            from parse_service.parsers.ocr import vl_api
+            out.append(([], [vl_api.VLCallMeta(
+                error=f"{type(r).__name__}: {str(r)[:160]}")]))
         else:
             out.append(r)
     return out
 
 
-def ocr_elements_many_sync(jobs: list[Job]) -> list[list[dict]]:
+def ocr_elements_many_sync(jobs: list[Job]) -> list[tuple[list[dict], list]]:
     """`ocr_elements_many` 의 동기 래퍼 — `asyncio.run` 을 **배치 전체에 1회**만 쓴다."""
     def _run():
         return asyncio.run(ocr_elements_many(jobs))

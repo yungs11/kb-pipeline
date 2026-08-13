@@ -238,9 +238,9 @@ def _hybrid_scan_pages(pages: list[dict], file_bytes: bytes, target_pnos: set[in
         return set()
     counters["vl_page_calls"] += len(pairs)
     try:
-        batch = _ocr_elements_for_pages(
+        batch = [els for els, _metas in _ocr_elements_for_pages(
             [(rp.jpeg, f"page-{pno}-hybrid.jpeg") for pno, rp in pairs], ocr_url,
-            prompt_override=override, max_tokens=max_tokens)
+            prompt_override=override, max_tokens=max_tokens)]
     except Exception:  # noqa: BLE001 — 배치 전체 실패도 비치명(전 페이지 paddle 원본 유지)
         log.exception("hybrid VL batch failed — keeping paddle output for %d page(s)",
                       len(pairs))
@@ -325,7 +325,7 @@ def _ocr_elements_for_page(jpeg: bytes, name: str, ocr_url: str | None = None,
 def _ocr_elements_for_pages(jobs: list[tuple[bytes, str]], ocr_url: str | None = None,
                             *, diagram: bool = False,
                             prompt_override: tuple[str, str] | None = None,
-                            max_tokens: int | None = None) -> list[list[dict]]:
+                            max_tokens: int | None = None) -> list[tuple[list[dict], list]]:
     """여러 페이지를 **한 이벤트루프에서 동시** 처리 — jobs 순서대로 elements 리스트 반환.
 
     `_ocr_elements_for_page` 를 for 루프로 N 번 부르면 호출마다 `asyncio.run` 이 돌아 루프와
@@ -344,6 +344,9 @@ def _ocr_elements_for_pages(jobs: list[tuple[bytes, str]], ocr_url: str | None =
         override = (prompts.DIAGRAM_SYSTEM_PROMPT, prompts.DIAGRAM_USER_PROMPT)
     else:
         override = prompt_override or prompts.page_hybrid_prompts()
+    # 반환: [(elements, [VLCallMeta, …]), …] — jobs 순서 보존.
+    # **2026-08-13(2b-1)**: elements 만 돌려주던 것을 쌍으로 바꿨다. 소비처는
+    # `els, metas = pair` 로 받는다(아래 3곳).
     return ocr_elements_many_sync(
         [(jpeg, name, override, max_tokens) for jpeg, name in jobs])
 
@@ -441,6 +444,12 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
     # **분기 밖 seeding 필수**: 산출처가 `if paddle_pnos:` → `if gw_pages:` → `try:` 3중
     # 안에서만 돌아, 순수 디지털 PDF·GW 예외 경로에서 NameError → 문서 전체 500 이 된다.
     hybrid_replaced: set[int] = set()
+    # 페이지별 시도 발자국 — (stage, outcome, meta). Phase 2b-1 관측.
+    attempts: dict[int, list[tuple]] = {}
+    odl_error: str | None = None
+
+    def _att(pno: int, stage: str, outcome: str, meta: dict | None = None) -> None:
+        attempts.setdefault(pno, []).append((stage, outcome, meta or {}))
     counters = {"layout_pages": 0, "visual_pages": 0, "area_guard_skipped": 0,
                 "truncated": 0, "error_placeholder": 0, "vl_page_calls": 0,
                 "tbl_backfill": 0, "vl_extra_tables": 0}
@@ -451,7 +460,7 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
     if odl_pnos or skip_pnos or vl_pnos or total_pages == 0:
         try:
             odl_md = _page_markdowns(file_bytes, filename)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             # **문서 실패가 아니라 VL 폴백**(사용자 확정 2026-08-04). odl_md 가 비면 odl 레인
             # 페이지는 전부 thin 판정 → 아래 VL 전사 배치가 내용을 살린다.
             #
@@ -461,6 +470,9 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
             # 어떤 예외든 낼 수 있으므로 전부 흡수하고 VL 로 넘긴다.
             log.exception("ODL 실패 — VL 폴백 (%s)", filename)
             odl_md = []
+            # `failed` 와 `no_md` 를 **구분**한다(2b-1 §2) — 자바 부재가 "md 가 원래 없음"
+            # 으로 위장되면 JRE 문제를 영영 못 찾는다. 문서 단위 사건이므로 pno=0 에 남긴다.
+            odl_error = f"{type(exc).__name__}: {str(exc)[:120]}"
 
     # ── 2) 정합 가드 — 페이지수가 어긋나면 페이지수준 병합을 포기하고 문서 전체 ODL 위임 ──
     if odl_md and total_pages and len(odl_md) != total_pages:
@@ -539,13 +551,23 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
             # ※ 상한을 올려도 남는 실패가 있다 — 아래 재시도 블록의 모델측 퇴화 참조.
             page_max_tokens = int(os.environ.get("KBP_VL_PAGE_MAX_TOKENS", "8000"))
             try:
-                batch = _ocr_elements_for_pages(
+                _paired = _ocr_elements_for_pages(
                     [(rp.jpeg, f"page-{n}.jpeg") for n, rp in pairs], ocr_url,
                     max_tokens=page_max_tokens)
-            except Exception:  # noqa: BLE001 — 배치 전체 실패도 비치명
+                batch = [els for els, _m in _paired]
+                batch_metas = [m for _e, m in _paired]
+            except Exception as exc:  # noqa: BLE001 — 배치 전체 실패도 비치명
+                # **삼킴 3층**(2b-1): 배치 전체 실패는 meta 자체가 없다 —
+                # 여기서 호출부가 사유를 만들어 준다.
                 log.exception("VL 전사 배치 실패 (%s)", filename)
                 batch = [[] for _ in pairs]
-            for (n, rp), els in zip(pairs, batch):
+                batch_metas = [[{"error": f"{type(exc).__name__}: {str(exc)[:120]}"}]
+                               for _ in pairs]
+            for (n, rp), els, metas in zip(pairs, batch, batch_metas):
+                for _m in (metas or [None]):
+                    md_ = (_m.to_dict() if hasattr(_m, "to_dict")
+                           else (_m if isinstance(_m, dict) else {}))
+                    _att(n, "vl", "error" if md_.get("error") else "ok", md_)
                 # 절단·에러 플레이스홀더는 "성공처럼 보이는 실패" 다 — 잘린 raw JSON 이 그대로
                 # 본문 블록이 되는 것을 막는다(hybrid 경로와 동일 판정).
                 failed = _looks_like_failed_vl(els)
@@ -574,6 +596,9 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
                     vl_by_pno[n] = []
 
     # ── 5) 병합 ───────────────────────────────────────────────────────────────
+    # `traces` 는 **별도 맵**이다 — `entry` dict(PageDoc 6-key 계약)에 키를 추가하면
+    # 하류로 새어 계약이 바뀐다(Phase 2b-1 은 동작을 바꾸지 않는다).
+    traces: dict[int, dict] = {}
     pages: list[dict] = []
     for pno in range(1, total_pages + 1):
         lane = lanes.get(pno, "odl")            # 미포함 기본 odl(명시)
@@ -581,9 +606,12 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
         blocks: list[dict] = []                 # 분기 밖 초기화 — 안 하면 루프 캐리
         entry: dict = {"page_number": pno}
 
+        src = None
         if lane == "paddle_gw" and pno not in demoted_pnos:
             gw = gw_by_pno.get(pno) or {}
             blocks = gw.get("blocks") or []
+            # hybrid 가 갈아끼운 페이지는 내용이 게이트웨이가 아니라 **전면 VL** 산출물이다.
+            src = "gw_hybrid" if pno in hybrid_replaced else "gw"
             # status/error 를 병합 dict 로 실어 보낸다(6-key 계약, §4e). 2a 에는 소비자가
             # 없지만(ENGINE_ERROR 는 §4a 로 도달 불가) 계약상 채운다 — 빼면 하류가 조용히 눈먼다.
             entry["status"] = gw.get("status")
@@ -598,22 +626,30 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
             # vl 레인은 승계할 paddle 표가 없으므로 adopt_vl_table=True 고정.
             blocks = vl_elements_to_blocks(vl_by_pno.get(pno) or [], page_idx=pno,
                                            adopt_vl_table=True, counters=counters)
+            src = "vl"
             if not blocks and _digital_text_len(md) >= _DIGITAL_MIN_CHARS:
                 blocks = hybrid_to_blocks(md, page_idx=pno)   # 2a 폴백 = 현행 유지
+                src = "vl_md_fallback"     # 2b-2 가 제거를 검토하는 분기
 
         elif _digital_text_len(md) >= _DIGITAL_MIN_CHARS:
             blocks = hybrid_to_blocks(md, page_idx=pno)
+            src = "odl_md"
 
         elif lane == "skip":
             # SKIP 은 애초에 내용이 거의 없는 페이지 — VL 을 부르지 않는다(현행과 동일).
             blocks = []
+            src = "skip"
 
         else:
+            # 현재 도달 불가(lane 값이 4종뿐이고 앞 분기가 전부 흡수). 방어코드로 유지 —
+            # 값이 나오면 라우팅 버그 신호다.
             log.debug("미분류 페이지 p%d lane=%s md=%d — 빈 blocks (%s)",
                       pno, lane, _digital_text_len(md), filename)
+            src = "unclassified"
 
         entry["blocks"] = blocks
         pages.append(entry)
+        traces[pno] = {"lane": lane, "source": src, "attempts": list(attempts.get(pno, ()))}
 
     # ── 6) 서술 보충(odl 레인 전용 — narrate_pages 는 전부 네이티브 텍스트 페이지) ──
     if narrate_pages:
@@ -781,9 +817,9 @@ def _supplement_diagram_pages(pages: list, file_bytes: bytes, diagram_pages: tup
     if not targets:
         return
     try:
-        batch = _ocr_elements_for_pages(
+        batch = [els for els, _metas in _ocr_elements_for_pages(
             [(by_pno[pno], f"page-{pno}-diagram.jpeg") for pno in targets],
-            ocr_url, diagram=True)
+            ocr_url, diagram=True)]
     except Exception:  # noqa: BLE001 — 배치 전체 실패도 비치명(기존 블록 유지)
         log.exception("diagram VL supplement batch failed for %d page(s)", len(targets))
         return

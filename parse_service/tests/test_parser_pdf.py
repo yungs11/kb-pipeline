@@ -22,7 +22,7 @@ def test_scanned_page_gets_ocr(monkeypatch):
     monkeypatch.setattr(pdf_parser, "_render_pages", lambda fb, page_numbers=None, **k: [FakeRP()])
     monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages",
                         lambda jobs, ocr_url=None, **k: [
-                            [{"category": "text", "content": {"markdown": "ocr text"}, "page": 0}]
+                            ([{"category": "text", "content": {"markdown": "ocr text"}, "page": 0}], [])
                             for _ in jobs])
     res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
     assert res.pages[1]["page_number"] == 2
@@ -58,7 +58,7 @@ def test_scanned_page_with_imagerefs_and_empty_tables_gets_ocr(monkeypatch):
 
     def fake_ocr(jobs, ocr_url=None, **k):
         called["ocr"] = True
-        return [[{"category": "text", "content": {"markdown": "vl 추출 내용"}, "page": 0}]
+        return [([{"category": "text", "content": {"markdown": "vl 추출 내용"}, "page": 0}], [])
                 for _ in jobs]
 
     monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages", fake_ocr)
@@ -87,8 +87,8 @@ def test_odl_tool_error_falls_back_to_vl(monkeypatch):
                         lambda fb, page_numbers=None, **k: [FakeRP()])
     monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages",
                         lambda jobs, ocr_url=None, **k: [
-                            [{"category": "text",
-                              "content": {"markdown": "VL 로 살린 내용"}, "page": 0}]
+                            ([{"category": "text",
+                              "content": {"markdown": "VL 로 살린 내용"}, "page": 0}], [])
                             for _ in jobs])
     res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
     assert res.kind == "pages"

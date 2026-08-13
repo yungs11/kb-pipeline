@@ -127,7 +127,7 @@ def test_many_sync_uses_one_event_loop(monkeypatch):
     jobs = [(b"x", f"p{i}.png", None, None) for i in range(4)]
     out = ocr.ocr_elements_many_sync(jobs)
     assert runs["n"] == 1, "배치 전체에 asyncio.run 1회"
-    assert len(out) == 4 and all(len(o) == 1 for o in out)
+    assert len(out) == 4 and all(len(els) == 1 for els, _m in out)
 
 
 def test_many_job_failure_keeps_index_alignment(monkeypatch):
@@ -156,7 +156,9 @@ def test_many_job_failure_keeps_index_alignment(monkeypatch):
     jobs = [(b"x", "ok1.png", None, None), (b"x", "bad.png", None, None),
             (b"x", "ok2.png", None, None)]
     out = ocr.ocr_elements_many_sync(jobs)
-    assert [len(o) for o in out] == [1, 0, 1]
+    assert [len(els) for els, _m in out] == [1, 0, 1]
+    # 2b-1: 실패 job 은 meta.error 로 사유가 올라온다(빈 응답과 구분)
+    assert any(getattr(m, "error", None) for m in out[1][1]), "실패 사유가 meta 에 남는다"
 
 
 def test_many_passes_prompt_and_max_tokens(monkeypatch):
@@ -194,7 +196,8 @@ def test_pdf_batch_seam_runs_pages_concurrently(monkeypatch):
     monkeypatch.setattr(vl_api, "call_vl_api_with_base64", fake_call)
     jobs = [(b"jpeg", f"page-{n}.jpeg") for n in (1, 2, 3)]
     out = pdf_parser._ocr_elements_for_pages(jobs, None, diagram=True)
-    assert len(out) == 3 and all(len(o) == 1 for o in out)
+    # 2b-1: (elements, metas) 쌍
+    assert len(out) == 3 and all(len(els) == 1 for els, _m in out)
     assert seen["max"] == 3, "3페이지가 동시에 진행해야 한다(직렬이면 1)"
 
 
@@ -226,7 +229,7 @@ def test_pdf_batch_seam_keeps_prompt_rules(monkeypatch):
     from parse_service.parsers.ocr import prompts
     seen = []
     monkeypatch.setattr(ocr, "ocr_elements_many_sync",
-                        lambda jobs: seen.extend(jobs) or [[] for _ in jobs])
+                        lambda jobs: seen.extend(jobs) or [([], []) for _ in jobs])
     pdf_parser._ocr_elements_for_pages([(b"j", "p1.jpeg")], None, diagram=True,
                                        prompt_override=("X", "Y"))
     assert seen[0][2] == (prompts.DIAGRAM_SYSTEM_PROMPT, prompts.DIAGRAM_USER_PROMPT)

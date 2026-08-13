@@ -62,8 +62,9 @@ def wire(monkeypatch):
             for _jpeg, name in jobs:
                 rec["vl"].append({"name": name, "override": prompt_override,
                                   "max_tokens": max_tokens, "diagram": diagram})
-                out.append(elements_or_fn(name) if callable(elements_or_fn)
-                           else list(elements_or_fn))
+                # 2b-1: (elements, metas) 쌍 계약
+                out.append((elements_or_fn(name) if callable(elements_or_fn)
+                            else list(elements_or_fn), []))
             return out
         monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages", fake_batch)
     rec["set_vl"] = set_vl
