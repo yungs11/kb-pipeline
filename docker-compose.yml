@@ -312,7 +312,7 @@ services:
       KBP_VL_BLOCK_PROVIDERS: ${KBP_VL_BLOCK_PROVIDERS-DeepInfra}
       # 스캔 PDF 레인(paddle_gw). scripts/parse-svc.env 에만 있어 컨테이너로 전달되지 않아
       # paddle_gw 레인이 "KBP_PADDLE_OCR_GATEWAY_URL 미설정" RuntimeError 로 계속 실패했다.
-      KBP_PADDLE_OCR_GATEWAY_URL: ${KBP_PADDLE_OCR_GATEWAY_URL:-https://api-doc.ys-helperai.com/ocr/paddleocr_vl}
+      KBP_PADDLE_OCR_GATEWAY_URL: ${KBP_PADDLE_OCR_GATEWAY_URL:-http://15.164.81.29:18081/ocr/paddleocr_vl}
       # ── MinIO 접속(페이지 이미지 저장) ─────────────────────────────────────────
       # 외부 MinIO 로 전환 시: 아래 5개 값을 외부 엔드포인트/크레덴셜로 수정하고
       # (예: MINIO_ENDPOINT: minio.example.com:9000, MINIO_SECURE: "true"),

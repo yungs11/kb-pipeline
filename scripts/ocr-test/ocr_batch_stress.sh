@@ -8,8 +8,8 @@
 #       이 흔들리지 않는지 — 성공률·실패사유·소요를 본다. ROUNDS 로 지속 부하.
 #
 # 사용:
-#   HOST=api-doc.ys-helperai.com ./ocr_batch_stress.sh ../../test_doc
-#   HOST=https://api-doc.ys-helperai.com CONCURRENCY=8 ROUNDS=3 ./ocr_batch_stress.sh ./docs
+#   HOST=15.164.81.29:18081 ./ocr_batch_stress.sh ../../test_doc
+#   HOST=http://15.164.81.29:18081 CONCURRENCY=8 ROUNDS=3 ./ocr_batch_stress.sh ./docs
 # 환경변수: HOST(스킴없으면 http://) ENGINE(paddleocr_vl) LANG_(korean)
 #           CONCURRENCY(8) ROUNDS(1) POLL_TIMEOUT(1800)
 # ─────────────────────────────────────────────────────────────────────────────

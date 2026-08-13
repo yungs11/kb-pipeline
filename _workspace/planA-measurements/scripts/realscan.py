@@ -3,7 +3,7 @@ import json, time, os
 from concurrent.futures import ThreadPoolExecutor
 import pymupdf, httpx
 
-BASE = "https://api-doc.ys-helperai.com/ocr/paddleocr_vl"
+BASE = "http://15.164.81.29:18081/ocr/paddleocr_vl"   # 2026-08-13 이관(구 api-doc.ys-helperai.com)
 SP = os.path.dirname(os.path.abspath(__file__))
 D = "/Users/xxx/Downloads"
 

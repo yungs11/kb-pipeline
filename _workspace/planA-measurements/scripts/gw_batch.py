@@ -3,7 +3,7 @@ import json, sys, time
 from concurrent.futures import ThreadPoolExecutor
 import pymupdf, httpx
 
-BASE = "https://api-doc.ys-helperai.com/ocr/paddleocr_vl"
+BASE = "http://15.164.81.29:18081/ocr/paddleocr_vl"   # 2026-08-13 이관(구 api-doc.ys-helperai.com)
 SP = "/private/tmp/claude-501/-Users-xxx-workspace-8-kb-pipeline/43e0cd85-0161-40d8-89c3-772bf211cfb3/scratchpad"
 DPI = 150
 

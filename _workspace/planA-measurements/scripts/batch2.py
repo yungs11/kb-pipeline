@@ -3,7 +3,7 @@ import json, time, os
 from concurrent.futures import ThreadPoolExecutor
 import pymupdf, httpx
 
-BASE = "https://api-doc.ys-helperai.com/ocr/paddleocr_vl"
+BASE = "http://15.164.81.29:18081/ocr/paddleocr_vl"   # 2026-08-13 이관(구 api-doc.ys-helperai.com)
 SP = os.path.dirname(os.path.abspath(__file__))
 ABL = "/Users/xxx/Downloads/동양생명_ABL_온톨로지PoC_중간보고_v0.1.pdf"
 DEF = "/Users/xxx/Downloads/ST_AI_DG01_자산신탁_공통_지식베이스_프로세스_정의서_V1.0.pdf"

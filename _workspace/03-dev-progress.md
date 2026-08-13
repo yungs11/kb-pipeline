@@ -225,7 +225,7 @@ mineru 3.4.4 실설치+import+실 do_parse 로 검증. **실환경 결함 4건 �
 ## 스캔 레인 → PaddleOCR-VL 게이트웨이 교체 (2026-07-15)
 
 GPU 제약(AISP 5GB — MinerU VL+PaddleOCR GPU 동시 탑재 불가)과 CPU pipeline 속도(표 236셀 3p=181s) 문제로,
-스캔 레인을 **PaddleOCR-VL 게이트웨이**(api-doc.ys-helperai.com/ocr/paddleocr_vl — layout+VL+표조립 전부 GPU 서버)로 교체.
+스캔 레인을 **PaddleOCR-VL 게이트웨이**(`15.164.81.29:18081/ocr/paddleocr_vl`, 2026-08-13 이관 — layout+VL+표조립 전부 GPU 서버)로 교체.
 - **경위**: VL 단독(raw 프롬프트)은 표 평문화(불변식 위반, 프롬프트 탐침으로 실증) → 공식 클라이언트는 로컬 layout 재조립(반대) → **게이트웨이 = 로컬 의존 0**(httpx만) + markdown+HTML표(표준 중간표현 그대로 → hybrid_to_blocks 재사용).
 - **paddle_gw 레인**(`parsers/pdf/paddle_gw.py`): 페이지 렌더 → 페이지별 병렬 POST(KBP_VL_MAX_CONCURRENT) → hybrid_to_blocks(page_idx). 페이지 계약 보존.
 - **실측**: 신탁 3p 스캔 — 게이트웨이 48s vs MinerU pipeline(CPU) 181s vs hybrid 166s. 표 8개 `<table>`·한국어 정확.

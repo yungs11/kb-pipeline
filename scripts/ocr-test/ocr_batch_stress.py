@@ -11,10 +11,10 @@ Python3 표준 라이브러리만 사용(pip 불요). 게이트웨이는 PDF/이
 
 사용:
   # test_doc 폴더 전체를 동시 8로 1회
-  ./ocr_batch_stress.py ../../test_doc --host api-doc.ys-helperai.com -c 8
+  ./ocr_batch_stress.py ../../test_doc --host 15.164.81.29:18081 -c 8
 
   # 지속 부하: 폴더를 5회 반복(내구성 확인)
-  ./ocr_batch_stress.py ../../test_doc --host api-doc.ys-helperai.com -c 8 --rounds 5
+  ./ocr_batch_stress.py ../../test_doc --host 15.164.81.29:18081 -c 8 --rounds 5
 
   # 동시성 올려 한계 탐색
   ./ocr_batch_stress.py ./docs -c 16
