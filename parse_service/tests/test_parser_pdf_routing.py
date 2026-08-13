@@ -611,3 +611,32 @@ def test_triage_log_handles_decision_none(monkeypatch, caplog):
         res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
     assert res.kind == "pages"  # 예외 없이 정상 완료
     assert any("decision=None" in r.message for r in caplog.records)
+
+
+# ── figure + html 전소 방지 (앵커 14) ────────────────────────────────────────
+def test_vl_lane_keeps_figure_html_table(wire, monkeypatch):
+    """VL 이 표를 `category="figure"` + `content.html` 로 내도 **표가 살아남는다**.
+
+    실측 결함(2026-08-12): `elements_to_blocks` 를 직접 부르면 이 형태가
+    **img_path 빈 image 블록**이 되어 `<table>` HTML 이 통째로 사라진다.
+    `ocr/__init__.py` 의 figure→text 재라벨은 html 이 **빌 때만** 발동해 구제하지 못한다.
+    표가 많은 슬라이드가 정확히 이 형태다(사실 #25) — vl 레인이 노리는 바로 그 대상.
+    같은 element 의 산문도 함께 살아야 한다.
+    """
+    monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages",
+                        lambda jobs, ocr_url=None, **k: [[{
+                            "category": "figure", "page": 0,
+                            "content": {"html": "<table><tr><td>셀A</td><td>셀B</td></tr></table>",
+                                        "markdown": "표 아래 설명 산문이다."},
+                        }] for _ in jobs])
+    wire["set_gate"](_decision({1: "vl"}))
+    wire["set_md"]([""])                       # md 없음 → VL 산출물이 정본
+    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+
+    blocks = res.pages[0]["blocks"]
+    tbl = [b for b in blocks if b.get("type") == "table"]
+    assert tbl, f"figure+html 표가 전소됐다: {[b.get('type') for b in blocks]}"
+    assert "셀A" in tbl[0]["table_body"], "표 HTML 보존"
+    assert any("산문" in (b.get("text") or "") for b in blocks), "같은 element 의 산문도 보존"
+    assert not any(b.get("type") == "image" and not b.get("img_path") for b in blocks), \
+        "img_path 빈 image 블록이 남으면 안 된다"

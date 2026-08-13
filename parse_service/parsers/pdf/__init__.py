@@ -134,6 +134,61 @@ def _looks_like_failed_vl(elements: list[dict]) -> str | None:
     return None
 
 
+def vl_elements_to_blocks(elements: list[dict], *, page_idx: int,
+                          adopt_vl_table: bool, counters: dict) -> list[dict]:
+    """VL elements[] → blocks. **`elements_to_blocks` 를 직접 쓰면 안 되는 이유가 둘 있다.**
+
+    ① **`figure` + `content.html` 전소** — VL 이 표를 `category="figure"` 로 내면서 html 을
+       채우면, `ocr/__init__.py` 의 figure→text 재라벨은 **html 이 빌 때만** 발동해 구제되지
+       않고, `elements_to_blocks` 는 그걸 **img_path 가 빈 image 블록**으로 만들어
+       `<table>` HTML 을 통째로 버린다. 표가 많은 슬라이드가 정확히 이 형태다(사실 #25).
+       → 표는 `table` 블록으로 살리고 **같은 element 의 산문도 함께** 살린다.
+    ② **통짜 text 블록** — 그 외 element 에 `elements_to_blocks` 를 쓰면 markdown 전체가
+       text 블록 1개가 되어, 하류에서 "표가 들어 있으면 drop" 할 때 본문 산문까지 사라진다.
+       `hybrid_to_blocks` 는 산문/표를 정확히 분할하고 pipe 표도 `<table>` 로 변환한다.
+
+    `adopt_vl_table` — VL 이 낸 표를 채택할지. **승계할 paddle 표가 있는 경우에만 False** 다
+    (`_hybrid_scan_pages`). `vl` 레인은 승계 대상 자체가 없으므로 항상 True.
+    버린 표는 `counters["vl_extra_tables"]` 로 **관측만** 한다(규칙을 만들지 않는다).
+    """
+    from kb_pipeline.blockify import elements_to_blocks, hybrid_to_blocks
+
+    out: list[dict] = []
+    for el in elements or []:
+        cat = (el.get("category") or "").lower()
+        content = el.get("content") or {}
+        html = content.get("html") or ""
+        md = content.get("markdown") or content.get("text") or ""
+        if cat == "table":
+            if adopt_vl_table:
+                out.extend(elements_to_blocks([el]))
+            else:
+                counters["vl_extra_tables"] += 1
+            continue
+        if cat == "figure" and html.strip():
+            if adopt_vl_table:
+                out.append({"type": "table", "table_body": html, "page_idx": page_idx})
+            else:
+                counters["vl_extra_tables"] += 1
+            if md.strip():
+                out.extend(hybrid_to_blocks(md, page_idx=page_idx))
+            continue
+        if md.strip():
+            out.extend(hybrid_to_blocks(md, page_idx=page_idx))
+
+    cleaned: list[dict] = []
+    for b in out:
+        if b.get("type") == "table":
+            if not adopt_vl_table:
+                counters["vl_extra_tables"] += 1
+                continue
+        elif b.get("type") == "image" and not (b.get("img_path") or ""):
+            continue
+        b["page_idx"] = page_idx      # VL 경로는 0-based 로 넣는다 — 1-based 로 덮어쓴다
+        cleaned.append(b)
+    return cleaned
+
+
 def _hybrid_scan_pages(pages: list[dict], file_bytes: bytes, target_pnos: set[int],
                        ocr_url: str | None, counters: dict) -> set[int]:
     """layout 이 그림·차트를 검출한 **스캔** 페이지를 전면 VL 출력으로 교체한다(in-place).
@@ -210,46 +265,9 @@ def _hybrid_scan_pages(pages: list[dict], file_bytes: bytes, target_pnos: set[in
         keep = [b for b in paddle_blocks if b.get("type") == "table"]
         adopt_vl_table = not keep
 
-        vl_blocks: list[dict] = []
-        for el in elements:
-            cat = (el.get("category") or "").lower()
-            content = el.get("content") or {}
-            html = content.get("html") or ""
-            if cat == "table":
-                if adopt_vl_table:
-                    vl_blocks.extend(elements_to_blocks([el]))
-                else:
-                    counters["vl_extra_tables"] += 1
-                continue
-            if cat == "figure" and html.strip():
-                # 재라벨(figure→text)이 html 때문에 발동하지 않아 figure 로 남고, blockify 가
-                # img_path 빈 image 블록으로 만들어 내용이 전소되는 형태. 표는 규칙대로 처리하되
-                # **같은 element 의 산문은 반드시 함께 살린다**.
-                if adopt_vl_table:
-                    vl_blocks.append({"type": "table", "table_body": html, "page_idx": pno})
-                else:
-                    counters["vl_extra_tables"] += 1
-                md = content.get("markdown") or content.get("text") or ""
-                if md.strip():
-                    vl_blocks.extend(hybrid_to_blocks(md, page_idx=pno))
-                continue
-            # 그 외 — elements_to_blocks 를 쓰면 markdown 전체가 통짜 text 블록 1개가 되어
-            # "표가 들어 있으면 drop" 이 본문 산문까지 지운다. hybrid_to_blocks 는 산문/표를
-            # 정확히 분할하고 pipe 표도 <table> HTML 로 변환한다.
-            md = content.get("markdown") or content.get("text") or ""
-            if md.strip():
-                vl_blocks.extend(hybrid_to_blocks(md, page_idx=pno))
-
-        cleaned: list[dict] = []
-        for b in vl_blocks:
-            if b.get("type") == "table":
-                if not adopt_vl_table:
-                    counters["vl_extra_tables"] += 1
-                    continue
-            elif b.get("type") == "image" and not (b.get("img_path") or ""):
-                continue
-            b["page_idx"] = pno          # VL 경로는 0-based 로 넣는다 — 1-based 로 덮어쓴다
-            cleaned.append(b)
+        cleaned = vl_elements_to_blocks(elements, page_idx=pno,
+                                        adopt_vl_table=adopt_vl_table,
+                                        counters=counters)
 
         if not cleaned:
             log.warning("hybrid: all VL blocks filtered for page %d — keeping paddle output", pno)
@@ -576,9 +594,10 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
             #    하나라도 있으면 step 1 이 돌아 odl_md 가 전 페이지 채워지고, 그러면 vl 페이지가
             #    실텍스트 1자만 있어도 md 분기에 걸려 **VL 전사 결과가 통째로 버려진다**
             #    (혼합 문서에서 VL 비용만 태우고 결과 폐기 — 목표 (1)이 무효가 된다).
-            blocks = elements_to_blocks(vl_by_pno.get(pno) or [])
-            for b in blocks:
-                b["page_idx"] = pno
+            # `elements_to_blocks` 직접 호출 금지 — figure+html 표가 전소된다(위 헬퍼 docstring).
+            # vl 레인은 승계할 paddle 표가 없으므로 adopt_vl_table=True 고정.
+            blocks = vl_elements_to_blocks(vl_by_pno.get(pno) or [], page_idx=pno,
+                                           adopt_vl_table=True, counters=counters)
             if not blocks and _digital_text_len(md) >= _DIGITAL_MIN_CHARS:
                 blocks = hybrid_to_blocks(md, page_idx=pno)   # 2a 폴백 = 현행 유지
 

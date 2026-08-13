@@ -1153,6 +1153,37 @@ HEAD `(page_number, blocks, status, error)` / scan-lane `(page_number, blocks, l
 | `test_pdf_gate.py` 페이지수준 5건이 worktree 판에만 있었다 | 정본을 HEAD 로 골라 **명시적으로 이식하지 않으면 0건**이 되는데, **pytest 가 못 잡는다**(테스트가 없으면 실패도 없다) |
 | `KBP_TRIAGE_LOG_TABLE` 회귀 3건도 동일 | worktree 에 이 env 참조가 **0건** |
 
+### 결정 4 — `figure` + `html` 전소 방지를 **vl 레인에도** 적용 (구현 중 발견)
+
+`elements_to_blocks` 를 직접 부르면 VL 이 `category="figure"` + `content.html` 로 낸 표가
+**img_path 가 빈 image 블록**이 되어 `<table>` HTML 이 통째로 사라진다. `ocr/__init__.py` 의
+figure→text 재라벨은 **html 이 빌 때만** 발동해 구제하지 못한다. **표가 많은 슬라이드가 정확히
+이 형태**라, `vl` 레인이 노리는 대상에서 표가 조용히 없어진다.
+
+`_hybrid_scan_pages` 안에만 있던 element 처리를 `vl_elements_to_blocks()` 공유 헬퍼로 빼서
+두 경로가 같이 쓴다. 회귀 앵커는 **수정 전 코드에서 실제로 실패**함을 확인했다(`['image']` 로 전소).
+
+### `adopt_vl_table`("표는 paddle 이 정본")의 근거 재검토 — **기각 방향**
+
+사용자가 "VL 이 GW 보다 표를 못 읽은 사례를 본 적 없다" 고 지적해 근거를 전수 확인했다.
+
+| 확인 | 결과 |
+|---|---|
+| 규칙 근거 | **R5 한 줄 — 페이지 1장**(ABL p33 Re-TACRED, 전면 VL 이 3번 다 놓침) |
+| 그 페이지 성격 | **네이티브 가로형 슬라이드**. 게다가 리더보드라 PAGE_HYBRID 의 "차트는 3줄 요약" 이 삼킨 것으로 보인다 — 같은 페이지의 진짜 차트 3개는 정확히 요약했다. **사용자 판단: VL 동작이 옳았다** |
+| 규칙이 실제로 도는 곳 | `_hybrid_scan_pages` = **스캔 페이지** |
+| 스캔 페이지의 표 사례 | **0건.** `planA-measurements/layout/S_scan_*.json` 10장 전부 GW `<table>` 0개 — 표가 있는 세로형 스캔 페이지가 코퍼스에 없다 |
+| VL 의 표 실측(대조군) | LICO p10 **11행 45셀 + rowspan/colspan 3개 보존** · 정의서 p6 `<table>` 2개 |
+| **GW 의 표 실패 실측** | LICO p3 간트 → **`<td>` 1,098개 / 46,610자 거짓 표**(R4). VL 은 156자 요약 = 정상 |
+
+즉 **자기 도메인(스캔)에서 한 번도 측정되지 않은 규칙**이고, 표에 관해 실측된 명백한 실패는
+오히려 GW 쪽이다. 또 `LLM_NEEDED → vl` 이후 ABL p33 같은 네이티브 슬라이드는 `vl` 레인으로
+가므로 이 규칙이 적용될 여지 자체가 없다.
+
+**처분**: `vl` 레인은 애초에 표 승계가 없다(VL 산출물만 쓴다) — 이미 사용자가 원하는 동작이다.
+`_hybrid_scan_pages` 의 `adopt_vl_table` 제거는 **Phase 3 범위**이고, **V7-0**(hybrid 발화
+페이지가 `vl` 로 새는지)에서 사문 판정이 나면 코드째 사라지므로 그 결과를 보고 정한다.
+
 ### env — CLAUDE.md 폐쇄망 절차
 
 - **`.env.example` 에 7개가 전무했다.** "Phase 1 이 선언했다" 는 전제가 틀렸다(실측 grep).
