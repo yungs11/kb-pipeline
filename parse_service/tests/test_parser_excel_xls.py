@@ -118,7 +118,12 @@ def test_adapter_cleans_up_on_failure(monkeypatch):
 
 
 # ── V3: 실제 왕복 · 충실도 · 게이트 (soffice 필요) ─────────────────────────────
+# ⚠️ **kordoc 도 필요하다.** .xls 는 soffice 로 .xlsx 를 만든 뒤 엑셀 파서로 들어가는데,
+#    `EXCEL_PARSER_BACKEND=auto` 기본값이 이 파일들을 kordoc 백엔드로 보낸다. soffice 만
+#    검사하면 **soffice 는 있고 kordoc env 는 없는 머신에서 실패**한다(2026-08-14 실측:
+#    KORDOC_BIN/KORDOC_MD_OUT 을 주면 12 passed, 없으면 이 둘만 실패).
 @needs_soffice
+@needs_kordoc
 def test_real_xls_roundtrip_and_gate():
     before_lo = _tmp_entries("lo_")
     before_conv = _tmp_entries("excel_parser_rag_xls_")
@@ -173,6 +178,7 @@ def test_merged_cells_survive_conversion():
 
 
 @needs_soffice
+@needs_kordoc
 def test_cached_ref_error_survives_roundtrip():
     """§2.4 오검 축 — 캐시값에만 있는 #REF! 가 재계산으로 지워지면 실패한다.
 
