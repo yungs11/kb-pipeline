@@ -58,6 +58,8 @@ KEYS=(
   # VL 실패 정책(2026-08-14, Phase 2b-2). KBP_FAIL_ON_EMPTY_PAGE 는 **탈출구**라
   # 여기 빠지면 현장에서 되돌릴 수단이 폐쇄망에만 전달되지 않는다.
   KBP_VL_PAGE_ATTEMPTS KBP_VL_DOC_BUDGET_S KBP_FAIL_ON_EMPTY_PAGE
+  # VL 폴백 체인(2026-08-14) — 끄는 수단이 폐쇄망에 전달돼야 한다(위와 같은 이유).
+  KBP_VL_FALLBACK_CHAIN KBP_VL_FALLBACK_GW_MAX_PAGES
   # 프롬프트 오버라이드(비면 코드 기본값)
   KBP_PROMPT_HIERARCHY_RULE KBP_PAGE_HYBRID_DIAGRAM_RULE
   # 엑셀 — kordoc 백엔드. Dockerfile.parse-svc:10 이 컨테이너에 ENV 로 박는 값들

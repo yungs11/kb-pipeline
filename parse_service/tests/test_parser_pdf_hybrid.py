@@ -74,7 +74,8 @@ def wire(monkeypatch):
 def _run(pages, decision, rec):
     counters = {"layout_pages": 0, "visual_pages": 0, "area_guard_skipped": 0,
                 "truncated": 0, "error_placeholder": 0, "vl_page_calls": 0,
-                "tbl_backfill": 0, "vl_extra_tables": 0}
+                "tbl_backfill": 0, "vl_extra_tables": 0,
+                "fallback_gw": 0, "fallback_md": 0, "fallback_native": 0}
     pdf_parser._hybrid_scan_pages(pages, b"%PDF",
                                   set(getattr(decision, 'ocr_pages', ()) or ()),
                                   None, counters)
@@ -397,7 +398,8 @@ def test_hybrid_records_swallowed_vl_failure_in_attempts(wire):
     pages = [_page(1, [{"type": "text", "text": "원문"}], [_big()])]
     counters = {"layout_pages": 0, "visual_pages": 0, "area_guard_skipped": 0,
                 "truncated": 0, "error_placeholder": 0, "vl_page_calls": 0,
-                "tbl_backfill": 0, "vl_extra_tables": 0}
+                "tbl_backfill": 0, "vl_extra_tables": 0,
+                "fallback_gw": 0, "fallback_md": 0, "fallback_native": 0}
     pdf_parser._hybrid_scan_pages(
         pages, b"%PDF", {1}, None, counters,
         att=lambda pno, stage, outcome, meta=None: seen.append((pno, stage, outcome)))

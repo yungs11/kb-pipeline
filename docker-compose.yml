@@ -308,6 +308,10 @@ services:
       KBP_VL_PAGE_ATTEMPTS: ${KBP_VL_PAGE_ATTEMPTS:-2}
       KBP_VL_DOC_BUDGET_S: ${KBP_VL_DOC_BUDGET_S:-3600}
       KBP_FAIL_ON_EMPTY_PAGE: ${KBP_FAIL_ON_EMPTY_PAGE:-1}
+      # VL 폴백 체인(2026-08-14) — VL 실패 → pw → odl → rp.text → 빈. 기본 ON.
+      # `:?` 금지 — 기존 현장 .env 에 이 키가 없어 배포가 통째로 막힌다.
+      KBP_VL_FALLBACK_CHAIN: ${KBP_VL_FALLBACK_CHAIN:-1}
+      KBP_VL_FALLBACK_GW_MAX_PAGES: ${KBP_VL_FALLBACK_GW_MAX_PAGES:-10}
       # hybrid VL 입력 해상도 — 실측(R2~R7)이 전부 200dpi 라 그 값과 일치시킨다.
       KBP_VL_PAGE_DPI: ${KBP_VL_PAGE_DPI:-200}
       # image/figure/chart 가 페이지의 이 비율 이상일 때만 전면 VL. 실측 공백 0.55~5.06%.

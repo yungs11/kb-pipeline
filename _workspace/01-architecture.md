@@ -242,11 +242,26 @@ Rust, `crates/edgequake-pipeline`. passthrough 로 facade 청크를 받아 추�
 | `gw` | 게이트웨이 산출물 그대로 |
 | `gw_hybrid` | hybrid 가 전면 VL 로 교체 — **`gw` 와 구분 필수**(내용이 게이트웨이 것이 아니다) |
 | `vl` | VL 전사 |
-| `vl_md_fallback` | VL 이 비어 ODL md 가 채움(2a 현행 동작 — 2b-2 가 제거 검토) |
+| `gw_fallback` | **폴백 체인 1단계** — VL 실패 후 게이트웨이가 채움 (2026-08-14 신설) |
+| `vl_md_fallback` | **폴백 체인 2단계** — ODL md 가 채움 (2b-2 가 지웠다가 2026-08-14 복원) |
+| `native_fallback` | **폴백 체인 3단계** — PyMuPDF 네이티브 텍스트가 채움 (동상) |
 | `odl_md` | odl 레인 정상 경로 |
 | `skip` | SKIP 페이지 — **내용 없음이 정상** |
 | `unclassified` | 방어코드. 값이 나오면 **라우팅 버그 신호** |
 | **`empty`** | 어느 경로도 못 구했다 = **품질 상한 지표** |
+
+**VL 폴백 체인**(`KBP_VL_FALLBACK_CHAIN`, 기본 ON — 2026-08-14 사용자 확정):
+`VL 실패 → pw → odl → rp.text → 빈 페이지`. **이미 거친 레인은 건너뛴다**(paddle_gw 출신은
+pw, odl 출신은 odl). 끄면 2b-2 동작 — VL 실패가 곧 문서 실패이고 **품질은 안 떨어진다**
+(다른 출처로 채우지 않으므로 열화가 가려지지 않는다).
+
+근거(실측 2026-08-14): 전량 VL 문서가 프로바이더 절단으로 **간헐 40% 실패**(온톨로지 18p
+5회 중 2회, p17 이 3회 다 truncated). 문서 결함이 아니라 프로바이더 사정이라 재실행하면
+통과한다. 체인 ON 재측정에서 **3/3 성공**하고 그중 1회는 p17 을 `gw_fallback` 이 살렸다.
+
+**stage 어휘**: `vl` · `odl` · `hybrid_vl` · **`gw`**(2026-08-14 신설 — 게이트웨이 시도가
+그전까지 `attempts` 에 한 줄도 안 남았다). `_fail_if_vl_empty` 는 `a[0]=="vl"` ∧
+`meta.attempt` 만 보므로 `gw`·`hybrid_vl` 은 판정에서 자동 제외된다.
 
 ⚠️ **`skip`·`unclassified` 는 `empty` 로 덮지 않는다**(`_EMPTY_IS_NORMAL`) —
 정상적으로 비는 경로와 실패를 섞으면 "품질 상한" 이 거짓이 된다.
