@@ -1324,3 +1324,88 @@ source: gw_hybrid 2p · odl_md 3p · vl 2p
 | 6 | LLM_NEEDED | vl | … | 성공 | vl | vl:ok(582,stop) |
 ```
 V0 의 86토큰 절단이 나면 `vl:ok(86,stop)` 으로 **로그만 봐도 즉시 보인다.**
+
+## 구조화 텍스트 레인 — html/csv/xml (2026-08-11)
+
+**결정**: html/htm 을 한컴 형변환 API 대상에서 제외하고 `parsers/html` 이 직접 처리한다.
+csv 는 엑셀 레인으로 옮긴다. xml 을 평문 레인에 편입한다. (브랜치 `feat/markup-lane`)
+
+**착수 전 실측으로 드러난 현재 동작** — 전제가 일부 틀렸다. 형변환 API 를 실제로 타는 것은
+html 뿐이었고, csv 는 `TEXT_EXTS` 라 구조를 잃은 채 원문 텍스트로 들어갔으며, xml 은 어느
+집합에도 없어 `pdf` 도메인으로 떨어져 `%PDF` 가드에서 `not a PDF (and not convertible)` 로
+죽고 있었다.
+
+- **markitdown 재검토 후 기각.** 실측: 병합셀 html 표에서 열 정렬이 붕괴(헤더 3열 ·
+  데이터행 2셀), json/xml 은 `PlainTextConverter` passthrough(변환 로직 0줄), site-packages
+  **+140MB**(onnxruntime 69M/sympy 29M/numpy 27M/magika 3M — 우리는 확장자로 라우팅하므로
+  magika 의 파일타입 sniffing 이 불필요). Phase 2d(`a8f9818`)에서 같은 사유로 제거된 이력이
+  있고 재유입 가드 `test_no_markitdown` 이 있다 — **가드 유지**. 엔진으로는 markitdown 이
+  내부에서 쓰는 `markdownify` 만 직접 채택(신규 직접 의존 1개, 전이 의존 `six`).
+- **html**: 최상위 `<table>` 을 호출별 nonce sentinel 로 빼두고 나머지만 markdown 화 →
+  복원 → `hybrid_to_blocks`. colspan/rowspan 보존.
+  - 표 **내부** 빈 줄은 접는다 — 안 접으면 markdown-it 의 html_block 이 거기서 끊겨 표
+    뒷부분이 raw 텍스트로 샌다(실측). 셀 안 `<pre>` 의 빈 줄 손실은 허용된 손실이다
+    (표 전체 손실 vs 빈 줄 하나).
+  - **변환 대상 노드를 고르지 않는다.** `<body>` 로 스코핑하려던 초안이 세 번 연속 결함을
+    냈다 — ① body 밖 `<table>` 소실(bs4 는 브라우저와 달리 재부모화하지 않는다), ②
+    `</head>` 생략 시 head 제거가 본문 전멸, ③ 빈 `<head>` 때문에 스코핑 판정이 상시
+    무력화되어 XHTML prolog 누출. 분기를 없애고 soup 전체를 쓰되 본문 아닌 노드를
+    떼어내는 방식(`_strip_non_content`)으로 셋 다 사라졌다.
+  - data-URI `<img>` 는 alt 로 대체 — `modal.py:586` 의 `img_path` 로 base64 가 흘러들어
+    enriched_content→청킹→임베딩까지 가는 것을 막는다(html 은 MinIO 업로드 경로도 없다).
+- **csv**: 헤더 행에 서식(볼드+채우기)을 준 xlsx 로 메모리 합성해 엑셀 레인에 위임.
+  서식이 없으면 `header_detector` 의 style gate 에 걸려 청크가 `사번: 1001` 이 아니라
+  `A: 1001` 로 퇴화한다. 백엔드는 **openpyxl 고정**(`auto` 는 전결/계층이 없으면 kordoc 으로
+  떨어지고 `KORDOC_BIN` 없는 환경에선 실패). 시트명의 `[ ] : * ? / \` 와 셀 제어문자는
+  정규화(openpyxl 이 거부해 문서 전체가 parse_failed 가 된다). 모든 문자열 셀은
+  `data_type='s'` 고정 — `=` 로 시작하는 셀이 수식이 되면 `data_only=True` 읽기에서 `None`
+  이 되어 **조용히 사라진다**(실측). **헤더 키 청크가 항상 보장되지는 않는다** — 첫 컬럼
+  헤더가 계층 spine 용어를 포함하면 키 이름이 `A:` 로 떨어진다(값은 청크 경로에 보존, D45).
+- **xml**: `TEXT_EXTS` 편입. 더불어 text 레인에 **빈 블록 가드**를 넣었다 — 속성 전용 XML
+  export 는 텍스트 노드가 없어 blocks=0 인데, 가드가 없으면 `enriched_content=""` 로 200
+  성공이 나가 "큰 실패 → 조용한 성공" 으로 실패 유형이 나빠진다.
+- **`TEXT_EXTS` 에서 csv 를 빼는 것과 `EXCEL_EXTS` 에 넣는 것은 한 커밋**이다. 쪼개면
+  사이 커밋에서 csv 가 pdf 도메인으로 떨어져 모든 csv 업로드가 거부된다.
+- **폐쇄망**: 신규 의존성 `markdownify` 하나(`requirements.txt`), env 변경 없음.
+  `verify-bundle.sh` 에 html 왕복 스모크 추가 — import 존재만이 아니라 병합셀이 `<table>`
+  로 살아 나오는지까지 본다. 실제 이미지 빌드 후 실행 확인: `✓ html 왕복 성공 —
+  html_blocks=2`. **markdownify 누락은 부분 고장이 아니라 parse-svc 전체 기동 실패**다
+  (`router.py` 가 top-level 로 `parsers.html` 을 import) — 현장 진단 시 참고.
+- 검증: plan v1→v7, ultracode 경쟁 검증 6라운드(READY v7). 라운드마다 계획서 코드를 실제로
+  실행해 "Expected: PASS" 선언의 진위를 확인했고, 그 방식으로 "계획서 코드가 계획서 테스트를
+  통과하지 못하는" 경우를 3회 잡았다.
+
+## 레거시 `.xls`(BIFF) 레인 개통 (2026-08-13, markup-lane)
+
+**증상** — 폐쇄망에서 `.xls` 업로드가 `openpyxl does not support the old .xls file format…`
+으로 실패. 처음엔 "번들에 openpyxl 이 빠졌나"로 의심했지만 **반입 tar 내부를 열어보니
+있었다**(kb·kbp-parse 양쪽 `site-packages/openpyxl/` 확인). 폐쇄망 문제가 아니라
+**호스트 맥에서도 동일하게 죽는** 미완성 기능이었다.
+
+**진짜 원인 (실측 재현)**
+1. `.xls` 는 `EXCEL_EXTS` 소속이라 엑셀 레인으로 들어오고 상류 형변환 API 를 안 탄다.
+2. `auto_backend._should_try_openpyxl` 이 `suffix in {".xlsx",".xlsm"} and 전결키워드` 라
+   **`and` 단락 평가**로 `.xls` 는 키워드 검사에 **도달조차 못 하고** kordoc 으로 간다.
+3. `kordoc_backend` 는 kordoc 마크다운과 **동반 openpyxl 워크북**을 함께 쓰는데,
+   원본 `.xls` 를 그대로 `load_workbook` 해서 거기서 죽는다.
+4. 변환기(`loaders/xls_converter.py`)는 **있었지만 죽은 코드**였다 — 호출처가 openpyxl
+   백엔드 경로뿐이라 2번 때문에 `.xls` 가 도달할 수 없었다. `auto_backend` 주석의
+   "소속 backend 가 soffice 변환을 내부 처리" 는 사실이 아니었다(정정함).
+
+즉 **크래시(3)와 조용한 품질 손실(2)이 겹쳐 있었다** — 전결 `.xls` 는 죽지 않았어도
+`delegation_rule` 청크를 못 만들었을 것이다.
+
+**해결** — 레인 입구 한 곳(`parsers/excel/__init__.py`)에서 **매직바이트**로 BIFF 를 판정해
+`.xlsx` 바이트로 갈아끼운다(csv 선례와 동형). 하류 코드 변경 0 으로 크래시·라우팅·게이트가
+동시에 해결된다. 확장자 판정을 쓰지 않는 이유는 `01-architecture.md` §8 참조.
+parse-svc 이미지에 `libreoffice-calc/core` 추가(**압축 +176.6MB, 번들 +8%** 실측).
+
+**구현 중 발견 — LibreOffice 는 캐시 오류값을 소문자로 쓴다.** 왕복 후 `#REF!` → `#ref!`,
+수식 쪽은 `=#REF!` → `="#ref!"`(문자열 리터럴). 게이트의 `ERROR_RE` 는 대문자 전용이라
+**값·수식 스캔이 전부 빗나가 `.xls` 문서의 참조오류 검사가 통째로 침묵**했다(= 불량 문서가
+조용히 통과). `re.IGNORECASE` 추가로 해결. 이건 plan 이 "최대 미검증 축"으로 지목해 픽스처
+전제 assert 를 넣어둔 자리에서 **그 assert 가 실제로 발화해** 잡혔다.
+
+**검증** — 신규 테스트 12개(매직바이트 라우팅 5케이스·탈출구·임시물 누수 정상/예외·실왕복·
+병합셀 colspan 비교·캐시전용 `#REF!` 보존·전결 게이트 도달) + 기존 회귀 341 통과.
+폐쇄망 가드에 `.xls` 왕복 스모크 추가(픽스처 부재 시 **스킵이 아니라 실패**).

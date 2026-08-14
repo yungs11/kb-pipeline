@@ -30,7 +30,7 @@
 | **W3** | Community 배치 | ✅ merged | `kb_pipeline/community.py` — Louvain + qwen 리포트 + `global_query`. 순수 Python(edgequake 불변). 라이브: 커뮤니티 60/리포트 15 |
 | **W4** | 정합성/RLS | ◐ 하드닝 과제 | 앱레벨 격리 검증됨. DB레벨 FORCE RLS 는 superuser 롤 우회로 무력(아래 §4) |
 | **W5** | Search 머지 | ✅ 라이브러리 + ✅ 명시 mode 배선 / ✗ 자동 라우터 | `kb_pipeline/search.py`. facade `/search` 가 `mode=local\|global` 을 받고 global 은 `global_search` 직결(동시성 DB 슬롯 + 전용 LLM 타임아웃). kb 챗·프론트 토글까지 배선(B). `route()` 자동 라우팅은 **의도적 미배선** — 명시 토글로 대체 |
-| **W6** | 파서 라우팅 | ◐ 권고 반영 | markitdown 병합표 손실 → 병합 중요 pptx/DOCX 구조파서 라우팅(02-changes §4) |
+| **W6** | 파서 라우팅 | ◐ 권고 반영 | markitdown 병합표 손실 → 병합 중요 pptx/DOCX 구조파서 라우팅(02-changes §4). 2026-08-11 markup-lane 에서 html 이 형변환 API 밖으로 나오고 csv 가 엑셀 레인으로 이동(markitdown 재검토 후 재차 기각) |
 
 ---
 
@@ -160,6 +160,8 @@ plan: `docs/superpowers/plans/2026-07-02-parser-consolidation-phase2.md` (v3 REA
 | **2d** | markitdown 완전 제거 + docx/폴백=kordoc + facade 파싱코드 삭제(/ingest/submit·status 제거) | ✅ 완료 (Task12~14, `13c8dc0`+`a8f9818`+`f3e73f3`) — ① `tools/kordoc.py`(CLI 래퍼)+`parsers/docx`(kordoc 네이티브, 병합표 `<table>` 보존), router docx=kordoc·fallback=kordoc, markitdown 폴백 제거. ② `parse_service/parsing.py` 삭제, `_safe_basename`→`tools.safe_basename`, blockify `PARSER_ROUTING`/`recommended_parser` 삭제(W6 측정은 역사 기록 유지), requirements markitdown 제거, 재유입 가드 `test_no_markitdown`. ③ facade `service/parsing.py`·`excel_parser_client.py`·`ingest.py` 삭제, `/ingest/submit`·`/ingest/status` 제거(`/ingest` orchestration 유지), Dockerfile.facade JRE 제거. kb-backend `/ingest/submit\|status` 참조 0건 확인 후 진행 |
 | **2e** | compose 정리(excel-parser·document-parser·redis 제거) + Dockerfile 런타임 + E2E | ✅ 완료 (Task15~17, `fddbd2a`+`ee840dd`+문서커밋) — ① Dockerfile.parse-svc 에 node/kordoc(`npm i -g kordoc`) 런타임(이미지 검증 kordoc 3.8.3/java21/fitz). ② compose 에서 excel-parser·document-parser·redis 서비스+redis_data 볼륨 삭제, parse-svc `EXCEL_PARSER_BACKEND` override 제거(이미지 기본 auto)+`KBP_VL_MAX_CONCURRENT`, depends_on=gotenberg+minio, facade/adaptive_chunk 의 OCR/EXCEL URL 제거, `.env.example`·override.yml 정리. 스택 down/build/up 전 서비스 healthy(excel-parser/document-parser/redis 부재). ③ E2E: 확장자별 단독 indexed 검증(xlsx=excel_rag_parser·webp=recursive_1100·pdf=9청크·docx=kordoc `<table>` 보존). **다형식 동시적재+검색 완주는 OpenRouter LLM 처리량 지연으로 미완**(범위 밖 — 크레딧 여유 시 재확인). |
 
+| **markup-lane** | html→`parsers/html`(형변환 미경유), csv→엑셀 레인(openpyxl 고정), xml→text 편입 | ✅ 완료 (브랜치 `feat/markup-lane`) — plan v7 READY(ultracode 6라운드). 신규 의존성 `markdownify` 1개, env 변경 없음. `verify-bundle.sh` html 왕복 스모크 추가 후 **실제 이미지로 실행 확인**(`✓ html 왕복 성공 — html_blocks=2`). 회귀 700 passed/3 skipped. 남은 한계는 `deferred.md` D39~D50 |
+
 **Phase 2 파서 일원화 종료(2026-07-03)**: 파싱 fleet 이 parse-svc 단일 이미지 in-process 로 통합(java+node/kordoc+PyMuPDF). 외부 excel-parser/document-parser/redis 제거, markitdown 완전 제거(office→PDF)만 잔존. 상세는 02-changes §7.
 
 발견 리스크: `test_minio_client.py` 1건 기존 red(bucket auto-create 제거 vs 테스트 미갱신 — 2a 무관, 별도 정리), 모달 테스트 4건은 `KBP_MODAL_ENRICH=1` 필요(기본 off 정책). E2E 다형식 동시적재는 LLM 처리량 의존(코드 무관).
@@ -226,6 +228,8 @@ mineru 3.4.4 실설치+import+실 do_parse 로 검증. **실환경 결함 4건 �
 
 GPU 제약(AISP 5GB — MinerU VL+PaddleOCR GPU 동시 탑재 불가)과 CPU pipeline 속도(표 236셀 3p=181s) 문제로,
 스캔 레인을 **PaddleOCR-VL 게이트웨이**(`15.164.81.29:18081/ocr/paddleocr_vl`, 2026-08-13 이관 — layout+VL+표조립 전부 GPU 서버)로 교체.
+
+스캔 레인을 **PaddleOCR-VL 게이트웨이**(2026-08-11 현재 `http://15.164.81.29:18081/ocr/paddleocr_vl` — 이전 api-doc.ys-helperai.com — layout+VL+표조립 전부 GPU 서버)로 교체.
 - **경위**: VL 단독(raw 프롬프트)은 표 평문화(불변식 위반, 프롬프트 탐침으로 실증) → 공식 클라이언트는 로컬 layout 재조립(반대) → **게이트웨이 = 로컬 의존 0**(httpx만) + markdown+HTML표(표준 중간표현 그대로 → hybrid_to_blocks 재사용).
 - **paddle_gw 레인**(`parsers/pdf/paddle_gw.py`): 페이지 렌더 → 페이지별 병렬 POST(KBP_VL_MAX_CONCURRENT) → hybrid_to_blocks(page_idx). 페이지 계약 보존.
 - **실측**: 신탁 3p 스캔 — 게이트웨이 48s vs MinerU pipeline(CPU) 181s vs hybrid 166s. 표 8개 `<table>`·한국어 정확.
@@ -754,8 +758,32 @@ sha256sum -c → tar xzf → ① .env → ② verify-bundle --env .env [--parse-
 리포 루트 `.env` 를 단일 출처로 만들었다(38 → 58키). 게이트/트리아지 임계 16종 +
 `MODEL_NAME` + `VL_MAX_TOKENS` + OCR 게이트웨이 URL 이 `scripts/parse-svc.env` 에만 있어서
 **호스트 dev 는 정상인데 compose 로 띄우면 18개가 빈 값**이었고, `.env` 의
-`KBP_OPENAI_API_KEY` 가 빈 값이라 모달 LLM 이 `KeyError` 였다. 이제 `parse-svc.env` 는
-`scripts/sync-parse-svc-env.sh` 로 `.env` 에서 파생시킨다.
+`KBP_OPENAI_API_KEY` 가 빈 값이라 모달 LLM 이 `KeyError` 였다. 한동안은 `parse-svc.env` 를
+`scripts/sync-parse-svc-env.sh` 로 `.env` 에서 파생시켰다.
+
+**2026-08-13 — `scripts/parse-svc.env` 와 파생 스크립트를 폐기했다(파일 하나로 끝).**
+파생본이라도 파일이 둘이면 어긋난다: 루트 `.env` 만 새 OCR 게이트웨이 주소
+(`http://15.164.81.29:18081/ocr/paddleocr_vl`)로 고쳐지고 파생본은 옛 주소
+(`api-doc.ys-helperai.com`)로 남아, 호스트 dev parse-svc 가 계속 옛 게이트웨이로 갔다.
+런처는 중복 키 30개를 계속 경고하고 있었지만 아무도 보지 않았다 — **경고는 방어가 아니다.**
+파생본에만 있던 실값 11개(`KBP_GW_*` 페이지 게이트 9 + `KBP_DEGEN_COMPRESS_MAX`·
+`KBP_DEGEN_SOFT_RULES`)를 `.env` 로 승격하고 `scripts/parse-svc.env`,
+`scripts/sync-parse-svc-env.sh`, `scripts/parse-svc.env.example` 을 지웠다.
+실측: 재기동 후 프로세스 실효 env — 옛 파일 실값 39키 대비 **누락 0·값 변화 0**.
+로더(`load-dev-env.sh`)의 레거시 파일 지원 자체는 하위호환으로 남아 있다.
+
+**같은 날 `scripts/facade.env` 도 폐기했다.** 여기엔 선행 결함이 하나 있었다 —
+`run-facade-worker.sh` 는 `load-dev-env.sh` 를 쓰지 않고 `set -a; . scripts/facade.env` 로
+그 파일만 읽었다. **같은 서비스의 두 프로세스(facade / facade-worker)가 서로 다른 env
+규칙으로 돌고 있었고**, worker 는 루트 `.env` 를 아예 안 봤다. 런처를 facade 와 같은 로더로
+바꾼 뒤 파일을 지웠다. 내용 대조: 중복 8키(값 동일), 주소 4키는 `_dev_env_host_addrs` 가
+같은 값으로 파생, `KBP_PG_DSN` 은 `.env` 의 `POSTGRES_*` 로 조립돼 값 일치 —
+실이관은 `KBP_STAGING_TTL_SECONDS`·`KBP_STAGING_BATCH_TTL_SECONDS` 둘뿐이었다.
+실측: facade(pid 42957)·worker(43034) 재기동 후 옛 파일 실값 15키 대비 **누락 0·변화 0**,
+`GET /jobs/workers` → `online:true, capacity:4`.
+
+> 재기동 직후 `capacity:8` 로 보이는 건 정상이다 — 죽은 worker 행이
+> `KBP_JOB_WORKER_STALE_SECONDS=60` 동안 `kbp.job_workers` 에 남아 합산된다. 60s 뒤 4 로 돌아온다.
 
 실측: 런처 실효값 통합 전후 변화 **0건**, `.env` 단독으로 필수 5키 해소,
 dev/airgap compose config 양쪽 보간 성공.
@@ -1425,3 +1453,36 @@ vl      (가로형·다이어그램)                    → 절단이면 3회까
 앵커 `test_demoted_paddle_page_also_gets_retries`(강등도 절단이면 3회).
 `test_thin_page_vl_failure_fails_document` 의 `len(calls)==1` 단언이 **옛 배분을
 단언하고 있어** 3 으로 갱신했다.
+
+### 레거시 `.xls` 레인 (2026-08-13, markup-lane) — 구현 완료·이미지 검증 진행
+
+폐쇄망 `.xls` 실패 신고에서 시작해 **호스트에서도 동일하게 죽는 미완성 기능**임을 재현하고
+레인 입구 변환으로 개통했다. 경위·설계 근거는 `02-changes.md`, 규칙은 `01-architecture.md` §8.
+
+- plan: `docs/superpowers/plans/2026-08-13-xls-lane-support.md` (ultracode **6라운드**, READY v6)
+  - must-fix 추이 15 → 6 → 3 → 1 → 3 → 0. **다섯 번이 같은 부류**였다 — 검증이 조용히
+    통과해 아무것도 증명하지 못하는 assert(가짜로 대체한 함수의 부작용 검사, 중첩 디렉터리를
+    최상위에서 glob, 수식에 토큰이 있어 무조건 잡히는 픽스처 등). 계획서 습관의 문제라
+    plan 방향은 바꾸지 않았다.
+- 코드: `parsers/excel/__init__.py`(매직바이트 분기), 신규 `parsers/excel/xls_to_xlsx.py`,
+  `loaders/xls_converter.py`(최상위 `lo_*` 프로필·killpg·산출물 폴백·타임아웃 180→60s),
+  `loaders/workbook_loader.py`(output_dir 명시), `gate/excel_gate.py`(**ERROR_RE IGNORECASE**),
+  `auto_backend.py` 주석 정정, `Dockerfile.parse-svc`(libreoffice-calc/core)
+- 테스트: `test_parser_excel_xls.py` 12개 통과, 전체 **341 통과**(회귀 0)
+- 폐쇄망: `verify-bundle.sh` 에 `.xls` 왕복 스모크 추가(`BIFF_CHECK_TIMEOUT` 기본 300s,
+  픽스처 부재 시 실패). `build-bundle.sh` 가 이를 강제 실행한다.
+- **번들 용량: parse-svc 이미지 압축 +176.6MB → `kbp-parse-bundle` 2.18GB → 약 2.36GB(+8%)**
+  (`python:3.12-slim` 179MB→817MB, 압축 43.3MB→219.9MB 실측, amd64)
+- deferred 6건 신규(D51~D56): doc_guard/kb-backend 의 `.xls` 미지원(배포 후 비로소 도달),
+  암호 OOXML 이 CFB 매직에 걸리는 문제, 전결 Tier2 수락은 **실제 위임전결 문서로 닫아야 함**
+- **§7 구현 후 검증 10항목 전부 닫힘**(P1~P10). 실측 요약:
+  - 현장 `.xls`(239KB, 진짜 BIFF) → 21청크, 게이트 ok=True, 내용 보존 확인
+  - **변환 소요 38s(맥)** → 타임아웃 60s 는 여유 1.6배뿐 → **120s + `KBP_XLS_CONVERT_TIMEOUT`
+    env 신설**(선언처 5곳 전수, dev·airgap compose 보간 확인). plan 의 "env 신설 없음" 에서
+    의도적으로 이탈했다 — 근거는 실측이다
+  - doc_guard(:8001) 실측 → `.xls` 정상 판정(`ref_error 참조오류 시트 H3, J9`). D51 은 기우였다
+    (`SUPPORTED_EXTENSIONS` 는 호출부 0건인 `/v1/check` 전용)
+  - **전결 `.xls` 동등성 확인** — 실제 위임전결 문서로 원본 `.xlsx` 와 변환본이 둘 다
+    `routed_backend=openpyxl`, `delegation_rule` **207개**, 본문 동일(D56 닫힘)
+  - amd64 컨테이너: 콜드 18.1s/웜 8.7s, 타임아웃 강제 종료 후 `lo_*` 잔존 0 + 다음 변환 정상
+  - 폐쇄망 가드 실행: `✓ .xls 왕복 성공 — biff_chunks=2 sheets=1`

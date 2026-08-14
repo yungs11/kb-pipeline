@@ -11,7 +11,13 @@ from pathlib import Path
 
 from parse_service.parsers import RouteResult, ParserError
 
-EXCEL_EXTS = {"xlsx", "xlsm", "xls"}
+#: csv 는 2026-08-11 편입 — 메모리상 xlsx 로 합성해 같은 백엔드로 흘린다(`csv_to_xlsx`).
+EXCEL_EXTS = {"xlsx", "xlsm", "xls", "csv"}
+
+#: OLE Compound File 시그니처 — 레거시 `.xls`(BIFF)의 컨테이너.
+#: ⚠️ BIFF 전용이 아니다(구 .doc/.ppt, 암호화된 .xlsx 도 CFB). 정밀 판별은 비범위 —
+#: 그런 입력은 변환을 시도했다가 실패한다(오늘은 openpyxl 이 즉시 실패한다).
+_CFB_MAGIC = b"\xd0\xcf\x11\xe0"
 
 
 def normalize_rag_chunk(rc: dict, index: int) -> dict | None:
@@ -59,9 +65,36 @@ def _fetch_rag_chunks(file_bytes: bytes, filename: str, excel_url: str | None = 
     # document_title로 명시한다. basename 정규화는 내부 직접 호출에도 경로 문자열이
     # 제목으로 섞이지 않게 하는 방어선이다.
     safe_filename = Path((filename or "upload.xlsx").replace("\x00", "")).name or "upload.xlsx"
-    suffix = Path(safe_filename).suffix.lower() or ".xlsx"
+    is_csv = Path(safe_filename).suffix.lower() == ".csv"
+    if is_csv:
+        # csv → xlsx 합성. document_title 은 아래에서 원본 stem 을 그대로 쓰므로
+        # 파일명은 바꾸지 않고 바이트와 suffix 만 갈아끼운다.
+        from parse_service.parsers.excel.csv_to_xlsx import csv_bytes_to_xlsx
+        file_bytes = csv_bytes_to_xlsx(file_bytes, safe_filename)
+
+    # ── 레거시 .xls(BIFF) → .xlsx (2026-08-13) ────────────────────────────────
+    # **확장자가 아니라 매직바이트로 판정한다.** 확장자로 하면 두 방향으로 깨진다:
+    #   · 이름만 .xls 인 xlsx(zip) — 지금은 openpyxl 이 zip 을 스니핑해 정상 처리되는데
+    #     무조건 변환하면 soffice 없는 환경에서 되던 문서가 죽는다.
+    #   · 이름이 .xlsx 인 진짜 BIFF — 확장자 기준으로는 안 고쳐진다.
+    # 여기서 갈아끼우면 하류(전결 Tier1·계층 Tier1.5 확장자 게이트, kordoc 동반 워크북,
+    # compute_gate_summary)가 전부 .xlsx 를 보게 되어 코드 변경 0 으로 해결된다.
+    is_biff = file_bytes[:4] == _CFB_MAGIC
+    if is_biff:
+        from parse_service.parsers.excel.xls_to_xlsx import xls_bytes_to_xlsx
+        file_bytes = xls_bytes_to_xlsx(file_bytes, safe_filename)
+
+    # 강제 .xlsx 는 **바이트를 실제로 갈아끼운 경우에만**. zip 매직까지 조건에 넣으면
+    # .xlsm(OOXML=zip) 의 임시파일 suffix 가 조용히 .xlsx 로 바뀐다(kordoc CLI 는
+    # 확장자로 디스패치한다). 변환하지 않은 입력의 확장자는 하나도 바꾸지 않는다.
+    suffix = ".xlsx" if (is_csv or is_biff) else (Path(safe_filename).suffix.lower() or ".xlsx")
     cfg_kwargs: dict = {
-        "backend": os.environ.get("EXCEL_PARSER_BACKEND", "auto"),
+        # csv 는 백엔드를 openpyxl 로 고정한다. 기본 `auto` 는 "전결" 키워드(Tier1)나
+        # 계층 지배도(Tier1.5)가 있을 때만 openpyxl 을 쓰고 그 외에는 kordoc 으로
+        # 떨어지는데(backends/auto_backend.py), csv 유래 평면 표는 둘 다 아니다.
+        # csv 에는 병합셀·다중시트·수식이 없어 kordoc 의 렌더 충실도 이점이 없고,
+        # KORDOC_BIN 이 없는 환경에선 아예 실패한다(실측).
+        "backend": "openpyxl" if is_csv else os.environ.get("EXCEL_PARSER_BACKEND", "auto"),
         "document_title": Path(safe_filename).stem,
     }
     if os.environ.get("KORDOC_BIN"):

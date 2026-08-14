@@ -90,13 +90,16 @@ mkdir -p "$KORDOC_MD_OUT"
 # 2) env + secrets (gitignored). set -a auto-exports every KEY=value.
 # ── env — 리포 루트 `.env` 하나가 비밀값·선택값을 소유한다(2026-08-10 통합) ─────
 #   상세: scripts/lib/load-dev-env.sh 주석. CLI > .env > 레거시 parse-svc.env > 파생.
+#   ⚠️ `scripts/parse-svc.env` 는 2026-08-13 폐기했다(파일이 둘이면 어긋난다 — 루트만 새
+#   OCR 게이트웨이 주소로 고쳐지고 파생본이 옛 주소로 남아 옛 GW 로 가고 있었다). 아래
+#   레거시 인자는 하위호환으로만 남긴다 — **새로 만들지 마라.** 값은 루트 `.env` 에 넣는다.
 # shellcheck source=scripts/lib/load-dev-env.sh
 . "$ROOT/scripts/lib/load-dev-env.sh"
 _DEV_ENV_LEGACY=""; _DEV_ENV_MAIN=""
 _dev_env_load "$ROOT" "$ROOT/scripts/parse-svc.env"
 _dev_env_host_addrs
 _dev_env_report "$ROOT"
-: "${KBP_OPENAI_API_KEY:?missing — create scripts/parse-svc.env with KBP_OPENAI_API_KEY=...}"
+: "${KBP_OPENAI_API_KEY:?missing — set KBP_OPENAI_API_KEY in the repo-root .env}"
 # ── OCR 주소 env — **레인마다 하나씩, 총 두 개다**(2026-08-10 정리) ─────────────
 #
 # 예전엔 OCR 주소처럼 보이는 env 가 넷이라 "어느 걸 바꿔야 하나" 가 안 보였다.

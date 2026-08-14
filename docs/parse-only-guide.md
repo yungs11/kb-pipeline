@@ -48,8 +48,8 @@ cd /path/to/8.kb-pipeline
 ### 2-2. 대상 서버에서
 
 ```bash
-sha256sum -c kbp-parse-bundle-amd64.tar.gz.sha256      # 반입 매체 정합성
-mkdir kbp && tar xzf kbp-parse-bundle-amd64.tar.gz -C kbp && cd kbp
+sha256sum -c kbp-parse-bundle-amd64.tar.sha256      # 반입 매체 정합성
+mkdir kbp && tar xf kbp-parse-bundle-amd64.tar -C kbp && cd kbp
 
 # ★ 번들에 **채워진 `.env` 가 이미 들어 있으면** cp 로 덮어쓰지 마라.
 #   덮어쓰면 실 비밀값이 빈 템플릿으로 날아가 현장에서 전부 다시 입력해야 한다.

@@ -47,9 +47,9 @@
 
 ## 3. parser (parse-svc, :19001) — Parse + Blockify + Modal Enrich
 
-`parse_service/app.py`. 한 번의 `POST /parse` 안에서 FRONT 3단계를 연속 수행해 **enriched_content + 모달 스팬 + 페이지 스팬**을 산출한다. **Phase 2 파서 일원화 완료**: Excel·docx·OCR(pptx/이미지/스캔) 파싱이 전부 parse-svc **in-process** 다(외부 excel-parser :18055 / document-parser :18050 HTTP 미경유). Excel(xlsx/xlsm/xls)은 `chunk_needed=False` 로 자체청킹 청크를 그대로 반환한다.
+`parse_service/app.py`. 한 번의 `POST /parse` 안에서 FRONT 3단계를 연속 수행해 **enriched_content + 모달 스팬 + 페이지 스팬**을 산출한다. **Phase 2 파서 일원화 완료**: Excel·docx·OCR(pptx/이미지/스캔) 파싱이 전부 parse-svc **in-process** 다(외부 excel-parser :18055 / document-parser :18050 HTTP 미경유). Excel(xlsx/xlsm/xls) 과 CSV 는 `chunk_needed=False` 로 자체청킹 청크를 그대로 반환한다.
 
-### 3.1 Parse — 확장자별 파서 라우팅 (`parse_service/router.py`, 4분기 · 폴백 없음)
+### 3.1 Parse — 확장자별 파서 라우팅 (`parse_service/router.py`, 5분기 · 폴백 없음)
 
 라우팅 소유는 `parse_service/router.py`(구 `kb_pipeline.blockify.PARSER_ROUTING`/`recommended_parser` 는 Phase 2d 에서 삭제). markitdown 은 코드·requirements 에서 완전 제거(재유입 가드 `parse_service/tests/test_no_markitdown.py`).
 
@@ -103,6 +103,16 @@ mutation 이 odl/vl 페이지의 ODL 네이티브 본문까지 지운다.
 내고 있었고, 어느 한쪽만 취하면 조용히 죽는다 — `layout` 소실 → hybrid 가 영구 거짓,
 `status` 소실 → 게이트웨이 페이지 실패가 demote 도 VL 도 못 받고 빈 페이지.
 
+| PDF | `pdf` | **문서수준 게이트**(triage) → 순수텍스트=**OpenDataLoader**(`markdown_with_html=True`) / 스캔·혼합=**MinerU**(hybrid-http-client) | ✅ (06=70개, pipe=0) | True | JRE 21 의존(ODL). 문서당 .md 1개 → `<<<ODL_PAGE_BREAK>>>` sentinel 로 페이지 복원. 게이트: `parse_service/parsers/pdf/gate.py` (triage 버킷 집계). MinerU 는 지연 import(로컬 미설치 허용), 실패 시 ODL/VL 폴백 |
+| XLSX/XLSM/XLS/**CSV** | `excel` | **excel_parser_rag**(vendored, `auto`→전결 openpyxl / 그 외 kordoc) | ✅ | **False** | LLM 없이 parse+chunk 결합 → native 청크. `chunk_strategy=excel_rag_parser`. csv 는 헤더 서식을 준 xlsx 로 메모리 합성해 **openpyxl 고정**(2026-08-11, `parsers/excel/csv_to_xlsx.py`) |
+| DOCX·HWP·HWPX·DOC·PPT·PPTX | `pdf` | **원격 변환 API → PDF → ODL/GW/VL** | ✅ | True | `run_parse` 가 변환 후 `.pdf` 이름으로 PDF 레인에 넣는다(2026-08-06). html 은 2026-08-11 이 경로에서 빠졌다 |
+| **HTML/HTM** | `html` | **`parsers/html`**(bs4 + markdownify, 형변환 API 미경유) | ✅ (원본 `<table>` 보존) | True | 최상위 표를 nonce sentinel 로 빼고 나머지만 markdown 화 후 복원. data-URI `<img>` 는 alt 로 대체(2026-08-11) |
+| 단일 이미지 | `ocr` | **in-process VL OCR**(`parsers/ocr`) | ✅ + elements[] | True | 이미지→base64 → **PAGE_HYBRID**(전사 + 시각 서술) VL 호출. `IMAGE_EXTS`={png,jpg,jpeg,gif,bmp,tif,tiff,webp} |
+| TXT·MD·JSON·LOG·XML | `text` | 그대로 블록화(`tools/textdecode.py`) | — | True | 변환·파서 없음. `page_count=1`. BOM utf-32/utf-16 → utf-8-sig → cp949. XML 은 2026-08-11 편입. 블록 0개면 `parse_failed`(조용한 빈 적재 금지) |
+| 그 외(미지 확장자) | `pdf` | — | — | — | `domain_of` 가 pdf 로 보내고 `app.py` 의 `%PDF` 가드가 `not a PDF (and not convertible)` 로 거절한다. 별도 폴백 파서 없음 |
+| 스캔/혼합 PDF | (pdf 내부, MinerU 레인) | **MinerU** hybrid (PaddleOCR 로컬 layout + **VLM 원격**) | ✅ | True | 게이트가 `OCR_NEEDED` 하나라도 있으면 `parse_method='ocr'` 강제(스캔 텍스트 유실 방지), 스캔 없는 텍스트+이미지 혼합만 `'auto'`. content_list→`elements_to_blocks`. VLM=`MINERU_VLM_SERVER_URL`(별도 GPU). 미설정/실패/빈결과 시 **ODL/in-process VL 폴백**(가용성). 배포서버 전용(`docs/mineru-deploy-notes.md`) |
+| 스캔 PDF 폴백 | (pdf 내부) | **in-process VL OCR** | ✅ | True | MinerU 미가동(로컬/실패) 시 폴백. 글자 거의 없는 페이지만 렌더 → VL OCR 보충(best-effort 비치명) |
+
 - **표준 중간표현**: "markdown + inline HTML 표". 표는 절대 pipe 로 납작화 금지.
 - 문서 ID 폴백 = `sha256(file_bytes).hexdigest()[:16]`(orchestrator 동일 식 → MinIO 키 일치). 파일명 정규화 = `tools.safe_basename`(경로 탈출 차단, 구 `parsing._safe_basename` 이동). 비표시문자 제거 = PUA(U+E000–U+F8FF).
 - **VL OCR 계약(in-process, `parsers/ocr/vl_api.py`)**: OpenAI 호환 chat/completions(`MODEL_API_URL`/`MODEL_API_KEY`/`MODEL_NAME`), guided-json(`GUIDED_JSON_MODE=response_format` OpenRouter 호환), 응답 스키마 `elements[].{category(table|figure),content{html,markdown,text}}`. 동시성 `KBP_VL_MAX_CONCURRENT`(기본 8), 페이지 실패 비치명. 순수 텍스트 figure 는 text 블록으로 재분류(markdown 유실 방지).
@@ -110,6 +120,8 @@ mutation 이 odl/vl 페이지의 ODL 네이티브 본문까지 지운다.
 > **⚠️ OCR 실제 origin = 원격 VL(`MODEL_API_URL`) + 스캔 게이트웨이(`KBP_PADDLE_OCR_GATEWAY_URL`), `:18050` 아님 — `KBP_OCR_URL` 은 dead (2026-07-27 코드 대조 확정, 제거됨)**
 > 흔한 오해: parse-svc `healthz` 가 (구) `{"deps":{"ocr":"http://localhost:18050"}}` 를 표시하고 `run_parse` 가 `ocr_url` 을 라우터→PDF/OCR 파서로 스레딩하므로 "파싱이 :18050 을 탄다"고 착각하기 쉽다. **실제로는 안 탄다.** 최종 소비자 `ocr_elements_sync`(`parsers/ocr/__init__.py:88`, `prompt_override` 만 받음)·`_ocr_elements_for_page`(`parsers/pdf/__init__.py:43-50`, 3번째 인자는 diagram 프롬프트 override 이지 URL 아님) 가 **`ocr_url` 을 전혀 소비하지 않는다**. excel 도 `excel_url 은 하위호환용 무시 파라미터`(`parsers/excel/__init__.py:46` 주석).
 > - **실 OCR 경로 2개**: (a) pptx·단일이미지·스캔폴백 = **in-process VL**(`vl_api.py:243,263` → `MODEL_API_URL`, 현재 `openrouter.ai/.../chat/completions`, qwen3-vl). (b) 스캔/혼합 PDF 본류 = **paddle_gw 게이트웨이**(`KBP_PADDLE_OCR_GATEWAY_URL` = `15.164.81.29:18081/ocr/paddleocr_vl`(2026-08-13 이관 — 구 `api-doc.ys-helperai.com`), gate.py 가 스캔 판정 시 위임). 이 둘이 live origin.
+
+> - **실 OCR 경로 2개**: (a) pptx·단일이미지·스캔폴백 = **in-process VL**(`vl_api.py:243,263` → `MODEL_API_URL`, 현재 `openrouter.ai/.../chat/completions`, qwen3-vl). (b) 스캔/혼합 PDF 본류 = **paddle_gw 게이트웨이**(`KBP_PADDLE_OCR_GATEWAY_URL` = `http://15.164.81.29:18081/ocr/paddleocr_vl` — 2026-08-11 교체, 이전 api-doc.ys-helperai.com — gate.py 가 스캔 판정 시 위임). 이 둘이 live origin.
 > - **정리 완료(2026-07-27)**: `scripts/parse-svc.env` 의 `KBP_OCR_URL`/`KBP_EXCEL_URL` 삭제, `healthz.deps` 를 `{"vl_ocr": MODEL_API_URL}` 로 정정(`app.py:359`), `run_parse(ocr_url="", excel_url="")` 로 dead 값 표식(`app.py:379`). 파서 시그니처의 `ocr_url`/`excel_url` 파라미터 자체는 테스트 대량 의존이라 하위호환 유지(무시 인자).
 > - 로컬 `:18050`(`trust-backend-document-parser-1`, docker `0.0.0.0:18050→8000`)은 **별개 스택(dify/trust-backend)** 컨테이너로 이 파이프라인과 무관. 그 컨테이너 healthz 초록은 kb-pipeline OCR 정상성 근거가 **아니다**.
 > - **OCR 장애 진단 지점**: `MODEL_API_URL`(OpenRouter) + `KBP_PADDLE_OCR_GATEWAY_URL`. (별개로 청킹 auto 스코어링·검색·적재 임베딩은 `litellm.ax-demo.com` bge-m3 — 또 다른 origin.)
@@ -280,6 +292,16 @@ Rust, `crates/edgequake-pipeline`. passthrough 로 facade 청크를 받아 추�
 ## 8. Excel 전용 경로 — excel_parser_rag (in-process, Phase 2b)
 
 Excel(xlsx/xlsm/xls)은 parse-svc `parsers/excel` 이 vendored **excel_parser_rag** 패키지를 **in-process** 로 직접 호출해(구 excel-parser :18055 HTTP 제거) **LLM 없이** parse+chunk 를 함께 수행하고 native 청크를 `chunk_needed=False` 로 반환한다(`chunk_strategy=excel_rag_parser`). 백엔드는 `EXCEL_PARSER_BACKEND`(이미지 기본 `auto`): 전결 문서 → openpyxl, 그 외 → kordoc(.md). kordoc CLI 는 parse-svc 이미지에 `npm install -g kordoc` 로 내장(`KORDOC_BIN`). 표는 `<table>` HTML 보존.
+
+- **레거시 `.xls`(BIFF)는 레인 입구에서 `.xlsx` 로 변환**(2026-08-13) — `parsers/excel/__init__.py`
+  가 **매직바이트**(`\xD0\xCF\x11\xE0` = OLE CFB)를 보고 soffice(LibreOffice, parse-svc 이미지
+  내장)로 바이트를 갈아끼운다. csv 와 같은 자리·같은 방식이다. **확장자로 판정하지 않는다** —
+  이름만 `.xls` 인 xlsx(zip)는 오늘도 정상 처리되므로 변환하면 되던 게 죽고, 이름이 `.xlsx` 인
+  진짜 BIFF 는 확장자 기준으로 못 잡는다. 입구에서 바꾸므로 하류(백엔드 3종·게이트·청킹)는
+  코드 변경이 없고, 전결(Tier1)·계층(Tier1.5) 라우팅의 확장자 게이트도 자연히 통과한다.
+  ⚠️ **LibreOffice 는 캐시된 오류값을 소문자로 쓴다**(`#REF!` → `#ref!`) — 그래서 게이트의
+  `ERROR_RE` 가 `re.IGNORECASE` 다. 이게 없으면 `.xls` 문서에서 참조오류 검사가 통째로 침묵한다.
+- **csv 의 청킹 소유는 엑셀 레인**(2026-08-11) — csv 는 헤더 행에 서식(볼드+채우기)을 준 xlsx 로 메모리 합성돼(`parse_service/parsers/excel/csv_to_xlsx.py`) `chunk_needed=False` 로 자체 청킹된다. facade `/chunk` 를 타지 않는다. 백엔드는 **openpyxl 고정** — `auto` 는 전결 키워드나 계층 지배도가 없으면 kordoc 으로 떨어지는데 csv 유래 평면 표는 둘 다 아니고, `KORDOC_BIN` 없는 환경에선 실패한다. 헤더 서식이 없으면 `header_detector` 의 style gate 에 걸려 청크가 `사번: 1001` 대신 `A: 1001` 로 퇴화한다. **한계**: 첫 컬럼 헤더가 계층 spine 용어(`항목`·`구분`·`품명` 등)를 포함하면 그 열의 키 이름이 `A:` 로 떨어진다(값은 청크 경로에 보존) — `deferred.md` D45.
 
 > Phase 2e 로 외부 excel-parser/document-parser/redis 컨테이너는 compose 에서 제거됨 — 파싱 fleet 은 parse-svc 단일 이미지(java+node/kordoc+PyMuPDF)로 통합. office/hwp→PDF 는 원격 변환 API(2026-08-06, gotenberg 제거).
 

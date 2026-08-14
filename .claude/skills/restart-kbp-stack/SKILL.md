@@ -89,7 +89,7 @@ compose 를 쓰지 않거나, 특정 서비스를 호스트에서 직접 띄울 
 | Service | Port | Script | Gotcha it handles |
 |---|---|---|---|
 | parse-svc | 19001 | `scripts/run-parse-svc.sh` | needs **openjdk@17** on PATH (OpenDataLoader) + `KBP_OPENAI_API_KEY` (modal LLM) + **kordoc env**(KORDOC_BIN/KORDOC_MD_OUT/EXCEL_PARSER_BACKEND — Phase 2e 로 엑셀 파싱이 in-process 다) |
-| facade | 3000 | `scripts/run-facade.sh` | reads `os.environ` directly (no dotenv) → needs `KBP_*` **and `MINIO_*`** from `scripts/facade.env` |
+| facade | 3000 | `scripts/run-facade.sh` | reads `os.environ` directly (no dotenv) → needs `KBP_*` **and `MINIO_*`** from the repo-root `.env` (load-dev-env.sh) |
 | facade-worker | — (no port) | `scripts/run-facade-worker.sh` | 잡 큐 소비자. 다운스트림 호출은 **오직 여기 슬롯 안에서만** 일어난다. 살아있는지는 `GET /jobs/workers` 의 `online` 으로 확인 |
 | kb-backend + batch worker | 8088 + DB heartbeat | `scripts/run-kb-backend.sh` | runs Alembic first, restarts API and durable worker; worker capacity defaults to 2 |
 | doc_guard | 8000 | `scripts/run-doc-guard.sh` | verifies `POST /v1/check-excel` answers (new excel-gate endpoint), not just healthz |
@@ -148,8 +148,12 @@ after a restart, confirm the frontend points at the backend you restarted, and h
    stub (`Unable to locate a Java Runtime`) → CLI exit 1 → **empty `enriched_content`**.
    The script pins `/usr/local/opt/openjdk@17/bin` (or `/opt/homebrew/...`).
 2. **parse-svc / facade — env**: `service/llm.py` reads `os.environ["KBP_OPENAI_API_KEY"]`
-   with no default → KeyError when a modal block is described. Keys live in the
-   **gitignored** `scripts/parse-svc.env` and `scripts/facade.env` (pattern `scripts/*.env`).
+   with no default → KeyError when a modal block is described. 값은 **gitignored 리포 루트
+   `.env` 하나**가 소유한다 — 런처 3종(parse-svc/facade/facade-worker)이 모두
+   `scripts/lib/load-dev-env.sh` 로 그 파일을 읽는다. `scripts/parse-svc.env`·
+   `scripts/facade.env` 는 **2026-08-13 폐기**했다(파일이 둘이면 어긋난다 — 루트만 새 OCR
+   게이트웨이 주소로 고쳐지고 파생본이 옛 주소로 남아 옛 GW 로 가고 있었다). 로더는 아직
+   두 파일을 읽어주지만 **새로 만들지 마라.**
    > Trap: `export FOO=...` and `uvicorn ... &` as **separate** `!` commands run in
    > separate shells — the export never reaches the launched process. Always use the script.
 3. **facade — ReadTimeout on big PDFs**: parse-svc calls the modal LLM **once per table,
@@ -158,16 +162,21 @@ after a restart, confirm the frontend points at the backend you restarted, and h
    so neither gives up early. If you see `httpx.ReadTimeout`, suspect a slow multi-table
    parse (or two parses colliding on the single-worker parse-svc).
 
-## First-time setup (gitignored env files)
+## First-time setup (gitignored env file)
 
-`scripts/facade.env` can be captured from a running facade without printing secrets:
+`cp -n .env.example .env` 후 값을 채운다. 최소: `KBP_OPENAI_API_KEY`, `MINIO_*`,
+`POSTGRES_PASSWORD`(=> `KBP_PG_DSN` 은 여기서 조립된다), `MODEL_NAME`,
+`KBP_PADDLE_OCR_GATEWAY_URL`. 주소는 적지 않는다 — 호스트 dev 는 `_dev_env_host_addrs`
+가 localhost+포트로 파생한다.
+
+돌고 있는 프로세스에서 값을 회수해야 하면(비밀값 출력 없이):
 
 ```bash
-ps eww "$(pgrep -f 'service.app:app' | head -1)" | tr ' ' '\n' \
-  | grep -E '^KBP_[A-Z_]+=' > scripts/facade.env
+ps eww "$(pgrep -f 'service.app:app' | head -1)" | tr ' ' '\n' | grep -E '^KBP_[A-Z_]+='
 ```
 
-`scripts/parse-svc.env` needs at least `KBP_OPENAI_API_KEY` and `KBP_OCR_URL=http://localhost:18050`.
+런처가 `env: <경로>` 뒤에 **레거시 파일이나 중복 키 경고**를 찍으면 그게 곧 드리프트
+신호다 — 무시하지 말고 `.env` 로 합쳐라(실제로 30개를 경고하는 채로 옛 GW 주소가 살아 있었다).
 
 ## Verify a real parse works
 

@@ -26,8 +26,13 @@ _OPENPYXL_PROFILES = ["delegation_rule", "note", "code_mapping"]
 _HIERARCHY_PROFILES = ["sibling_rule", "note", "code_mapping", "table_row", "total_row"]
 # Tier1.5 판정 임계 — hierarchical_table(계층열 보유) 행 지배도. 코퍼스 실측 여유(구WBS 0.835 vs 자산목록 0.051).
 _HIER_DOMINANCE_MIN = 0.5
-# openpyxl 직접 읽기가 가능한 확장자만 라우팅 대상. .xls 는 openpyxl.load_workbook 로 못 열고
-# (소속 backend 가 soffice 변환을 내부 처리), 변환 비용/복잡도가 커서 kordoc 로 보낸다(현행 동일).
+# openpyxl 직접 읽기가 가능한 확장자만 라우팅 대상.
+# ⚠️ 2026-08-13 정정 — 예전 주석은 ".xls 는 소속 backend 가 soffice 변환을 내부 처리" 라고
+# 적혀 있었으나 **사실이 아니었다**. 변환은 openpyxl 백엔드 경로에만 걸려 있었고 .xls 는
+# 여기서 kordoc 으로 라우팅돼 그 변환을 한 번도 타지 못했다(→ kordoc 백엔드의 동반
+# openpyxl 읽기에서 InvalidFileException, 그리고 전결 .xls 가 delegation_rule 을 못 만듦).
+# 이제 **레인 입구**(parsers/excel/__init__.py)가 CFB 매직을 보고 .xlsx 로 갈아끼우므로
+# .xls 는 이 지점에 도달하지 않는다.
 _OPENPYXL_SUFFIXES = {".xlsx", ".xlsm"}
 
 

@@ -273,10 +273,85 @@ print("OK chunks=%d gate_ok=%s" % (n, (gs or {}).get("ok")))
     *) echo "  ${RED}✗ 엑셀 파싱 왕복 실패 — 이미지가 healthy 로 떠도 xlsx 적재가 깨진다:${RST}"
        echo "$xout" | tail -6 | sed 's/^/    /'; return 1 ;;
   esac
+  # ★ html 레인은 2026-08-11 형변환 API 밖으로 나왔다(parsers/html + markdownify).
+  #   markdownify 가 이미지에 빠지면 html 적재만 조용히 죽는다 — requirements.txt 에
+  #   넣었어도 `pip install .` 이 건너뛰는 전례가 있었다(kb 이미지 문서 추출기 누락).
+  #   import 존재만이 아니라 **병합셀 표가 <table> 로 살아 나오는지**까지 확인한다.
+  echo "== html 파싱 왕복 스모크(markdownify + 표 보존) =="
+  local HTML_PY='
+import sys
+from parse_service.parsers.html import parse as hparse
+raw = b"<html><body><h1>T</h1><table><tr><th rowspan=\"2\">a</th><th colspan=\"2\">b</th></tr><tr><td>1</td><td>2</td></tr></table></body></html>"
+rr = hparse(raw, "smoke.html")
+blocks = (rr.pages or [{}])[0].get("blocks") or []
+tables = [b for b in blocks if b.get("type") == "table"]
+if not tables:
+    print("NO_TABLE_BLOCK: %d blocks" % len(blocks)); sys.exit(1)
+body = tables[0].get("table_body") or ""
+if "rowspan" not in body or "colspan" not in body:
+    print("MERGE_LOST: %s" % body[:120]); sys.exit(1)
+print("OK html_blocks=%d" % len(blocks))
+'
+  local hout
+  if [ -n "$TIMEOUT_BIN" ]; then
+    hout="$("$TIMEOUT_BIN" "${IMPORTS_CHECK_TIMEOUT:-120}" "$ENGINE" run --rm -w /app -e PYTHONPATH=/app \
+      --entrypoint python "$ref" -c "$HTML_PY" 2>&1)"
+  else
+    hout="$("$ENGINE" run --rm -w /app -e PYTHONPATH=/app --entrypoint python "$ref" -c "$HTML_PY" 2>&1)"
+  fi
+  case "$hout" in
+    *OK\ html_blocks=*) echo "  ${GRN}✓ html 왕복 성공 — ${hout##*OK }${RST}" ;;
+    *NO_TABLE_BLOCK:*|*MERGE_LOST:*) echo "  ${RED}✗ html 표 보존 실패 — pipe 평탄화 회귀다:${RST}"
+       echo "$hout" | tail -4 | sed 's/^/    /'; return 1 ;;
+    *) echo "  ${RED}✗ html 파싱 왕복 실패 — markdownify 누락 또는 parsers/html import 실패:${RST}"
+       echo "$hout" | tail -6 | sed 's/^/    /'; return 1 ;;
+  esac
+  # ★ 레거시 .xls(BIFF) 레인 — LibreOffice(soffice) 가 이미지에 있어야 한다(2026-08-13).
+  #   openpyxl 은 BIFF 를 못 읽어 `.xls` 업로드가 전량 실패했다. 위 엑셀 스모크는
+  #   openpyxl 로 **만든** xlsx 만 돌려서 이 회귀를 못 잡는다 — BIFF 는 openpyxl 로
+  #   생성 자체가 불가능하므로 **리포 픽스처를 이미지에서 읽는다**(COPY parse_service 로
+  #   tests/fixtures 가 동봉된다. .dockerignore 는 tests 를 제외하지 않는다).
+  #   변수명이 위 XLS_PY(실제로는 xlsx 스모크)와 겹치지 않게 BIFF_PY 로 둔다.
+  echo "== 레거시 .xls 왕복 스모크(soffice + BIFF 변환) =="
+  local BIFF_PY='
+import shutil, sys
+from pathlib import Path
+fx = Path("/app/parse_service/tests/fixtures/legacy_sample.xls")
+if not fx.is_file():
+    print("FIXTURE_MISSING:%s" % fx); sys.exit(1)   # 스킵이 아니라 실패다
+from parse_service.parsers.excel.excel_parser_rag.loaders.xls_converter import find_soffice
+if find_soffice() is None:
+    print("SOFFICE_MISSING"); sys.exit(1)
+from parse_service.parsers.excel import parse as xparse
+r = xparse(fx.read_bytes(), "legacy_sample.xls")
+n = len(getattr(r, "chunks", None) or [])
+gs = getattr(r, "gate_summary", None) or {}
+if n < 1 or gs.get("error") is not None or not gs.get("sheets"):
+    print("BIFF_PARSE_FAILED: chunks=%d gate=%r" % (n, gs)); sys.exit(1)
+print("OK biff_chunks=%d sheets=%d" % (n, len(gs["sheets"])))
+'
+  local bout
+  # LibreOffice 콜드스타트(+프로필 생성)가 QEMU amd64 에서 느리다 — 기본 스모크보다 넉넉히.
+  if [ -n "$TIMEOUT_BIN" ]; then
+    bout="$("$TIMEOUT_BIN" "${BIFF_CHECK_TIMEOUT:-300}" "$ENGINE" run --rm -w /app -e PYTHONPATH=/app \
+      --entrypoint python "$ref" -c "$BIFF_PY" 2>&1)"
+  else
+    bout="$("$ENGINE" run --rm -w /app -e PYTHONPATH=/app --entrypoint python "$ref" -c "$BIFF_PY" 2>&1)"
+  fi
+  case "$bout" in
+    *OK\ biff_chunks=*) echo "  ${GRN}✓ .xls 왕복 성공 — ${bout##*OK }${RST}" ;;
+    *SOFFICE_MISSING*) echo "  ${RED}✗ 이미지에 soffice(LibreOffice)가 없다 — .xls 업로드가 전량 실패한다${RST}"
+       echo "    ${RED}  → Dockerfile.parse-svc 의 libreoffice-calc/libreoffice-core 설치 확인${RST}"; return 1 ;;
+    *FIXTURE_MISSING:*) echo "  ${RED}✗ 이미지에 .xls 픽스처가 없다: ${bout#*FIXTURE_MISSING:}${RST}"
+       echo "    ${RED}  → .dockerignore 가 tests 를 제외했는지 확인(가드가 조용히 무력화된다)${RST}"; return 1 ;;
+    *) echo "  ${RED}✗ .xls 파싱 왕복 실패 — 이미지가 healthy 로 떠도 레거시 엑셀이 깨진다:${RST}"
+       echo "$bout" | tail -6 | sed 's/^/    /'; return 1 ;;
+  esac
   # ⚠️ 파일변환(한컴) API 는 이미지 안 도구가 아니라 온프렘 HTTP 엔드포인트라 여기서
   # 도달성을 못 확인한다 — check_env() 의 KBP_FILECONVERT_URL 값 존재 확인이 유일한
-  # 사전 방어선이다. docx/hwp/ppt/html 파싱은 그 서비스가 실제로 응답해야 성공한다
+  # 사전 방어선이다. docx/hwp/ppt 파싱은 그 서비스가 실제로 응답해야 성공한다
   # (A6 — 구 kordoc docx 폴백은 제거됨, 지금은 이 경로가 유일하다).
+  # (html 은 2026-08-11 이 경로에서 빠졌다 — parsers/html 이 형변환 없이 처리한다.)
 }
 
 # --parse-only 를 어디에 붙여도 받는다(순서 무관):  --env .env --parse-only  /  --parse-only --env .env

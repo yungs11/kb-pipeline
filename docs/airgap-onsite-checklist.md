@@ -100,8 +100,8 @@ dnf install -y podman-plugins                      # cni 면 dnsname 플러그�
 
 ```bash
 # ① 무결성 (빌드머신 절대경로가 아니라 basename 으로 기록돼 있다)
-sha256sum -c kbp-airgap-bundle-*.tar.gz.sha256
-tar xzf kbp-airgap-bundle-*.tar.gz -C kbp && cd kbp
+sha256sum -c kbp-airgap-bundle-*.tar.sha256
+tar xf kbp-airgap-bundle-*.tar -C kbp && cd kbp
 
 # ② .env 작성 — .env.airgap.example 을 복사해 채운다
 cp .env.airgap.example .env && vi .env
@@ -116,11 +116,11 @@ bash scripts/airgap/load-and-up.sh
 bash scripts/airgap/deploy-both.sh
 ```
 
-### 2.1 파서 전용 번들(`kbp-parse-bundle-*.tar.gz`)은 ② 가 다르다
+### 2.1 파서 전용 번들(`kbp-parse-bundle-*.tar`)은 ② 가 다르다
 
 ```bash
-sha256sum -c kbp-parse-bundle-amd64.tar.gz.sha256
-mkdir kbp && tar xzf kbp-parse-bundle-amd64.tar.gz -C kbp && cd kbp
+sha256sum -c kbp-parse-bundle-amd64.tar.sha256
+mkdir kbp && tar xf kbp-parse-bundle-amd64.tar -C kbp && cd kbp
 
 # ★ 이 번들에는 **채워진 `.env` 가 이미 들어 있다**(권한 600, 실 비밀값).
 #    `cp .env.parse-only.example .env` 로 덮어쓰면 값이 전부 날아간다.

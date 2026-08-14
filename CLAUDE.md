@@ -36,7 +36,8 @@
 
 1. **env 신설/삭제/기본값 변경** → 선언처 전수를 함께 갱신한다. 최소:
    `.env.example`, `.env.airgap.example`, `.env.parse-only.example`,
-   `docker-compose.yml`, `docker-compose.airgap.yml`, `scripts/parse-svc.env.example`.
+   `docker-compose.yml`, `docker-compose.airgap.yml`.
+   (`scripts/parse-svc.env.example` 은 2026-08-13 폐기 — 호스트 dev env 는 루트 `.env` 하나다.)
    **하나라도 빠지면 폐쇄망에서만 죽는다.**
 2. **배포 가드 확인** — `scripts/airgap/verify-bundle.sh` 가 그 env/동작을 검증하고 있는지 보고,
    있으면 갱신한다. **env 를 지우면 가드 조건이 조용히 거짓이 되어 발화하지 않는다**(가드가

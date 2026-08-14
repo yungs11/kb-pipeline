@@ -3,7 +3,7 @@
 # build-bundle.sh — [Phase A / 온라인] kb-pipeline 폐쇄망 배포 번들 생성
 #
 # 인터넷이 되는 개발기(Apple Silicon Mac 등)에서 실행한다. amd64 이미지를
-# 크로스빌드/pull → docker save → 단일 tar.gz 번들로 묶는다. 이 번들을 폐쇄망
+# 크로스빌드/pull → docker save → 단일 tar 번들로 묶는다(무압축). 이 번들을 폐쇄망
 # RHEL 서버로 옮겨 scripts/airgap/load-and-up.sh 로 기동한다.
 #
 # 요구: docker + buildx (Docker Desktop 기본 포함). QEMU 에뮬 크로스빌드라
@@ -74,9 +74,9 @@ if [ "$PARSE_ONLY" -eq 1 ]; then
     "kbp-facade:${TAG}|Dockerfile.facade|."
   )
   IMAGES_TAR="$BUNDLE/images/kbp-parse-images-${ARCH_SHORT}.tar"
-  BUNDLE_NAME="kbp-parse-bundle-${ARCH_SHORT}.tar.gz"
+  BUNDLE_NAME="kbp-parse-bundle-${ARCH_SHORT}.tar"
 else
-  BUNDLE_NAME="kbp-airgap-bundle-${ARCH_SHORT}.tar.gz"
+  BUNDLE_NAME="kbp-airgap-bundle-${ARCH_SHORT}.tar"
 fi
 
 command -v docker >/dev/null || { echo "docker 없음"; exit 1; }
@@ -195,7 +195,13 @@ for img in "${ALL_IMAGES[@]}"; do
 done
 
 # save + 번들 스테이징
-log "docker save → $IMAGES_TAR (gzip)"
+# ★ **압축하지 않는다**(2026-08-13). `docker save` 는 containerd 스토어의 레이어 blob 을
+#   **이미 압축된 채로** 뱉는다 — 실측: facade 이미지 274,554,880B → gzip 후 272,640,365B
+#   (**0.7% 감소**). 그 1% 를 위해 2GB 대 파일을 한 번 더 읽고 쓰느라 번들당 수 분을 쓴다.
+#   `docker/podman load -i` 는 평문 tar 도 그대로 받는다. 바깥 번들도 같은 이유로 `tar cf`.
+#   받는 쪽은 `.tar`·`.tar.gz` 를 **둘 다** 받도록 해뒀다(옛 번들 호환) — parse-only-up.sh /
+#   load-and-up.sh 의 IMAGES_GLOB, 그리고 문서의 `tar xf`(둘 다 자동인식).
+log "docker save → $IMAGES_TAR (무압축 — 이미 압축된 레이어라 gzip 이득 0.7%)"
 # ⚠️ 스테이징 디렉터리를 **매번 비운다**. 안 그러면 이전 실행의 이미지 tar 가 남아
 # 다음 번들에 함께 들어간다 — 실측 2026-08-07: --parse-only 번들에 직전 전체 스택
 # 이미지(2.8GB)가 딸려 들어가 1.9GB 여야 할 번들이 4.7GB(3분할)가 됐다.
@@ -213,8 +219,6 @@ mkdir -p "$BUNDLE/images" "$BUNDLE/scripts/airgap" "$BUNDLE/docs"
   printf '%s\n' "${PROVENANCE[@]-(none)}"
 } > "$BUNDLE/BUILD-PROVENANCE.txt"
 docker save "${ALL_IMAGES[@]}" -o "$IMAGES_TAR"
-gzip -f "$IMAGES_TAR"
-IMAGES_TAR="${IMAGES_TAR}.gz"
 
 log "배포물 스테이징 → $BUNDLE"
 cp docker-compose.airgap.yml            "$BUNDLE/"
@@ -283,9 +287,9 @@ else
   NEXT_UP='./scripts/airgap/load-and-up.sh'
 fi
 
-log "단일 번들 tar.gz 생성"
+log "단일 번들 tar 생성(무압축 — 내용물이 이미 압축된 이미지 blob 이다)"
 OUT="$DIST/$BUNDLE_NAME"
-tar czf "$OUT" -C "$BUNDLE" .
+tar cf "$OUT" -C "$BUNDLE" .
 SHA="$(shasum -a 256 "$OUT" | awk '{print $1}')"
 echo "$SHA  $(basename "$OUT")" > "${OUT}.sha256"
 
@@ -324,7 +328,7 @@ cat <<EOF
    이미지tar: $IMAGES_TAR ($(du -h "$IMAGES_TAR" | cut -f1))
 
 다음 단계:
-  1) $OUT 를 서버로 전송 후 풀기:   mkdir kbp && tar xzf $(basename "$OUT") -C kbp && cd kbp
+  1) $OUT 를 서버로 전송 후 풀기:   mkdir kbp && tar xf $(basename "$OUT") -C kbp && cd kbp
   2) $NEXT_ENV
   3) $NEXT_UP
 EOF
