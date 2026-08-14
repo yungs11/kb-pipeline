@@ -115,8 +115,30 @@ check_env() {
   # REQUIRED_ENV 에는 넣지 않는다 — 기본값이 있는 키라 기존 현장 .env 가 전부 걸린다.
   if [ "$(val KBP_FAIL_ON_EMPTY_PAGE "$envf")" = "0" ]; then
     echo "  ${YEL}! KBP_FAIL_ON_EMPTY_PAGE=0 — VL 이 실패해도 문서 파싱이 실패하지 않는다."
-    echo "    폴백은 삭제됐으므로 그 페이지는 **빈 채로 적재**된다(에러가 안 보인다).${RST}"
+    echo "    폴백 체인까지 소진한 페이지가 **빈 채로 적재**된다(에러가 안 보인다).${RST}"
     inet=1
+  fi
+  # ── VL 폴백 체인(2026-08-14) ──────────────────────────────────────────────
+  # 끄면 VL 실패가 곧 문서 실패다. 품질은 안 떨어지지만 적재가 멈출 수 있다.
+  if [ "$(val KBP_VL_FALLBACK_CHAIN "$envf")" = "0" ]; then
+    echo "  ${YEL}! KBP_VL_FALLBACK_CHAIN=0 — VL 실패 페이지를 폴백으로 살리지 않는다."
+    echo "    프로바이더가 불안정하면 적재가 간헐 실패한다(실측: 전량 VL 문서 40%).${RST}"
+    inet=1
+  fi
+  # 체인이 켜져 있는데 게이트웨이 주소가 없으면 pw 단계가 **항상** 건너뛰어진다.
+  # 스캔 페이지는 odl/rp.text 로 못 살리므로 체인의 절반이 조용히 죽는 조합이다.
+  # ⚠️ parse-only 는 주소 공란이 **정상 구성**이라 경고가 아니라 정보로 낸다 —
+  #    상시 발화하는 경고는 피로만 만들고 진짜 경고를 묻는다.
+  if [ "$(val KBP_VL_FALLBACK_CHAIN "$envf")" != "0" ] \
+     && [ -z "$(val KBP_PADDLE_OCR_GATEWAY_URL "$envf")" ]; then
+    if [ "${PROFILE:-full}" = "parse-only" ]; then
+      echo "  · 폴백 체인 ON + 게이트웨이 주소 공란 — 파서 전용 배포의 정상 구성이다."
+      echo "    체인은 pw 를 건너뛰고 odl → rp.text 로 이어진다(스캔 페이지는 못 살린다)."
+    else
+      echo "  ${YEL}! 폴백 체인 ON 인데 KBP_PADDLE_OCR_GATEWAY_URL 이 공란 —"
+      echo "    체인의 pw 단계가 **항상** 건너뛰어진다. 스캔 페이지는 폴백으로 못 살린다.${RST}"
+      inet=1
+    fi
   fi
   # 재시도 횟수를 0/음수로 두면 코드가 1 로 클램프한다 — 의도와 다르면 여기서 드러난다.
   _va="$(val KBP_VL_PAGE_ATTEMPTS "$envf")"

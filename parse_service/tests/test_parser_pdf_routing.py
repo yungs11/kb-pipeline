@@ -35,9 +35,28 @@ class _RP:
 
 
 @pytest.fixture
+def chain_off(monkeypatch):
+    """VL 폴백 체인을 **끈다** — 2b-2 정책(폴백 없음 → 문서 실패) 앵커용.
+
+    2026-08-14 부터 `KBP_VL_FALLBACK_CHAIN` 기본값이 **ON** 이다(사용자 확정). 그래서
+    "VL 이 실패하면 문서가 죽는다" 를 지키는 테스트들은 **명시적으로 꺼야** 그 분기를
+    검사한다. 켠 상태의 동작은 같은 시나리오의 `_chain_on` 쌍둥이가 따로 지킨다.
+
+    ⚠️ 이 fixture 를 붙였다고 정책이 약해진 게 아니다 — OFF 경로는 폐쇄망 탈출구이자
+    "품질을 낮추지 않는다" 는 보장이므로 **계속 검증돼야 한다**.
+    """
+    monkeypatch.setenv("KBP_VL_FALLBACK_CHAIN", "0")
+
+
+@pytest.fixture
 def wire(monkeypatch):
     """게이트/ODL/렌더/VL/게이트웨이를 fake 로 잡고 호출 기록을 준다."""
-    rec = {"vl_jobs": [], "render": [], "gw_pages": None, "md": []}
+    rec = {"vl_jobs": [], "render": [], "gw_pages": None, "md": [],
+           # 게이트웨이 **모든** 호출 기록 — step3 배치 + 폴백 체인의 step4b.
+           # `set_gw` 를 안 부른 테스트도 폴백이 게이트웨이를 부를 수 있으므로
+           # (KBP_VL_FALLBACK_CHAIN 기본 ON) 스텁을 **항상** 깐다. 안 깔면 개발기·CI 에
+           # KBP_PADDLE_OCR_GATEWAY_URL 이 있을 때 실 HTTP 를 치고 60~600초 매달린다.
+           "gw_calls": []}
 
     def set_gate(decision):
         monkeypatch.setattr(pdf_parser, "_safe_decide_route", lambda fb: decision)
@@ -46,13 +65,22 @@ def wire(monkeypatch):
         rec["md"] = md_list
         monkeypatch.setattr(pdf_parser, "_page_markdowns", lambda fb, fn: list(md_list))
 
+    # 기본 동작: 아무것도 못 냄(빈 목록). `set_gw` 가 이걸 갈아끼운다.
+    rec["_gw_impl"] = lambda page_numbers: []
+
+    def fake_gw(fb, fn, page_numbers=None):
+        rec["gw_pages"] = page_numbers
+        rec["gw_calls"].append(tuple(sorted(page_numbers)) if page_numbers else None)
+        return rec["_gw_impl"](page_numbers)
+
+    monkeypatch.setattr(pg, "run_paddle_gateway", fake_gw)
+
     def set_gw(pages_or_exc):
-        def fake_gw(fb, fn, page_numbers=None):
-            rec["gw_pages"] = page_numbers
+        def impl(_page_numbers):
             if isinstance(pages_or_exc, Exception):
                 raise pages_or_exc
             return list(pages_or_exc)
-        monkeypatch.setattr(pg, "run_paddle_gateway", fake_gw)
+        rec["_gw_impl"] = impl
 
     def set_vl(text="VL 전사"):
         def fake_batch(jobs, ocr_url=None, **k):
@@ -300,7 +328,7 @@ def test_transcribe_passes_page_max_tokens(wire, monkeypatch):
     '```json\n{\n  "elements": [\n    {\n      "category": "figure",\n      "content": {',
     '[Error: Failed to parse API response - x]',
 ])
-def test_transcribe_rejects_truncated_response(wire, monkeypatch, raw):
+def test_transcribe_rejects_truncated_response(wire, monkeypatch, raw, chain_off):
     """절단·에러 플레이스홀더가 그대로 본문 블록이 되면 안 된다.
 
     `elements_parser` 는 파싱 실패 시 **잘린 raw JSON 을 그대로 담은** element 1개를 만든다 —
@@ -325,7 +353,7 @@ def test_transcribe_rejects_truncated_response(wire, monkeypatch, raw):
 _BAD_VL = '```json\n{\n  "elements": [\n    {\n      "content": {'
 
 
-def test_thin_page_vl_failure_fails_document(wire, monkeypatch):
+def test_thin_page_vl_failure_fails_document(wire, monkeypatch, chain_off):
     """thin 페이지에서 VL 이 실패하면 **문서 파싱 실패**다 — 네이티브 폴백은 없다(2b-2).
 
     **정책 반전 기록**: 이 테스트는 원래 "네이티브 텍스트로 폴백한다" 를 지켰다.
@@ -351,7 +379,7 @@ def test_thin_page_vl_failure_fails_document(wire, monkeypatch):
     assert len(calls) == 3, f"thin 도 재시도를 받는다(절단이므로 3회): {calls}"
 
 
-def test_native_fallback_survives_degen_filter_on_toc(wire, monkeypatch):
+def test_native_fallback_survives_degen_filter_on_toc(wire, monkeypatch, chain_off):
     """목차 leader dot 을 접어 `degen_filter` 오탐을 피한다.
 
     실측(2026-08-04, arXiv p5): 네이티브 폴백이 4002자로 정상 발동했는데도 최종 blocks 가
@@ -683,7 +711,7 @@ def test_page_traces_source_per_branch(wire):
     assert src[2] == "skip", "SKIP 은 정상적으로 비는 경로 — empty 와 구분해야 한다"
 
 
-def test_page_traces_empty_overrides_source(wire, monkeypatch):
+def test_page_traces_empty_overrides_source(wire, monkeypatch, chain_off):
     """VL 이 elements 를 냈는데 **전량 필터**되면 `source` 는 `vl` 이 아니라 `empty`.
 
     안 덮어쓰면 §2 의 "품질 상한 = `source==empty` 비율" 이 거짓이 된다 —
@@ -723,7 +751,7 @@ def test_page_traces_attempts_carry_tokens_and_finish(wire, monkeypatch):
     assert atts[0][2]["tokens"] == 86 and atts[0][2]["finish"] == "stop"
 
 
-def test_page_traces_vl_error_distinguished_from_empty(wire, monkeypatch):
+def test_page_traces_vl_error_distinguished_from_empty(wire, monkeypatch, chain_off):
     """VL **예외**와 **빈 응답**이 구분된다(삼킴 3층 해소).
 
     예외가 빈 리스트로만 도착하면 "서빙이 아프다" 와 "이 페이지는 원래 빈다" 가
@@ -760,7 +788,7 @@ def test_page_traces_gw_hybrid_distinguished_from_gw(wire, monkeypatch):
     assert res.page_traces[0]["source"] == "gw_hybrid"
 
 
-def test_truncation_gets_one_extra_retry(wire, monkeypatch):
+def test_truncation_gets_one_extra_retry(wire, monkeypatch, chain_off):
     """**절단만** 재시도를 한 번 더 받는다(기본 2 → 절단 3).
 
     절단은 모델 퇴화가 아니라 **프로바이더 사정**일 수 있어 재호출에서 다른
@@ -783,7 +811,7 @@ def test_truncation_gets_one_extra_retry(wire, monkeypatch):
     assert len(calls) == 3, f"절단은 총 3회(기본 2 + 1): {calls}"
 
 
-def test_empty_response_does_not_get_the_extra_retry(wire, monkeypatch):
+def test_empty_response_does_not_get_the_extra_retry(wire, monkeypatch, chain_off):
     """빈 응답(B형)은 추가 1회를 **안 받는다** — 절단과 성질이 다르다."""
     calls = []
 
@@ -799,7 +827,7 @@ def test_empty_response_does_not_get_the_extra_retry(wire, monkeypatch):
     assert len(calls) == 2, f"빈 응답은 기본 2회: {calls}"
 
 
-def test_attempts_env_scales_both_limits(wire, monkeypatch):
+def test_attempts_env_scales_both_limits(wire, monkeypatch, chain_off):
     """`KBP_VL_PAGE_ATTEMPTS` 를 올리면 절단 한도도 **파생해서** 따라 오른다(+1)."""
     monkeypatch.setenv("KBP_VL_PAGE_ATTEMPTS", "1")
     calls = []
@@ -814,7 +842,7 @@ def test_attempts_env_scales_both_limits(wire, monkeypatch):
     assert len(calls) == 2, f"기본 1 → 절단 2: {calls}"
 
 
-def test_demoted_paddle_page_also_gets_retries(wire, monkeypatch):
+def test_demoted_paddle_page_also_gets_retries(wire, monkeypatch, chain_off):
     """**강등 paddle 페이지도 재시도를 받는다** — 실패 범위와 재시도 범위를 맞춘다.
 
     강등은 게이트웨이가 죽어 VL 로 내려온 스캔 페이지다. 즉 **이미 한 번 사고를 겪은
@@ -836,3 +864,136 @@ def test_demoted_paddle_page_also_gets_retries(wire, monkeypatch):
     with pytest.raises(ParserError, match="vl_failed"):
         pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
     assert len(calls) == 3, f"강등 페이지도 절단이면 3회 받는다: {calls}"
+
+
+# ── 폴백 체인 (KBP_VL_FALLBACK_CHAIN, 기본 ON) ────────────────────────────────
+# 위 `chain_off` 를 단 테스트들이 OFF 경로(2b-2 정책)를 지킨다. 아래는 **기본값 ON** 의
+# 동작 — 체인 순서·기시도 skip·소진 시 여전히 실패하는지를 지킨다.
+
+def test_chain_on_thin_page_falls_back_through_pw_then_native(wire, monkeypatch):
+    """thin(트리아지가 놓친 스캔) 페이지: VL 실패 → **pw 시도** → 실패 → native.
+
+    `thin` 은 odl 레인 출신이라 게이트웨이를 **한 번도 안 거쳤다** — 체인의 pw 단계가
+    새로 커버하는 집단이다. 여기서는 게이트웨이가 빈손이라 native 로 이어진다.
+    """
+    monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages",
+                        lambda jobs, ocr_url=None, **k: [
+                            ([{"category": "text", "content": {"markdown": _BAD_VL}, "page": 0}], [])
+                            for _ in jobs])
+    wire["set_gate"](_decision({1: "odl"}))
+    wire["set_md"](["   "])
+    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")   # 실패하지 않는다
+    assert wire["gw_calls"] == [(1,)], f"thin 은 pw 를 시도해야 한다: {wire['gw_calls']}"
+    assert res.page_traces[0]["source"] == "native_fallback"
+    assert "native-text-p1" in _texts(res.pages, 1)
+
+
+def test_chain_on_pw_fallback_wins_over_native(wire, monkeypatch):
+    """게이트웨이가 내용을 내면 native 보다 **먼저** 채택된다(체인 순서)."""
+    monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages",
+                        lambda jobs, ocr_url=None, **k: [
+                            ([{"category": "text", "content": {"markdown": _BAD_VL}, "page": 0}], [])
+                            for _ in jobs])
+    wire["set_gate"](_decision({1: "odl"}))
+    wire["set_md"](["   "])
+    wire["set_gw"]([{"page_number": 1, "blocks": [{"type": "text", "text": "GW 폴백 본문"}],
+                     "layout": [], "page_size": None}])
+    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    assert res.page_traces[0]["source"] == "gw_fallback"
+    assert "GW 폴백 본문" in _texts(res.pages, 1)
+
+
+def test_chain_on_demoted_page_skips_pw(wire, monkeypatch):
+    """강등(paddle_gw 출신) 페이지는 pw 를 **이미 거쳤으므로 건너뛴다**(사용자 확정 skip 규칙)."""
+    monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages",
+                        lambda jobs, ocr_url=None, **k: [
+                            ([{"category": "text", "content": {"markdown": _BAD_VL}, "page": 0}], [])
+                            for _ in jobs])
+    wire["set_gate"](_decision({1: "paddle_gw"}))
+    wire["set_gw"]([{"page_number": 1, "blocks": [], "layout": [], "page_size": None,
+                     "status": "error", "error": "timeout"}])
+    pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    assert wire["gw_calls"] == [(1,)], \
+        f"step3 배치 1회뿐 — 폴백에서 다시 부르면 안 된다: {wire['gw_calls']}"
+
+
+def test_chain_on_exhausted_still_fails_document(wire, monkeypatch):
+    """**안전 불변식** — 체인을 다 소진하면 여전히 문서가 실패한다.
+
+    pw 빈손 · md 공백 · rp.text 공백 → 채울 것이 없다. 폴백을 켰다고 실패가 사라지면
+    안 된다(그러면 열화가 영영 안 드러난다).
+    """
+    monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages",
+                        lambda jobs, ocr_url=None, **k: [
+                            ([{"category": "text", "content": {"markdown": _BAD_VL}, "page": 0}], [])
+                            for _ in jobs])
+    monkeypatch.setattr(pdf_parser, "_render_pages",
+                        lambda fb, page_numbers=None, **k: [_RP(1, text="   ")])
+    wire["set_gate"](_decision({1: "odl"}))
+    wire["set_md"](["   "])
+    with pytest.raises(ParserError, match="vl_failed"):
+        pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+
+
+def test_chain_on_gateway_unavailable_is_not_fatal(wire, monkeypatch):
+    """게이트웨이 URL 이 없어도(폐쇄망 parse-only 정상 구성) **문서 전체 500 이 아니다**.
+
+    `run_paddle_gateway` 는 URL 미설정 시 RuntimeError 를 던진다. 안 잡으면 폴백을 켜는
+    순간 폐쇄망만 죽는다 — 배포 게이트.
+    """
+    monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages",
+                        lambda jobs, ocr_url=None, **k: [
+                            ([{"category": "text", "content": {"markdown": _BAD_VL}, "page": 0}], [])
+                            for _ in jobs])
+    wire["set_gate"](_decision({1: "odl"}))
+    wire["set_md"](["   "])
+    wire["set_gw"](RuntimeError("KBP_PADDLE_OCR_GATEWAY_URL 미설정"))
+    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    assert res.page_traces[0]["source"] == "native_fallback", "체인이 다음 단계로 이어져야 한다"
+    assert any(a[0] == "gw" and a[1] == "lane_unavailable"
+               for a in res.page_traces[0]["attempts"])
+
+
+def test_chain_on_gw_page_cap_limits_fallback(wire, monkeypatch):
+    """페이지 상한 — 전 페이지가 VL 실패해도 게이트웨이에 무한정 보내지 않는다.
+
+    최악(트리아지+ODL 동시 실패)에 전 페이지가 게이트웨이로 가면 페이지당 600초 poll 시한
+    때문에 facade ReadTimeout 으로 문서가 죽는다.
+    """
+    monkeypatch.setenv("KBP_VL_FALLBACK_GW_MAX_PAGES", "2")
+    monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages",
+                        lambda jobs, ocr_url=None, **k: [
+                            ([{"category": "text", "content": {"markdown": _BAD_VL}, "page": 0}], [])
+                            for _ in jobs])
+    wire["set_gate"](_decision({n: "odl" for n in (1, 2, 3, 4)}))
+    wire["set_md"](["   "] * 4)
+    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    assert wire["gw_calls"] == [(1, 2)], f"앞 2장만 보낸다: {wire['gw_calls']}"
+    over = [t for t in res.page_traces
+            if any(a[0] == "gw" and a[1] == "over_cap" for a in t["attempts"])]
+    assert {t["page_number"] for t in over} == {3, 4}
+
+
+def test_chain_on_md_fallback_folds_leader_dots(wire, monkeypatch):
+    """ODL md 폴백 경로도 leader dot 을 접는다 — 안 접으면 degen 이 목차를 통째로 지운다."""
+    toc = "\n".join(f"{i}\tChapter {i} " + ". " * 40 + f"\t{i * 3}" for i in range(1, 20))
+    monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages",
+                        lambda jobs, ocr_url=None, **k: [
+                            ([{"category": "text", "content": {"markdown": _BAD_VL}, "page": 0}], [])
+                            for _ in jobs])
+    monkeypatch.setattr(pdf_parser, "_render_pages",
+                        lambda fb, page_numbers=None, **k: [_RP(1, text="   ")])
+    wire["set_gate"](_decision({1: "vl"}))          # vl 레인 → odl 을 안 거쳤다
+    wire["set_md"]([toc])
+    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    assert res.page_traces[0]["source"] == "vl_md_fallback"
+    assert "Chapter 1" in _texts(res.pages, 1), "degen 이 지우면 안 된다"
+
+
+def test_gw_stage_recorded_for_gateway_lane(wire):
+    """게이트웨이 시도가 `attempts` 에 남는다 — 이전엔 stage 어휘에 `gw` 가 없었다."""
+    wire["set_gate"](_decision({1: "paddle_gw"}))
+    wire["set_gw"]([{"page_number": 1, "blocks": [{"type": "text", "text": "스캔"}],
+                     "layout": [], "page_size": None, "status": "ok"}])
+    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    assert any(a[0] == "gw" and a[1] == "ok" for a in res.page_traces[0]["attempts"])

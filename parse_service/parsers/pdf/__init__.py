@@ -112,6 +112,23 @@ def _strip_leader_dots(text: str) -> str:
 _TRUNCATION_OUTCOMES = frozenset({"truncated", "error_placeholder"})
 
 
+def _fallback_on() -> bool:
+    """VL 폴백 체인 스위치 — ``VL 실패 → pw → odl → rp.text → 빈``.
+
+    **기본 ON**(사용자 확정 2026-08-14). 근거는 실측 — 전량 VL 문서가 프로바이더 절단으로
+    **간헐 40% 실패**했고(온톨로지 18p 5회: FAIL/ok/ok/FAIL/ok, p17 이 3회 다 truncated)
+    재시도 비대칭(절단 +1회)으로도 못 살렸다. 문서 결함이 아니라 프로바이더 사정이다.
+
+    2b-2 가 이 폴백들을 지운 이유는 "122b 가 아픈데 정상으로 보인다" 였는데, 그 뒤 2b-1 의
+    `page_traces` 가 생겨 **폴백 발동이 페이지별 `source` 로 기록되고 `counters.fallback_*`
+    로 세어진다** — 가리지 않고 살릴 수 있게 됐다.
+
+    끄면(``KBP_VL_FALLBACK_CHAIN=0``) 2b-2 동작 그대로: 빈 페이지 하나가 문서 실패.
+    **호출 시점 조회**다 — 모듈 상수로 두면 `monkeypatch.setenv` 가 안 먹는다.
+    """
+    return os.environ.get("KBP_VL_FALLBACK_CHAIN", "1") != "0"
+
+
 def _looks_like_failed_vl(elements: list[dict]) -> str | None:
     """VL 이 "성공처럼 보이지만 실패"한 형태인가. 실패 종류 문자열 또는 None.
 
@@ -556,9 +573,14 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
 
     def _att(pno: int, stage: str, outcome: str, meta: dict | None = None) -> None:
         attempts.setdefault(pno, []).append((stage, outcome, meta or {}))
+    # ⚠️ **plain dict 다 — defaultdict 가 아니다.** 새 키를 `+= 1` 하려면 반드시 여기
+    #    리터럴에 먼저 넣어야 한다(없으면 KeyError → 문서 전체 500).
+    #    같은 리터럴 사본이 `tests/test_parser_pdf_hybrid.py` 에도 하드코딩돼 있다.
     counters = {"layout_pages": 0, "visual_pages": 0, "area_guard_skipped": 0,
                 "truncated": 0, "error_placeholder": 0, "vl_page_calls": 0,
-                "tbl_backfill": 0, "vl_extra_tables": 0}
+                "tbl_backfill": 0, "vl_extra_tables": 0,
+                # 폴백 체인(KBP_VL_FALLBACK_CHAIN) 발동 계수 — VL 열화 감시 지표.
+                "fallback_gw": 0, "fallback_md": 0, "fallback_native": 0}
 
     # ── 1) ODL — odl 또는 skip 레인이 있으면(skip 도 md 로 블록을 만든다) ──────
     # `vl_pnos` 포함 필수 — 안 넣으면 전면 가로형 문서에서 `odl_md=[]` 이라 `_md(pno)` 가
@@ -603,6 +625,20 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
                 log.warning("게이트·ODL 모두 페이지수 미상 — 렌더로 %d 페이지 확인 (%s)",
                             total_pages, filename)
 
+    # ── 2b) 폴백 체인의 "이미 거친 레인" 추적 ─────────────────────────────────
+    # 체인은 `VL 실패 → pw → odl → rp.text → 빈` 이고 **이미 거친 엔진은 건너뛴다**.
+    # 시작 레인에서 유도된다 — paddle_gw 로 시작한 페이지는 pw 를, odl 로 시작한 페이지는
+    # odl 을 이미 거쳤다. `total_pages` 가 확정된 **뒤**여야 한다(위 :594-609 폴백 사슬).
+    # ⚠️ `set(lanes)` 를 합집합한다 — `lanes` 키가 `total_pages` 를 넘는 문서가 실재한다
+    #    (게이트가 센 페이지수와 ODL 페이지수가 어긋나는 경우). 그리고 **조회는 전부
+    #    `setdefault`** 로 한다 — 폴백이 기본 ON 이라 KeyError 하나가 전 문서를 500 으로
+    #    만든다. 규약이 아니라 문법으로 막는다.
+    tried: dict[int, set[str]] = {}
+    for _n in set(range(1, total_pages + 1)) | set(lanes):
+        _lane = lanes.get(_n, "odl")
+        tried[_n] = ({"pw"} if _lane == "paddle_gw"
+                     else ({"odl"} if _lane == "odl" else set()))
+
     # ── 3) 게이트웨이 — 스캔 페이지만 전송(B-2) ───────────────────────────────
     if paddle_pnos:
         gw_pages: list[dict] = []
@@ -630,6 +666,19 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
         demoted_pnos = {n for n in paddle_pnos
                         if n not in gw_by_pno
                         or (gw_by_pno.get(n) or {}).get("status") == "error"}
+        # 게이트웨이 발자국(2026-08-14) — 지금까지 stage 어휘는 vl·odl·hybrid_vl 뿐이라
+        # **게이트웨이 시도가 attempts 에 한 줄도 안 남았다.** 폴백 체인의 "이미 거친 레인"
+        # 판정 근거이자 관측 구멍이다. `demoted_pnos` 확정 **뒤**에 남긴다 — 그 전에 두면
+        # `_hybrid_scan_pages` 가 남긴 `hybrid_vl` 발자국과 시간순이 뒤집힌다.
+        # ⚠️ `_fail_if_vl_empty` 는 `a[0]=="vl"` ∧ `meta.attempt` 만 보므로 **판정 무영향**
+        #    (quarantine 의 `hybrid_vl` 이 제외되는 것과 같은 이유).
+        for _n in sorted(paddle_pnos):
+            _pg = gw_by_pno.get(_n)
+            if _pg is None:
+                _att(_n, "gw", "no_result")
+            else:
+                _att(_n, "gw", _pg.get("status") or "ok",
+                     {"error": _pg.get("error"), "blocks": len(_pg.get("blocks") or ())})
 
     # ── 4) VL 전사 대상 = thin odl ∪ 강등 paddle. 300dpi 1회 렌더 + 배치 호출 ──
     def _md(pno: int) -> str:
@@ -650,6 +699,11 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
     # Phase 2b-2: blocks 를 step4 에서 확정한다 — 재시도 판정 기준이 "최종 blocks" 인데
     # 그게 step5 에서 생기면 재호출에 필요한 jpeg/prompt 가 스코프 밖이기 때문이다.
     vl_blocks_by_pno: dict[int, list[dict]] = {}
+    # **분기 밖 seeding 필수** — 아래 `if pairs:` 안에서만 정하면 VL 대상이 없거나 렌더가
+    # 전부 실패한 문서에서 step4b(폴백 게이트웨이)가 UnboundLocalError 로 문서 전체를
+    # 500 으로 만든다(`hybrid_replaced` 와 같은 사고 유형).
+    budget_s = float(os.environ.get("KBP_VL_DOC_BUDGET_S", "3600") or "3600")
+    _vl_t0 = time.monotonic()
     if transcribe_pnos:
         # jobs 와 되매핑 키를 **같은 필터에서 동시에** 만든다 — 따로 만들면 렌더 부재 페이지에서
         # 한 칸씩 밀려 다른 페이지의 전사가 붙는다.
@@ -680,8 +734,7 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
             # 두 값이 어긋날 수 있다(기본 2 → 절단 3).
             attempts_trunc = min(5, attempts_max + 1)
             last_outcome: dict[int, str] = {}
-            budget_s = float(os.environ.get("KBP_VL_DOC_BUDGET_S", "3600") or "3600")
-            _vl_t0 = time.monotonic()
+            _vl_t0 = time.monotonic()                # 예산 시작점을 배치 직전으로 당긴다
             todo = list(pairs)                       # 1회차 = transcribe_pnos 전체
             for _attempt in range(1, attempts_trunc + 1):
                 if not todo:
@@ -752,6 +805,57 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
                                         if last_outcome.get(n) in _TRUNCATION_OUTCOMES
                                         else attempts_max)]
 
+    # ── 4b) 폴백 체인 1단계: VL 실패 → 게이트웨이 ─────────────────────────────
+    # **스캔 페이지에는 rp.text·ODL 이 구조적으로 무용지물**이다(네이티브 텍스트 없음, ODL 이
+    # 낼 것 없음). OCR 할 수 있는 것은 게이트웨이뿐이다. 특히 `thin_pnos` 는 트리아지가
+    # 스캔을 놓쳐 odl 레인으로 보낸 페이지라 **게이트웨이를 한 번도 안 거쳤다** — 지금까지는
+    # VL 이 실패하면 그대로 빈 페이지였다.
+    gw_fb_by_pno: dict[int, list] = {}
+    if _fallback_on():
+        # ⚠️ **예산과 상한이 없으면 문서가 죽는다.** 최악은 트리아지 실패 + ODL 실패 문서 —
+        #    전 페이지가 thin → VL 실패 → 전 페이지 게이트웨이 전송이 되는데, 이를 막을
+        #    lane 근거가 없다(`paddle_pnos` 가 비어 있다). 게이트웨이 페이지당 poll 시한은
+        #    `paddle_gw._DEFAULT_TIMEOUT` 600초 **import 시점 고정**이라 런타임에 못 줄인다.
+        #    90초 문서가 분 단위로 늘면 facade 가 httpx.ReadTimeout 으로 문서를 죽인다(실사고).
+        _fb_cap = max(0, int(os.environ.get("KBP_VL_FALLBACK_GW_MAX_PAGES", "10") or "10"))
+        _fb_left = budget_s - (time.monotonic() - _vl_t0) if budget_s > 0 else float("inf")
+        need_gw = sorted(n for n in transcribe_pnos
+                         if not vl_blocks_by_pno.get(n)
+                         and "pw" not in tried.setdefault(n, set()))
+        if need_gw and _fb_left <= 0:
+            log.warning("VL 예산 소진 — 폴백 게이트웨이 건너뜀, %d페이지 (%s)",
+                        len(need_gw), filename)
+            for n in need_gw:
+                _att(n, "gw", "budget_exhausted", {"fallback": True})
+            need_gw = []
+        if len(need_gw) > _fb_cap:
+            log.warning("폴백 게이트웨이 대상 %d페이지 > 상한 %d — 앞 %d장만 (%s)",
+                        len(need_gw), _fb_cap, _fb_cap, filename)
+            for n in need_gw[_fb_cap:]:
+                _att(n, "gw", "over_cap", {"fallback": True})
+            need_gw = need_gw[:_fb_cap]
+        if need_gw:
+            try:
+                from parse_service.parsers.pdf.paddle_gw import run_paddle_gateway
+                _got = {p["page_number"]: p for p in
+                        run_paddle_gateway(file_bytes, filename, page_numbers=set(need_gw))}
+                for n in need_gw:
+                    pg_ = _got.get(n)
+                    _att(n, "gw",
+                         (pg_ or {}).get("status") or ("no_result" if pg_ is None else "ok"),
+                         {"fallback": True, "error": (pg_ or {}).get("error")})
+                    if pg_ and pg_.get("blocks"):
+                        gw_fb_by_pno[n] = pg_["blocks"]
+                        counters["fallback_gw"] += 1
+                    tried.setdefault(n, set()).add("pw")
+            except Exception as exc:  # noqa: BLE001
+                # ⚠️ **반드시 잡는다.** 폐쇄망 parse-only 는 `KBP_PADDLE_OCR_GATEWAY_URL` 이
+                #    없는 것이 **정상 구성**이고, 그때 `run_paddle_gateway` 가 RuntimeError 를
+                #    던진다(paddle_gw.py). 안 잡으면 폴백을 켜는 순간 폐쇄망만 문서 전체 500.
+                log.warning("VL 폴백 게이트웨이 불가 — 체인 다음 단계로 (%s): %s", filename, exc)
+                for n in need_gw:
+                    _att(n, "gw", "lane_unavailable", {"fallback": True})
+
     # ── 5) 병합 ───────────────────────────────────────────────────────────────
     # `traces` 는 **별도 맵**이다 — `entry` dict(PageDoc 6-key 계약)에 키를 추가하면
     # 하류로 새어 계약이 바뀐다(Phase 2b-1 은 동작을 바꾸지 않는다).
@@ -784,8 +888,36 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
             # 본문에 실리고, (b) counters 가 이중 계상된다.
             blocks = vl_blocks_by_pno.get(pno) or []
             src = "vl"
-            # ⛔ ODL md 폴백 제거(2b-2) — VL 이 실패했는데 ODL 마크다운으로 채우면
-            #    "122b 가 아픈데 정상으로 보이는" 상태가 된다. 빈 채로 두고 실패시킨다.
+            # ── 폴백 체인 2·3단계 (2026-08-14, KBP_VL_FALLBACK_CHAIN) ──────────
+            # 2b-2 는 이 폴백들을 지웠다("122b 가 아픈데 정상으로 보인다"). 그 우려는
+            # `page_traces` 가 생기며 해소됐다 — 아래 `src` 가 페이지별로 남고
+            # `counters.fallback_*` 로 세어져 **가려지지 않는다**.
+            # ⚠️ **체인을 다 소진하면 blocks 는 여전히 빈 채로 남는다** — 그러면
+            #    `_refresh_trace_sources` 가 source 를 empty 로 내리고 `_fail_if_vl_empty`
+            #    가 문서를 실패시킨다. 그 안전 불변식은 그대로다.
+            if not blocks and _fallback_on():
+                _t = tried.setdefault(pno, set())
+                if gw_fb_by_pno.get(pno):                      # ← pw (step4b)
+                    blocks = gw_fb_by_pno[pno]
+                    src = "gw_fallback"
+                elif "odl" not in _t and _digital_text_len(md) >= _DIGITAL_MIN_CHARS:
+                    # ⚠️ leader-dot 을 **여기서도** 접는다. 안 하면 목차 페이지를 md 로
+                    #    채운 뒤 degen 5-gram 지배 규칙이 통째로 지워 문서가 다시 죽는다
+                    #    (실측 전례 있는 조합 — 2a 에서 native 경로만 처리했었다).
+                    blocks = hybrid_to_blocks(_strip_leader_dots(md), page_idx=pno)
+                    src = "vl_md_fallback"
+                    counters["fallback_md"] += 1
+                else:                                          # ← rp.text
+                    _native = _strip_leader_dots(
+                        getattr(by_pno.get(pno), "text", "") or "").strip()
+                    if _native:
+                        # `page_idx` 는 **1-based 절대 페이지**여야 한다 — 빠지면 modal 이
+                        # 기본값 0 으로 조용히 page_spans 를 깨뜨린다(KeyError 도 안 난다).
+                        blocks = [{"type": "text", "text": _native, "page_idx": pno}]
+                        src = "native_fallback"
+                        counters["fallback_native"] += 1
+                if blocks:
+                    log.warning("VL 폴백 — page %d, %s (%s)", pno, src, filename)
 
         elif _digital_text_len(md) >= _DIGITAL_MIN_CHARS:
             blocks = hybrid_to_blocks(md, page_idx=pno)
@@ -873,6 +1005,13 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
     _src_dist = collections.Counter(t["source"] for t in page_traces)
     log.info("parse-svc pdf(%s) source: %s", filename,
              " · ".join(f"{k} {v}p" for k, v in sorted(_src_dist.items())))
+    # 폴백 발동 계수 — **마스킹 감시 지표**다. 폴백이 켜지면 VL 열화가 문서 실패로
+    # 안 드러나므로, "폴백으로 채워진 페이지 수" 를 봐야 그 대가를 통제할 수 있다.
+    # 0 이면 안 찍는다(건강한 문서의 로그를 더럽히지 않는다).
+    if any(counters[k] for k in ("fallback_gw", "fallback_md", "fallback_native")):
+        log.warning("parse-svc pdf(%s) VL 폴백 발동: gw=%d md=%d native=%d", filename,
+                    counters["fallback_gw"], counters["fallback_md"],
+                    counters["fallback_native"])
     result = RouteResult(kind="pages", chunk_needed=True, pages=pages,
                          page_verdicts=verdicts, page_traces=page_traces)
     _try_log_triage(decision, result, lanes, filename)

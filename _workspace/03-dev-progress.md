@@ -1486,3 +1486,58 @@ vl      (가로형·다이어그램)                    → 절단이면 3회까
     `routed_backend=openpyxl`, `delegation_rule` **207개**, 본문 동일(D56 닫힘)
   - amd64 컨테이너: 콜드 18.1s/웜 8.7s, 타임아웃 강제 종료 후 `lo_*` 잔존 0 + 다음 변환 정상
   - 폐쇄망 가드 실행: `✓ .xls 왕복 성공 — biff_chunks=2 sheets=1`
+
+## 2026-08-14 — VL 폴백 체인 복원 + `→ pw` 신설 (`feat/vl-fallback-chain`)
+
+**계기** — 2b-2 를 실문서로 처음 스모크한 결과(케이스당 1건, 5건):
+
+| 문서 | 레인 | 결과 |
+|---|---|---|
+| 휴가규정 7p 디지털 | `odl×7` | ok 5.1s |
+| 신탁지침 3p 스캔 | `paddle_gw×2` + `vl×1` | ok 85s |
+| 3레인합성 7p | `odl×3` + `gw_hybrid×2` + `vl×2` | ok 94s |
+| **온톨로지 18p 전량 VL** | `vl×18` | **5회 중 2회 실패** |
+| docx 13p (변환) | `odl×11` + `vl×2` | ok 32s |
+
+4레인 전부 관측됐고 불변식(표 `<table>`·모달 마커 균형·`page_spans` 정합)은 5건 전수 통과.
+그런데 **온톨로지가 간헐 40% 실패**했다 — `p17 attempts=[truncated,truncated,truncated]`,
+로그 `Unterminated string`. 문서 결함이 아니라 **프로바이더 절단**이고 재실행하면 통과한다.
+재시도 비대칭(절단 +1회)은 **정상 동작**했는데도 못 살렸다.
+
+**조치** — 2b-2 가 지운 폴백 둘을 되살리고 **`VL 실패 → paddle 게이트웨이`** 를 신설해
+체인을 완성했다: `VL 실패 → pw → odl → rp.text → 빈`, **이미 거친 레인은 skip**.
+단일 스위치 `KBP_VL_FALLBACK_CHAIN`(기본 ON, 사용자 확정).
+
+**지웠던 이유의 해소** — 당시 근거는 "122b 가 아픈데 정상으로 보인다" 였다. 그 뒤 2b-1 이
+`page_traces` 를 만들어 폴백 발동이 페이지별 `source`(`gw_fallback`/`vl_md_fallback`/
+`native_fallback`)로 남고 `counters.fallback_*` 로 세어진다 — **가려지지 않는다.**
+
+**결과(체인 ON, 온톨로지 3회)**: **3/3 성공**. 그중 1회는 p17 을 `gw_fallback` 이 살렸다.
+
+**구조 품질 실측(p17)** — 문자수로 판정하면 방향이 거꾸로 나온다:
+
+| 단계 | 블록 | 문자수 | 구조 |
+|---|---|---|---|
+| `vl`(정상) | 29 | 813 | 정상 분절 |
+| `gw_fallback` | **27** | 704 | **VL 과 대등** |
+| `native_fallback` | **1** | **883** | 단일 블록, 자간 깨짐 |
+
+**체인 순서(pw 먼저)가 실질적으로 중요하다** — native 가 먼저였으면 1블록 덩어리가 됐다.
+
+**부수 산출**: `gw` attempt stage 신설(그전까지 게이트웨이 시도가 `attempts` 에 한 줄도
+안 남았다). `_fail_if_vl_empty` 는 `a[0]=="vl"` ∧ `meta.attempt` 만 보므로 판정 무영향.
+
+**검증**: 전체 849 passed. 신규 8건 — 체인 순서·기시도 skip·**소진 시 여전히 실패**(안전
+불변식)·게이트웨이 부재 시 500 아님(폐쇄망 게이트)·페이지 상한·leader dot·gw stage.
+2b-2 정책 테스트 9건은 `chain_off` fixture 로 **OFF 경로를 계속 지킨다**.
+
+**계획서가 못 잡고 실행이 잡은 것**: `UnboundLocalError: budget_s` — step4b 가 `if pairs:`
+안에서만 정의되는 변수를 밖에서 참조해 **35개 테스트가 한꺼번에 깨졌다**. VL 대상이 없거나
+렌더가 전부 실패한 문서에서 문서 전체 500 이 났을 것이다. 세 라운드 검증에서 안 나왔고
+한 번 돌리니 즉시 나왔다.
+
+**미해결** → `docs/superpowers/specs/2026-08-14-vl-fallback-chain-deferred.md` (D1~D6).
+특히 **D5** — `gw_fallback` 페이지가 v1 GW 품질게이트를 우회한다(의도적, 근거 기록됨).
+
+**연동 주의** — 속도개선 A 가 `:566` 의 `vl_pnos` 항을 지우면 체인의 odl 단계가 vl-only
+문서에서 도달 불가가 된다. `2026-08-14-parser-speed-odl-deferred.md` 에 경고 기록.

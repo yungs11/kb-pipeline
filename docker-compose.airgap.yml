@@ -342,6 +342,10 @@ services:
       KBP_VL_PAGE_ATTEMPTS: ${KBP_VL_PAGE_ATTEMPTS:-2}
       KBP_VL_DOC_BUDGET_S: ${KBP_VL_DOC_BUDGET_S:-3600}
       KBP_FAIL_ON_EMPTY_PAGE: ${KBP_FAIL_ON_EMPTY_PAGE:-1}
+      # VL 폴백 체인(2026-08-14) — VL 실패 → pw → odl → rp.text → 빈. 기본 ON.
+      # `:?` 금지 — 기존 현장 .env 에 이 키가 없어 배포가 통째로 막힌다.
+      KBP_VL_FALLBACK_CHAIN: ${KBP_VL_FALLBACK_CHAIN:-1}
+      KBP_VL_FALLBACK_GW_MAX_PAGES: ${KBP_VL_FALLBACK_GW_MAX_PAGES:-10}
       KBP_VL_PAGE_DPI: ${KBP_VL_PAGE_DPI:-200}
       KBP_VL_VISUAL_MIN_AREA: ${KBP_VL_VISUAL_MIN_AREA:-0.05}
       # OpenRouter 전용 필드라 폐쇄망에서는 무의미하다. 끄기는 `none` 센티널로 명시한다 —
