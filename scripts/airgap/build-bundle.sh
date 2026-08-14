@@ -99,9 +99,9 @@ docker buildx version >/dev/null 2>&1 || { echo "docker buildx 없음 (Docker De
 #   요구하면 매번 override 를 쓰게 되고 그러면 가드가 죽는다. 브랜치를 바꿀 때
 #   이 표도 같이 고치는 것이 "무엇으로 배포하는가"의 선언이다.
 EXPECT_BRANCH=(
-  ".|feat/fileconvert-api"                              # kb-pipeline (parse-svc/facade/edgequake 이미지)
-  "edgequake|feat/kb-pipeline-provider"                 # 서브모듈 (webui)
-  "../99.projects/adaptive_chunk|feat/adaptive-chunk-metric-weighting"
+  ".|main"                                              # kb-pipeline (parse-svc/facade/edgequake 이미지) — 2026-08-14 feat/fileconvert-api 머지 후 main 배포
+  "edgequake|edgequake-main"                            # 서브모듈 (webui) — 포크의 main 은 upstream 이름 그대로 `edgequake-main`
+  "../99.projects/adaptive_chunk|main"                  # 2026-08-14 feat/adaptive-chunk-metric-weighting 머지 완료(main..feat = 0)
   "../99.projects/shinhan_trust/doc_guard|main"         # 2026-08-11 이후 main 배포 (룰 동기화 커밋 40fde0f)
 )
 
