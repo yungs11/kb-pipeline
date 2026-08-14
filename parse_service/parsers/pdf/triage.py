@@ -161,7 +161,12 @@ def extract_signals(page: "pymupdf.Page") -> PageSignals:
     sig.word_count = len(words)
     sig.char_count = sum(len(w[4]) for w in words)
     # env 로 조정 가능(2026-08-06) — 호출 시점에 읽는다(classify() 와 동일 관례).
-    native_text_min_chars = int(os.environ.get("KBP_TRIAGE_NATIVE_TEXT_MIN_CHARS") or 20)
+    # **20 → 100 (2026-08-14)**: 스캔 페이지에 머리말·쪽번호·워터마크 같은 자투리
+    # 네이티브 텍스트가 20자를 넘는 일이 흔해, 스캔인데 `has_native_text=True` 가 되어
+    # TEXT_ONLY→odl 로 잘못 라우팅됐다. 450페이지 격자탐색 실측: ODL 오라우팅이
+    # **20쪽 → 4쪽**으로 줄었다. `or` 를 쓰는 이유는 빈 값을 기본값으로 되돌리기 위함이다
+    # (`get(k, "100")` 이면 빈 문자열이 그대로 와서 int("") → ValueError).
+    native_text_min_chars = int(os.environ.get("KBP_TRIAGE_NATIVE_TEXT_MIN_CHARS") or 100)
     sig.has_native_text = sig.char_count > native_text_min_chars
 
     blocks = page.get_text("blocks")  # (x0,y0,x1,y1,text,block_no,block_type)

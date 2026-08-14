@@ -57,7 +57,11 @@ def test_triage_document_digital_text_page():
     import pymupdf
     doc = pymupdf.open()
     page = doc.new_page()
-    page.insert_text((72, 72), "This is a digital text page with enough words to classify.")
+    # 새 임계(KBP_TRIAGE_NATIVE_TEXT_MIN_CHARS=100)를 넘도록 여러 줄로 넣는다 —
+    # 한 줄이면 페이지 밖으로 잘려 글자수가 임계 아래로 떨어진다.
+    page.insert_text((72, 72), ["This is a digital text page with enough words",
+                                "to classify it as a native-text page, well above",
+                                "the 100-character native text threshold."])
     data = doc.tobytes()
     doc.close()
 
@@ -105,7 +109,22 @@ def test_triage_document_bad_bytes_returns_empty():
 
 # ---- 다이어그램 신호 (2026-07-14: curve/line/img 합성 — native-text 페이지 한정) ----
 
-def _synth_pdf(draw=None, text="테스트 본문 텍스트입니다. 다이어그램 신호 검증용 문장.", images=0):
+# ⚠️ 기본 텍스트는 **`KBP_TRIAGE_NATIVE_TEXT_MIN_CHARS`(기본 100)를 넉넉히 넘어야** 한다.
+#    옛 기본값 20 시절 문구(48자)를 그대로 두면 임계를 100 으로 올린 순간 이 픽스처가
+#    `has_native_text=False` 가 되어 **디지털 텍스트 페이지 테스트가 스캔 판정으로 뒤집힌다**
+#    (2026-08-14 실측: 이 한 줄 때문에 4건이 깨졌다). 임계를 또 올리면 여기도 같이 늘린다.
+#    ⚠️ **ASCII 여러 줄로 둔다.** 두 함정이 있다 —
+#       (1) `insert_text` 는 줄바꿈을 안 해서 한 줄로 길게 주면 페이지 밖으로 잘린다.
+#       (2) pymupdf 기본 폰트(Helvetica)에 **한글 글리프가 없어** 한글은 일부만 추출된다
+#           (실측: 한글 3줄 = 78자, 임계 100 미달). 임계 테스트에 한글을 쓰지 말 것.
+_DIGITAL_TEXT = [
+    "This is a digital text page with plenty of native words",
+    "so that the character count comfortably exceeds the",
+    "native-text threshold used by triage classification.",
+]
+
+
+def _synth_pdf(draw=None, text=_DIGITAL_TEXT, images=0):
     """합성 1페이지 PDF bytes — text(네이티브) + draw(page) 콜백 + 작은 이미지 n개."""
     import pymupdf
     doc = pymupdf.open()
@@ -321,3 +340,37 @@ def test_landscape_to_llm_toggle_off(monkeypatch):
     s = classify(_sig(char_count=500, has_native_text=True, word_count=80,
                       is_landscape=True))
     assert s.bucket is Bucket.TEXT_ONLY
+
+
+# ── 네이티브 텍스트 임계 (KBP_TRIAGE_NATIVE_TEXT_MIN_CHARS) ──────────────────
+def test_native_text_threshold_default_is_100(monkeypatch):
+    """기본값 100 을 고정한다 — 20 에서 올린 값이다(2026-08-14).
+
+    **왜 올렸나**: 스캔 페이지에 머리말·쪽번호·워터마크 같은 자투리 네이티브 텍스트가
+    20자를 넘는 일이 흔해, 스캔인데 `has_native_text=True` 가 되어 TEXT_ONLY→odl 로
+    잘못 라우팅됐다. 450페이지 격자탐색 실측: **ODL 오라우팅 20쪽 → 4쪽**.
+    """
+    monkeypatch.delenv("KBP_TRIAGE_NATIVE_TEXT_MIN_CHARS", raising=False)
+    # 48자(옛 기본값 20 은 넘고 새 기본값 100 은 못 넘는다) → 스캔으로 본다
+    s = _first_sig(_synth_pdf(text="테스트 본문 텍스트입니다. 다이어그램 신호 검증용 문장."))
+    assert s.char_count < 100
+    assert s.has_native_text is False, "48자는 자투리다 — 디지털 텍스트로 보면 안 된다"
+    # 임계를 넘는 본문 → 디지털
+    assert _first_sig(_synth_pdf()).has_native_text is True
+
+
+def test_native_text_threshold_env_override(monkeypatch):
+    """env 로 되돌릴 수 있다 — 임계가 현장 문서와 안 맞을 때의 탈출구."""
+    monkeypatch.setenv("KBP_TRIAGE_NATIVE_TEXT_MIN_CHARS", "20")
+    s = _first_sig(_synth_pdf(text="테스트 본문 텍스트입니다. 다이어그램 신호 검증용 문장."))
+    assert s.has_native_text is True, "20 으로 낮추면 옛 동작"
+
+
+def test_native_text_threshold_empty_env_falls_back_to_default(monkeypatch):
+    """빈 값은 **기본값으로 되돌아간다** — `or` 를 쓰는 이유.
+
+    `os.environ.get(k, "100")` 이었다면 빈 문자열이 그대로 와서 `int("")` → ValueError 로
+    문서 전체가 죽는다. 폐쇄망 compose 에서 빈 값이 새는 유형이 실재한다.
+    """
+    monkeypatch.setenv("KBP_TRIAGE_NATIVE_TEXT_MIN_CHARS", "")
+    assert _first_sig(_synth_pdf()).has_native_text is True   # 예외 없이 기본값 100
