@@ -127,6 +127,21 @@
   유지(삭제 오류로는 안 이어짐 — `replaced_docs_id and replaced_docs_id != new_docs_id`
   가드가 보호).
 
+  **후속(2026-08-16 밤, 같은 날 추가 수정) — 구 문서를 KB UI 목록에서도 지운다
+  (kb_pipeline 한정)**: plan `~/.claude/plans/d57-followup-delete-old-doc-row.md`
+  (v2 READY). D57 본수정은 예전 문서의 **검색 데이터**(edgequake docs_id)만 정리했고
+  Postgres `Document` row 자체는 남아 문서 목록에 구/신 버전이 둘 다 보였다. 사용자
+  지시("기존 구문서도 안 나오게 하자")로, 신규 적재 성공 후 스왑 지점에
+  `deps.repo.delete_document_rows(예전_document_id)`를 추가해 `chunks_meta`+
+  `document_pages`+`ingestion_jobs`+`documents` row 를 통째로 지운다(기존 문서 삭제
+  API `cascade_delete_document`가 쓰는 것과 동일 삭제 경로, `SqlDocumentRepo` 에 위임
+  메서드 신설). 검증 중 `SqlCascadeRepo.delete_document_rows`가 `document_pages`를
+  명시 삭제 목록에서 빠뜨리고 있던 기존 결함도 같이 닫았다(모든 호출자에게 이득).
+  신규 테스트로 old row/chunks_meta/document_pages 삭제 확인 + skip 케이스는 안
+  지워지는지 회귀 가드. 기존 회귀 667 passed, 새 실패 0. **비-kb_pipeline provider
+  (raganything/dify-edgequake/ragflow)는 각자 별도 스왑 블록이라 이번엔 안 건드림**
+  (비범위, 별건).
+
   **원래 조사 기록(아래, 참고용)** — 레포: `99.projects/shinhan_trust/knowledge_base/backend`.
   `pipeline.py:574-577` 의 `find_by_logical_identity(kb_id, file_name)`(같은
   kb_id+파일명 중 `ORDER BY created_at DESC LIMIT 1`)가 재업로드 시 **그 요청이 방금
