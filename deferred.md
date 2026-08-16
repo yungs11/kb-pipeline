@@ -109,8 +109,25 @@
   청크 본문도 동일(`… 물품 구입 신청 항목군의 전결 기준: - 50만원 초과 …: 총장 결재:○`).
   변환 전이라면 확장자 게이트에 막혀 kordoc 으로 떨어져 **207 → 0** 이 됐을 자리다.
   픽스처로 커밋하지는 않았다(타 프로젝트 코퍼스 120KB) — 재현 절차만 여기 남긴다.
-- **D57 [별도 레포] kb-pipeline 재적재 중복판정 의심 버그** (2026-08-16, Phase 2.5 레인 UI
-  plan 조사 중 발견) — 레포: `99.projects/shinhan_trust/knowledge_base/backend`.
+- **D57 [별도 레포] kb-pipeline 재적재 중복판정 버그 — 수정 완료(2026-08-16 밤)**.
+  plan: `~/.claude/plans/d57-reupload-dedup-fix.md`(v2 READY, ultracode 2라운드).
+  **확정됐다** — 라이브 postgres 직접 조회로 실증: 같은 kb_id+file_name 조합이 10행까지
+  쌓이고 그중 ready 상태만 7개, 전부 서로 다른 `docs_id`(재적재마다 edgequake 에 별개
+  사본이 쌓여 검색 시 최신/구판이 섞여 나오는 상태였다). 원인은 아래 그대로였다(재확인
+  완료). **수정**: `find_by_logical_identity`에 `exclude_document_id` 선택 인자를
+  추가해 SQL 조회 단계에서 호출자 자신의 pending row 를 제외하도록 바꿨다(사후 `!=`
+  비교 대신 조회 자체를 정확하게). `ingest_document`(`pipeline.py`)가 이 인자로
+  `existing_document_id`를 넘기도록 배선. 신규 테스트 5건(저장소 레벨 3 + 파이프라인
+  레벨 2, 프로덕션 순서 그대로 재현: pending row 선생성 → existing_document_id 전달)
+  으로 "내용 다른 재적재 → replaced_docs_id 채워짐 → 구 docs_id 정리 호출" 과 "완전
+  동일 재적재 → 여전히 skip" 둘 다 실측 확인. 기존 회귀 667 passed, 새 실패 0.
+  **범위(사용자 확정)**: 이번 수정은 **신규 재업로드부터만** 적용된다 — 이미 쌓인
+  중복 행/구 `docs_id`(edgequake 잔존 사본)는 이번 범위에서 정리하지 않았다(비범위,
+  별건). 동시(거의 동시) 업로드 레이스는 이번 수정 이전부터 있던 별개 문제로 deferred
+  유지(삭제 오류로는 안 이어짐 — `replaced_docs_id and replaced_docs_id != new_docs_id`
+  가드가 보호).
+
+  **원래 조사 기록(아래, 참고용)** — 레포: `99.projects/shinhan_trust/knowledge_base/backend`.
   `pipeline.py:574-577` 의 `find_by_logical_identity(kb_id, file_name)`(같은
   kb_id+파일명 중 `ORDER BY created_at DESC LIMIT 1`)가 재업로드 시 **그 요청이 방금
   만든 자기 자신의 pending Document row** 를 반환하는 경로로 보인다 — `routers/kb.py:

@@ -1581,3 +1581,10 @@ verdict)를 orchestrator(`99.projects/shinhan_trust/knowledge_base`) 문서 상�
 `find_by_logical_identity` 가 재업로드 시 자기 자신을 찾는 것으로 보이는 문제)은 아직
 별도 조사·plan 필요 — 확정 결론 아님. `knowledge_base` 레포 `feat/phase25-lane-visibility-ui`
 브랜치는 아직 `main` 에 머지 안 됨.
+
+## D57 수정 완료 (2026-08-16 밤)
+
+`deferred.md` D57(재적재 중복판정 버그) 확정 후 수정 완료 — 상세는 `deferred.md` D57
+항목 참조. `knowledge_base` 레포 `find_by_logical_identity`에 `exclude_document_id`
+추가 + `ingest_document` 배선. 신규 재업로드부터 적용(기존 중복은 비범위, 별건).
+plan: `~/.claude/plans/d57-reupload-dedup-fix.md`(v2 READY).
