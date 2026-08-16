@@ -88,7 +88,12 @@ if [ ${#tars[@]} -eq 0 ]; then
   [ "$missing" -eq 0 ] || die "이미지 tar 도 없고 필요한 이미지도 없습니다($IMAGES_GLOB)."
   echo "  번들 tar 없음 — 로컬에 이미 있는 이미지를 사용합니다."
 fi
-for t in "${tars[@]}"; do echo "  load $t"; "$ENGINE" load -i "$t"; done
+# `[ ${#tars[@]} -gt 0 ]` 로 감싼다 — macOS 시스템 bash(3.2, GPLv3 회피로 최신화 안 됨)는
+# 빈 배열에 `"${tars[@]}"` 를 참조하면 `set -u` 아래서 "unbound variable" 로 죽는다
+# (bash 4.4+ 에서 고쳐진 버그). 2026-08-14 실측: tar 없이 로컬 이미지만 쓰는 경로에서 재현.
+if [ ${#tars[@]} -gt 0 ]; then
+  for t in "${tars[@]}"; do echo "  load $t"; "$ENGINE" load -i "$t"; done
+fi
 
 # ── 2) .env 확인 ──────────────────────────────────────────────────────────────
 [ -f "$BUNDLE_ROOT/.env" ] || {
@@ -126,6 +131,27 @@ for svc in postgres minio parse-svc facade; do
     cid="$("$ENGINE" ps -a --filter "label=com.docker.compose.service=${svc}" --format '{{.ID}}' | head -1)"
     st="$("$ENGINE" inspect "$cid" --format '{{.State.Health.Status}}' 2>/dev/null || echo unknown)"
     [ "$st" = "healthy" ] && { echo "✓ healthy"; break; }
+    # postgres 전용 조기 진단(2026-08-14 실측) — 기존 볼륨이 **더 낮은 메이저 버전**으로
+    # 초기화돼 있으면 새 postgres 이미지가 그 데이터를 거부하고 크래시루프한다(데이터를
+    # 지우지는 않는다 — postgres 자체의 안전장치). HEALTH_TIMEOUT 끝까지 기다렸다 뭉뚱그린
+    # "기동 실패"로 죽이지 않고, 몇 초 안에 로그 시그니처로 잡아 정확한 다음 행동을 준다.
+    if [ "$svc" = "postgres" ] && [ -n "$cid" ]; then
+      cst="$("$ENGINE" inspect "$cid" --format '{{.State.Status}}' 2>/dev/null || echo unknown)"
+      if { [ "$cst" = "restarting" ] || [ "$cst" = "exited" ]; } \
+         && "$ENGINE" logs "$cid" 2>&1 | tail -60 | \
+            grep -qi "in 18+, these Docker images are configured\|database files are incompatible\|incompatible with this version"; then
+        echo "✗ 버전 불일치"
+        die "postgres 볼륨이 이번 번들의 이미지보다 **낮은 메이저 버전**으로 이미 초기화돼
+   있습니다(데이터는 지워지지 않았습니다 — postgres 가 거부만 합니다). 그대로 계속하면
+   이 볼륨을 영영 못 엽니다.
+
+   지금 여기서 멈추고 아래를 실행하세요(백업→정리→재기동→복원을 한 번에 한다):
+     ./scripts/airgap/pg-upgrade.sh
+
+   (단계를 직접 밟고 싶으면 pg-backup.sh → 볼륨 삭제 → 이 스크립트 재실행 →
+    pg-restore.sh 순서다. ⚠️ 백업 전에 볼륨을 지우면 데이터가 사라진다.)"
+      fi
+    fi
     [ "$(date +%s)" -ge "$deadline" ] && { echo "✗ TIMEOUT(last=$st)"; die "기동 실패 — $ENGINE logs 로 확인"; }
     sleep 3
   done

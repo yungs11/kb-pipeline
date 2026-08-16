@@ -56,5 +56,9 @@ scripts/*.env.bak.*
 dist/
 .venv-kb
 
+# postgres 백업 덤프(scripts/airgap/pg-backup.sh) — 실제 문서 메타데이터가 들어갈 수 있다.
+# 커밋 금지, 저장소 밖(현장 배포 디렉터리)에 남긴다.
+backups/
+
 # Claude Code worktrees (격리 작업공간 — 리포에 커밋되면 안 된다)
 .claude/worktrees/

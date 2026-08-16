@@ -247,6 +247,12 @@ else
 fi
 cp scripts/airgap/deploy-both.sh        "$BUNDLE/scripts/airgap/"
 cp scripts/airgap/parse-only-up.sh      "$BUNDLE/scripts/airgap/"
+# postgres 메이저버전 업그레이드 백업/복원(2026-08-14) — parse-only-up.sh 의 조기 감지
+# 가드가 이 두 스크립트 이름을 안내 메시지에서 직접 언급한다. 빠뜨리면 현장에서
+# "이 스크립트를 실행하라"는 안내만 있고 파일이 없는 상태가 된다.
+cp scripts/airgap/pg-backup.sh          "$BUNDLE/scripts/airgap/"
+cp scripts/airgap/pg-restore.sh         "$BUNDLE/scripts/airgap/"
+cp scripts/airgap/pg-upgrade.sh         "$BUNDLE/scripts/airgap/"
 cp docs/airgap-deploy.md                "$BUNDLE/docs/" 2>/dev/null || true
 # 현장 체크리스트 — 이번 번들이 이전과 달라진 점(포트·fitz·CNI)과 미검증 항목.
 cp docs/airgap-onsite-checklist.md      "$BUNDLE/docs/" 2>/dev/null || true
