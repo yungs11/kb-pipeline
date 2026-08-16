@@ -142,6 +142,37 @@
   (raganything/dify-edgequake/ragflow)는 각자 별도 스왑 블록이라 이번엔 안 건드림**
   (비범위, 별건).
 
+  **후속2(2026-08-16 밤, skip 경로 orphan pending row — 수정 완료)**: plan
+  `~/.claude/plans/d57-skip-path-orphan-pending-row.md`(v3 READY, ultracode 2라운드
+  x2). 라이브 실측 — "소유권이전 프로세스.pptx" 재업로드가 완전 동일 내용이라 skip
+  경로를 탔는데, `ingest_with_method`(`routers/kb.py`)가 적재 시작 **전에** 미리
+  만들어둔 새 pending `Document` row(`existing_document_id`)가 skip 분기의 즉시
+  `return` 때문에 한 번도 갱신되지 않아 **"pending/대기"로 영구히 방치**됐다(실사용자가
+  UI 에서 "소유권이전 프로세스가 대기에서 멈췄다"고 보고). 급한 건은 그 1건을 라이브
+  DB 에서 수동 삭제해 즉시 해소.
+  **수정 v1(삭제) → 치명적 결함으로 폐기**: skip 분기에서 `delete_document_rows(
+  existing_document_id)`로 지우려 했으나, `IngestionJob.document_id` FK 가
+  `ondelete=CASCADE`라 **지금 이 요청을 처리 중인 잡 자신의 ingestion_jobs row 까지
+  같이 지워져** `workers/tasks.py`의 후속 `jobs.set_state(...)`(try 블록 밖)가
+  크래시하는 시나리오였다(원래 버그보다 더 나쁨).
+  **수정 v2(상태만 canceled 로 갱신) → 새 치명적 결함 발견**: row 삭제 대신
+  `deps.repo.set_status(existing_document_id, "canceled")`로 바꿔 FK 캐스케이드
+  위험은 없앴으나, `find_by_logical_identity`에 상태 필터가 전혀 없어(`created_at
+  DESC LIMIT 1`) canceled placeholder 가 원본 ready 문서보다 최신이라 **세 번째
+  이상 동일 재업로드부터 그 canceled row 가 먼저 걸려 skip 이 깨지고 원본이 identity
+  조회에서 영원히 못 찾는 orphan**이 되는 회귀를 ultracode 2라운드가 잡아냈다. 이
+  poisoning 은 사실 이번 plan 이전부터 있던 잠재 버그(진짜 사용자 취소 흐름도 같은
+  `set_status(..., "canceled")`를 씀, `workers/tasks.py:175,316`/`pipeline.py:2403`)임을
+  추가 확인.
+  **최종 수정 v3(READY, 구현됨)**: `SqlDocumentRepo.find_by_logical_identity`
+  WHERE 절에 `Document.status != "canceled"` 필터를 추가해, skip 신규 사용과 기존
+  취소 흐름의 잠재 버그를 한 번에 닫았다. skip 분기의 `set_status(...,"canceled")`는
+  v2 그대로 유지(row 는 지우지 않음, FK 캐스케이드 위험 없음). 신규 테스트 2건
+  (기존 skip 테스트에 canceled 상태 갱신 확인 추가 + 신규 "3연속 동일 업로드" 테스트
+  — v3 필터가 없으면 실패하도록 설계, v2→v3 diff 의 존재 이유를 직접 검증) 로 실측
+  확인. 기존 회귀 668 passed(순증 +1 테스트), 새 실패 0(기존 19건은 이 수정과 무관한
+  사전 실패 — alembic/gate_options/raganything/ragflow 등).
+
   **원래 조사 기록(아래, 참고용)** — 레포: `99.projects/shinhan_trust/knowledge_base/backend`.
   `pipeline.py:574-577` 의 `find_by_logical_identity(kb_id, file_name)`(같은
   kb_id+파일명 중 `ORDER BY created_at DESC LIMIT 1`)가 재업로드 시 **그 요청이 방금
