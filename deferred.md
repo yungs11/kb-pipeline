@@ -173,6 +173,36 @@
   확인. 기존 회귀 668 passed(순증 +1 테스트), 새 실패 0(기존 19건은 이 수정과 무관한
   사전 실패 — alembic/gate_options/raganything/ragflow 등).
 
+  **후속3(2026-08-17, skip 결과 안내 — 수정 완료)**: plan
+  `~/.claude/plans/d57-skip-ingest-note-banner.md`(v3 READY, ultracode 3라운드).
+  v3 배포 직후 실사용자가 "소유권이전 프로세스.pptx" 재업로드에서 "기존 게 삭제된 게
+  아니라 지금 작업이 그냥 취소됐다"고 보고. 실측 확인 결과 **버그 아님, v3 설계대로
+  정상 skip** — 업로드가 기존 ready 문서와 완전 동일 내용(같은 size_bytes/
+  content_hash)이라 skip 발동, 원본은 안전하게 유지됨. 다만 UX 가 혼동스러웠다 —
+  잡은 `status=succeeded`로 끝나 즉시 화면엔 실패로 안 보이지만, 새로 만든 placeholder
+  `Document`는 "canceled"로 갱신되어(v3 설계) 나중에 문서 목록에서 보면 "취소됨"
+  배지로 보인다. `IngestResult.detail`("동일 내용(content_hash)이 이미 ready 상태
+  — 적재 스킵.")이 `workers/tasks.py`의 ready|skipped 성공 분기에서 `jobs.set_state`
+  호출에 전달되지 않고 버려지고 있었다(바로 위 canceled/rejected/failed 분기는 모두
+  `error=result.detail`을 넘기는데 이 분기만 빠짐).
+  **사용자 확정 범위**: "적재 결과 토스트/안내만 개선"(문서 목록의 "취소됨" 라벨
+  자체는 안 바꿈, 별건).
+  **수정**: `ingestion_jobs.note` 컬럼 신설(alembic — `error`는 실패/취소 사유
+  전용 의미라 재사용하면 의미 혼동, 별도 nullable 컬럼으로 분리). skip 시
+  `note=result.detail` 로 워커가 채우고, `JobStatus` 스키마/`GET /jobs/{id}`
+  투영에 `note` 노출, 프론트 `JobProgressInline`이 `status==="succeeded" && note`일
+  때 기존 `info-banner` 패턴으로 안내 문구를 그린다.
+  **ultracode 3라운드 경과**: 1라운드(4렌즈) NEEDS_REVISION — §1 의 "error 재사용
+  시 ErrorDetailModal 이 성공 잡에도 잘못 뜬다"는 근거가 코드 사실과 달랐음(그 버튼은
+  `job.status==="failed"`만 보고 `error` 진위값은 안 봄) → 근거 텍스트 정정(설계
+  결정 자체는 유지). 2라운드 NEEDS_REVISION — "job_id 재사용/재시도 경로 없음"이라는
+  절대 진술이 `retry_failed_item`(재시도 시 같은 job row 재사용)과 자기모순 →
+  "note 를 쓰는 success/skip 분기와 retry 발동 상태(failed/gate_failed)는 상호배타"로
+  주장을 좁혀 정정. 3라운드 READY. 신규 테스트(`test_job_status.py`) — 1차 순수
+  성공 job 의 `note is None`과 2차 skip job 의 `note == skip detail 문자열` 둘 다
+  단언. 기존 회귀 669 passed(순증 +1), 새 실패 0(동일 19건 baseline, alembic 관련
+  4건 포함 — 신규 migration 이 그 실패들을 늘리지 않았음도 같이 확인).
+
   **원래 조사 기록(아래, 참고용)** — 레포: `99.projects/shinhan_trust/knowledge_base/backend`.
   `pipeline.py:574-577` 의 `find_by_logical_identity(kb_id, file_name)`(같은
   kb_id+파일명 중 `ORDER BY created_at DESC LIMIT 1`)가 재업로드 시 **그 요청이 방금
