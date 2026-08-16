@@ -251,11 +251,18 @@ def wait_for_job(repo, blobs, job_id, *, timeout: float, runner=None,
     interval = float(_env_int("KBP_JOB_WAIT_POLL_INTERVAL_SECONDS", 2))
     deadline = time.monotonic() + timeout
     while True:
-        row = repo.get(job_id)
-        if row is None:
-            raise HTTPException(status_code=500, detail="job row vanished")
-        if row["status"] in TERMINAL:
-            return row
+        try:
+            row = repo.get(job_id)
+        except Exception:  # noqa: BLE001 - DB transient(연결 실패 등) — 다음 폴에서
+            # 재시도(worker.py:_tick 과 동일 패턴). row 는 갱신하지 않고 deadline
+            # 체크로 흘려보낸다 — DB 가 진짜 죽어 있으면 결국 deadline 에서 409 로
+            # 종결된다(무한 대기 아님).
+            log.exception("wait_for_job: repo.get 실패(트랜지언트로 간주) — 재시도")
+        else:
+            if row is None:
+                raise HTTPException(status_code=500, detail="job row vanished")
+            if row["status"] in TERMINAL:
+                return row
         if time.monotonic() >= deadline:
             # 4xx 다. 504 로 내면 kb 가 5xx 재시도로 같은 요청을 다시 보내고,
             # 멱등키가 없어 /insert·/ingest 에서 중복 적재가 된다.

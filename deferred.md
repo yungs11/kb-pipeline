@@ -109,3 +109,20 @@
   청크 본문도 동일(`… 물품 구입 신청 항목군의 전결 기준: - 50만원 초과 …: 총장 결재:○`).
   변환 전이라면 확장자 게이트에 막혀 kordoc 으로 떨어져 **207 → 0** 이 됐을 자리다.
   픽스처로 커밋하지는 않았다(타 프로젝트 코퍼스 120KB) — 재현 절차만 여기 남긴다.
+- **D57 [별도 레포] kb-pipeline 재적재 중복판정 의심 버그** (2026-08-16, Phase 2.5 레인 UI
+  plan 조사 중 발견) — 레포: `99.projects/shinhan_trust/knowledge_base/backend`.
+  `pipeline.py:574-577` 의 `find_by_logical_identity(kb_id, file_name)`(같은
+  kb_id+파일명 중 `ORDER BY created_at DESC LIMIT 1`)가 재업로드 시 **그 요청이 방금
+  만든 자기 자신의 pending Document row** 를 반환하는 경로로 보인다 — `routers/kb.py:
+  upload_documents` 가 파일마다 새 `Document` row 를 먼저 커밋(`kb.py:228-239`)한 뒤
+  워커가 그 row 의 id 를 `existing_document_id` 로 넘기므로(`workers/tasks.py:281`),
+  그게 항상 "가장 최근" row 라 자기 자신이 걸린다. 그렇다면 `existing.document_id !=
+  existing_document_id`(pipeline.py:577)가 재업로드에서 **False** 로 평가돼
+  replace/skip 분기(578-591)가 발동하지 않고, 구/신 문서(및 그 `chunks_meta`)가 완전히
+  독립적으로 공존할 수 있다 — 즉 같은 파일명 재업로드 시 **중복 방지 가드가 무력화**될
+  가능성.
+  **확정 결론 아님** — ultracode 검증 2·3라운드에서 코드 추적이 반복 번복됐고(v2: "같은
+  document_id 재사용" → v3: "항상 새 id + replace 분기 항상 발동" → v3 재검증에서 그마저
+  틀림), 실제 프로덕션 재현은 검증 렌즈 1건이 sqlite 인메모리로 흉내낸 것뿐이라 운영 DB
+  기준 재현이 필요하다. `~/.claude/plans/phase25-lane-visibility-ui.md` v2~v4 변경이력에
+  전체 추적 기록이 있다. 별도 조사·plan 필요(재현 → 실제 영향 범위 확정 → 수정 여부 결정).

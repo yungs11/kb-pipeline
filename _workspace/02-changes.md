@@ -1409,3 +1409,61 @@ parse-svc 이미지에 `libreoffice-calc/core` 추가(**압축 +176.6MB, 번들 
 **검증** — 신규 테스트 12개(매직바이트 라우팅 5케이스·탈출구·임시물 누수 정상/예외·실왕복·
 병합셀 colspan 비교·캐시전용 `#REF!` 보존·전결 게이트 도달) + 기존 회귀 341 통과.
 폐쇄망 가드에 `.xls` 왕복 스모크 추가(픽스처 부재 시 **스킵이 아니라 실패**).
+
+## facade `wait_for_job` — DB 순간 장애 흡수 (2026-08-16)
+
+plan: `~/.claude/plans/facade-job-wait-transient-retry.md` (v2 READY, ultracode 2라운드).
+
+**사고**: 실사용자 업로드 중 `RemoteProtocolError('Server disconnected without sending
+a response.')`가 두 번 관측됐다(스캔 OCR 게이트웨이 교체와는 무관한 별건). 추적 결과
+`facade-kbp.log`에서 `service/jobs/repo.py:_connect`의 `psycopg.ConnectionTimeout`이
+`service/jobs/api.py:wait_for_job`의 폴링 루프(`repo.get(job_id)`)에서 무보호로 새어
+`service/app.py:_legacy_job` 밖까지 전파됨을 확인 — kb-backend는 이를 연결 끊김으로
+관측했지만, **parse-svc 는 그 사이 실제로 계속 처리해 결국 성공(`200 OK`)했다**. postgres
+자체는 사고 전후 정상(`Up 2 days healthy`, 17/100 커넥션) — 순간(transient) 실패 1건.
+
+**수정**: `wait_for_job`의 `repo.get(job_id)` 호출을 `try/except Exception`으로 감싸
+DB 순간 장애를 흡수하고 다음 폴 주기(기본 2s)에 재시도한다 — `worker.py`의 `_tick()`
+클레임 루프가 이미 쓰던 것과 동일 패턴("DB transient 후 다음 틱에서 재연결"). `row is
+None`(행 실종, 즉시 500)과 `TERMINAL` 판정은 `else` 절에 있어 예외 케이스와 섞이지
+않는다. DB 가 **진짜** 죽어 있으면 기존 `deadline`(`KBP_JOB_LEGACY_WAIT_SECONDS` 기본
+3300s)에서 여전히 409 로 종결 — 무한 대기 아님.
+
+**트레이드오프(수용)**: 완전 DB 다운 시나리오에서 동기 legacy 라우트(`/parse` 등)의
+FastAPI 스레드풀 점유 시간이 기존 ~5-10s(즉시 실패)에서 deadline 까지(최대 ~55분)로
+늘어난다. 순간 장애와 완전 다운을 요청 시점에 구분할 수 없어 트레이드오프로 수용 —
+기존에도 정상 장시간 잡 대기는 deadline 까지 스레드를 붙잡는 특성이 있었다(신규 아님).
+운영에서 완전 다운+스레드풀 고갈이 실제 관측되면 별건으로 다룬다.
+
+**커넥션 풀은 도입하지 않는다**(비범위, 기존 설계 유지) — `psycopg_pool`은 폐쇄망 별도
+휠이 필요하고, 대기 핸들러가 커넥션을 오래 붙잡으면 edgequake 본체와 단일 실패점을
+공유하게 된다(`service/jobs/repo.py:1-13`, `2026-08-03-facade-job-queue-design.md` §2.3).
+재시도도 매번 connect/close(붙잡고 자지 않음).
+
+**검증**: 신규 유닛 테스트 4건(`service/tests/test_wait_for_job_retry.py`) — psycopg
+실제 예외 클래스 흡수, 무관한 일반 예외도 흡수(넓은 except 증명), 완전 다운 시 409 종결
+회귀 가드, 행 실종 시 즉시 500 회귀 가드. 전부 green. 기존 회귀 330 passed/3 skipped,
+새 실패 0.
+
+## Phase 2.5 배선 누락 2건 + kb 프론트 stage 오분류 수정 (2026-08-16)
+
+**사고 1 — 개별 프리뷰 경로만 `document_pages` 가 안 채워짐**: "개별 프리뷰→설정→적재"
+(2단계 kb_pipeline 흐름)로 올린 문서는 파싱 레인 정보(`page_traces`)를 만들긴 하지만
+`document_pages`가 항상 0행이었다(1-shot 경로는 정상). 원인은 **명시 key-pick 사전 2곳**
+이 `page_traces`를 안 골라온 것 — `knowledge_base/backend/app/workers/tasks.py`
+(parse_preview_task 가 sidecar 저장 시) + `knowledge_base/backend/app/routers/kb.py`
+(`ingest_with_method` 이 sidecar 를 `pre_parsed` 로 재구성 시), **두 hop 모두** 빠져 있어
+둘 다 고쳤다. 신규 회귀 테스트 2건(각 hop 별) green.
+
+**사고 2 — kb 프론트 잡 진행 표시가 "게이트검증"을 1번 단계로 잘못 보여줌**:
+`frontend/components/JobList.tsx`의 `KB_PIPELINE_STAGES = new Set(["parse","chunk",
+"insert"])`가 kb_pipeline 판정 기준인데, 백엔드가 잡 시작 직후 아주 잠깐 거치는
+placeholder `stage="gate"`(파일 읽기 중, 곧 `parse`로 바뀜)가 이 집합에 없어 그 순간
+**DEFAULT_STAGE_ORDER(dify 용 5단계, "게이트검증"이 1번)로 오분류**됐다. `job.provider`
+(실제 폴링 잡엔 항상 채워짐)를 우선 쓰고 없을 때만 기존 stage 어휘로 폴백하도록 수정
+— 실제로는 kb_pipeline 잡은 항상 파싱이 1번이었고 UI 표시만 틀렸다.
+
+**검증**: kb 백엔드 662 passed(baseline red 19건 무관 확인, 신규 실패 0). 프론트
+tsc/lint/build clean. `run-kb-backend.sh`로 재기동, 프론트(:18080) `.next` 캐시 손상
+(별건 — `npm run build` 검증이 dev 서버와 캐시를 공유해 깨진 것, `rm -rf .next` 후
+재기동으로 해소) 확인 후 정상.

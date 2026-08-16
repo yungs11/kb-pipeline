@@ -1541,3 +1541,43 @@ vl      (가로형·다이어그램)                    → 절단이면 3회까
 
 **연동 주의** — 속도개선 A 가 `:566` 의 `vl_pnos` 항을 지우면 체인의 odl 단계가 vl-only
 문서에서 도달 불가가 된다. `2026-08-14-parser-speed-odl-deferred.md` 에 경고 기록.
+
+## Phase 2.5 완료 (2026-08-16) — 페이지별 레인 선택을 KB UI 에 노출
+
+plan: `~/.claude/plans/phase25-lane-visibility-ui.md` (v4 READY, ultracode 4라운드
+경쟁 검증). 사용자 지시(2026-08-12): "kb에서 이미지 lane 선택한 것을 UI에서 보이게 하자."
+
+**목표**: parse-svc 가 이미 만드는 `page_traces`(페이지당 bucket·lane·source·attempts·
+verdict)를 orchestrator(`99.projects/shinhan_trust/knowledge_base`) 문서 상세 화면까지
+배선 — "왜 이 페이지가 이 레인으로 갔고, 무엇이 실패했나"를 운영자가 화면에서 본다.
+
+**검증 라운드에서 드러난 것(중요)**: v1→v2 라운드에서 "재적재 시 document_id 가 어떻게
+되는지"를 놓고 코드 추적이 **2라운드 연속 뒤집혔다**(같은 id 재사용 → 항상 새 id+replace
+분기 항상 발동 → 그마저 틀림: replace 분기가 표준 재업로드에서 아예 발동 안 할 수 있음).
+사용자 확정(2026-08-16)으로 **재적재/중복판정 의미론 자체를 이 plan 의 비범위로 확정** —
+`document_pages` 는 `chunks_meta` 와 **동일 저장 패턴**(그 ingest 호출의 `document_id`
+아래 delete-then-insert)만 따르고, 그 이상은 조사·주장하지 않는다. 발견된 의심 버그는
+`deferred.md` D57 로 분리(별도 조사 필요, 확정 결론 아님).
+
+**구현(6 Stage, 전부 완료)**:
+- Stage A: `SqlDocumentRepo.replace_document_pages`(`chunks_meta` 패턴 복제) — kb-pipeline 레포는 무변경(parse-svc 는 이미 `page_traces` 를 냄, §1 표 1~2행 기존 완료 확인).
+- Stage B: `DocumentPage(UUIDPKMixin, Base)` 모델(`document_pages` 테이블) + alembic 리비전 `b4c6e8f0a2d4`(head, `a3b5d7f9c1e2` 다음). `db_schema.md` 17번째 테이블로 갱신.
+- Stage C: `KbPipelineParseFailed(detail, page_traces=...)` 신설 — parse-svc `/parse` 실패(`status=="failed"`) 시 이 예외로 raise(기존 `RuntimeError` 상속이라 하위호환), 화이트리스트에 `page_traces` 키 추가(벽A/벽B 해소).
+- Stage D: `pipeline.py` `_facade_parse_and_chunk` 반환 7→8-튜플(`page_traces` 추가), `except KbPipelineParseFailed` 우선분기로 실패해도 traces 보존, 두 호출부(`_ingest_kb_pipeline_tail`·`_ingest_raganything_tail`, 둘 다 이 헬퍼 공유) 성공/실패 양쪽에서 `document_pages` 저장. PII 컷(`_pii_cut`, 200자 상한)을 `_document_page_rows` 한 곳에서 적용.
+- Stage E: `DocumentDetail.pages: list[PageTraceItem]` 스키마 신설, `GET /kb/{kb}/documents/{id}` 응답에 포함.
+- Stage F: `ParsingLanesCard.tsx`(레인별 요약 배지 + 접히는 페이지별 표, `attempts` 는 `"vl:truncated → vl:ok"` 요약 문자열로만) — `DocumentDetailModal.tsx`(모달)와 `app/kb/[kbId]/documents/[docId]/page.tsx`(풀페이지) 둘 다 배선. `pages.length===0`(레거시/구버전 parse-svc/미적재) 이면 블록 자체를 숨김.
+
+**검증**: kb 레포 백엔드 659 passed(19개 기존 baseline red 확인 후 무관 판정 — `test_pipeline*`/`test_pipeline_raganything*`/`test_pipeline_ragflow*`/`test_job_status*`/`test_main*`/`test_chat_edgequake*`, 전부 이번 변경 전에도 동일하게 실패). 신규 테스트 15건 전부 green(`test_repo_document_pages.py` 3·`test_kb_pipeline_client.py` +3·`test_pipeline_kb_pipeline.py` +5·`test_documents_api.py` +1, `test_models_smoke.py` 갱신 1). 프론트 `tsc --noEmit`/`next lint`/`next build` 전부 clean.
+
+**branch**: `feat/phase25-lane-visibility-ui`(kb 레포, `main` 기준) — 아직 머지 안 됨.
+
+**후속 업데이트(2026-08-16 저녁)**: migration 을 실제 postgres(`kbp-postgres-1`)에 적용
+완료(`alembic upgrade head`, `/readyz` `db_revision=b4c6e8f0a2d4` 확인) + 라이브 e2e 완료
+(실 문서 재적재 → 문서상세 "파싱 레인" 카드에 11페이지 정상 렌더 확인). 그 과정에서 발견한
+배선 누락 2건(개별 프리뷰 경로 `page_traces` key-pick 누락, kb 프론트 stage 오분류)도
+수정 완료 — 상세는 §"Phase 2.5 배선 누락 2건 + kb 프론트 stage 오분류 수정" 참조.
+
+**남은 것**: `deferred.md` D57(재적재 중복판정 의심 버그, kb-pipeline 오케스트레이터
+`find_by_logical_identity` 가 재업로드 시 자기 자신을 찾는 것으로 보이는 문제)은 아직
+별도 조사·plan 필요 — 확정 결론 아님. `knowledge_base` 레포 `feat/phase25-lane-visibility-ui`
+브랜치는 아직 `main` 에 머지 안 됨.
