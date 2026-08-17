@@ -85,6 +85,11 @@
 - **D52 kb-backend `document_signals` 의 `.xls`** (2026-08-13, markup-lane) —
   `_EXTRACTORS` 에 `xls` 키가 없어 텍스트 폴백으로 degrade 한다(페이지수를 지어낸다).
   D51 과 같은 이유로 이번 배포 후에 관측 가능해진다.
+  **2026-08-17 정정 — 아직 안 고쳐졌다.** pptx 사고(D58 정정 항목 참조,
+  `pptx-page-count-garbage-fix.md`)가 같은 부류의 버그였지만, 그 수정은
+  **ZIP 매직바이트(`PK\x03\x04`) 가드**라 `.xls`(OLE/CFB 바이너리, ZIP 아님)는
+  안 잡힌다 — `.xls` 는 여전히 길이 기반 쓰레기 추정을 낸다(가드 무관). D52는
+  별개로 그대로 열려 있음.
 - **D53 암호화 OOXML 이 CFB 매직에 걸린다** (2026-08-13, markup-lane) —
   `\xD0\xCF\x11\xE0` 는 BIFF 전용이 아니다(구 `.doc`/`.ppt`, 암호 걸린 `.xlsx` 도 CFB).
   암호 xlsx 는 **오늘은 openpyxl 이 즉시 실패**하는데, 변경 후엔 soffice 변환
@@ -283,3 +288,15 @@
   commit `b726186`, kb-pipeline commit `bfa5199`) — 위 "다음에 붙일 때" 후보
   1번(TTL/시간버킷)은 여전히 유효한 별개 개선 후보로 남지만 이번 사고와는
   무관하다.
+
+- **D59 [별도 레포] `document_signals`의 미지원 ZIP 기반 오피스 포맷(odp/ods 등)
+  — page_count가 여전히 부정확(1)** (2026-08-17, pptx-page-count-garbage-fix
+  후속). D58 정정과 같은 수정에서 `_extract_fallback`에 ZIP 매직바이트
+  (`PK\x03\x04`) 가드를 추가했다 — pptx는 전용 추출기(`_extract_pptx`)로
+  정확해졌지만, `_EXTRACTORS`에 없는 **다른** ZIP 기반 포맷(odp/ods 등)은
+  여전히 전용 추출기가 없어 이 가드에 걸려 `page_count=1`(안전한 최소값)로
+  degrade된다 — **1363 같은 큰 쓰레기값은 더 이상 안 나오지만, 실제 페이지수도
+  아니다.** `page_count`가 청킹 모드 셀렉터(`LARGE_PAGE_COUNT` 판정) 입력이라
+  이런 문서는 항상 "소규모"로 오판될 수 있다. 실제 odp/ods 유입이 관측되면
+  pptx와 동일 패턴(zipfile로 콘텐츠 XML 개수/구조를 세는 전용 추출기)을
+  추가한다 — 지금은 유입 사례가 없어 비범위.
