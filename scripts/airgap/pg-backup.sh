@@ -77,13 +77,20 @@ fi
 # 라벨 기반 조회(load-and-up.sh 의 ctr() 와 같은 이유) — 이름 규칙에 기대면 다른
 # 스택의 컨테이너를 잘못 집을 수 있다.
 find_ctr() {
+  # 못 찾아도 0으로 반환한다(2026-08-18 버그수정) — `set -e` 아래서
+  # `EXIST_CTR="$(find_ctr postgres)"` 처럼 대입문에 쓰이면, 이 함수가 실패 종료
+  # 코드를 내는 순간 스크립트 전체가 죽는다. 그러면 아래 "못 찾으면 태그로 폴백"
+  # 분기(die() 로 처리 — else 절)가 코드에는 있어도 **절대 도달하지 못하는 죽은
+  # 코드**가 된다(실측: 디스포저블 볼륨 복사본으로 fix 검증 중 발견 — 원본
+  # compose 스택이 아직 안 떠 있는 상태에서 늘 이 경로를 탄다).
   local svc="$1" n
   for lbl in com.docker.compose.service io.podman.compose.service; do
     n="$("$ENGINE" ps -a --filter "label=$lbl=$svc" \
                     --filter "label=com.docker.compose.project=$PROJECT" \
                     --format '{{.Names}}' 2>/dev/null | head -1)"
-    [ -n "$n" ] && { echo "$n"; return; }
+    [ -n "$n" ] && { echo "$n"; return 0; }
   done
+  return 0
 }
 
 EXIST_CTR="$(find_ctr postgres)"
@@ -109,7 +116,7 @@ TMP_CTR="kbp-pg-backup-tmp-$$"
 "$ENGINE" rm -f "$TMP_CTR" >/dev/null 2>&1 || true
 log "옛 이미지로 임시 기동: $OLD_IMG (볼륨 재사용, 초기화 아님)"
 "$ENGINE" run -d --name "$TMP_CTR" \
-  -v "${VOL}:/var/lib/postgresql" \
+  -v "${VOL}:/var/lib/postgresql/data" \
   -e POSTGRES_PASSWORD="$PW" \
   "$OLD_IMG" >/dev/null || die "임시 컨테이너 기동 실패 — 이미지/볼륨 궁합을 확인하세요."
 

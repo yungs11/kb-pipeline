@@ -49,13 +49,18 @@ fi
 PROJECT="${COMPOSE_PROJECT_NAME:-kbp}"
 
 find_ctr() {
+  # 못 찾아도 0으로 반환한다(2026-08-18, pg-backup.sh와 같은 버그) — `set -e` 아래서
+  # `CTR="$(find_ctr postgres)"` 대입문에 쓰이면 못 찾는 순간 스크립트가 조용히
+  # 죽어, 바로 아래 있는 `[ -n "$CTR" ] || die "..."` 의 명확한 에러 메시지가
+  # 절대 안 뜬다.
   local svc="$1" n
   for lbl in com.docker.compose.service io.podman.compose.service; do
     n="$("$ENGINE" ps --filter "label=$lbl=$svc" \
                     --filter "label=com.docker.compose.project=$PROJECT" \
                     --format '{{.Names}}' 2>/dev/null | head -1)"
-    [ -n "$n" ] && { echo "$n"; return; }
+    [ -n "$n" ] && { echo "$n"; return 0; }
   done
+  return 0
 }
 
 CTR="$(find_ctr postgres)"

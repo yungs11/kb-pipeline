@@ -195,6 +195,21 @@ check_env() {
     echo "  ${YEL}! KBP_GLOBAL_SEARCH_CONCURRENCY=0 — global(전체 요약) 검색이 항상 503 이다."
     echo "    파서 전용 배포면 정상. 전체 스택이면 프론트 버튼이 보이는데 안 된다.${RST}"
   fi
+  # ── 이미지 경로 누출 방지(2026-08-18) — ODL 이미지 필터 env 값 검증 ─────────
+  # 둘 다 REQUIRED_ENV 에 안 넣는다(기본값이 있는 옵션 키) — 설정됐을 때만 범위를 본다.
+  # 범위 밖 값은 조용히 code 쪽 fallback 을 타지 않고(둘 다 문자열 그대로 파싱) 그대로
+  # 잘못된 임계치로 동작하거나(면적 1.5 는 항상 미달 판정) 음수 개수로 항상 에스컬레이트된다.
+  _mia="$(val KBP_ODL_IMAGE_VL_MIN_AREA "$envf")"
+  if [ -n "$_mia" ] && ! awk -v v="$_mia" 'BEGIN { exit !(v ~ /^[0-9.]+$/ && v+0 >= 0 && v+0 <= 1) }'; then
+    echo "  ${RED}✗ KBP_ODL_IMAGE_VL_MIN_AREA=$_mia 는 0~1 사이 float 이어야 한다${RST}"
+    miss=1
+  fi
+  _esc="$(val KBP_ODL_IMAGE_COUNT_VL_ESCALATE "$envf")"
+  if [ -n "$_esc" ] && ! echo "$_esc" | grep -Eq '^[1-9][0-9]*$'; then
+    echo "  ${RED}✗ KBP_ODL_IMAGE_COUNT_VL_ESCALATE=$_esc 는 양의 정수여야 한다${RST}"
+    miss=1
+  fi
+
   if [ "$miss" -eq 0 ]; then echo "  ${GRN}✓ 필수키 모두 채워짐${RST}"; else return 1; fi
   return 0
 }
@@ -374,6 +389,34 @@ print("OK biff_chunks=%d sheets=%d" % (n, len(gs["sheets"])))
   # 사전 방어선이다. docx/hwp/ppt 파싱은 그 서비스가 실제로 응답해야 성공한다
   # (A6 — 구 kordoc docx 폴백은 제거됨, 지금은 이 경로가 유일하다).
   # (html 은 2026-08-11 이 경로에서 빠졌다 — parsers/html 이 형변환 없이 처리한다.)
+
+  # ★ 이미지 경로 누출 방지(2026-08-18) — gw2 스플라이싱/ODL 이미지필터/ocr 도메인
+  #   page_traces 심볼이 이미지 안에도 있는지 확인한다. 외부 게이트웨이(paddle_gw)/VL
+  #   API 실호출은 폐쇄망 내부망이라 빌드 타임에 도달 못 할 수 있어(§Non-goals) 여기선
+  #   import 레벨만 본다 — "로컬 venv엔 있는데 이미지엔 없음"(kb 이미지 문서추출기
+  #   누락과 같은 부류)을 잡는 최소 방어선. `_needs_gw2`는 `run_paddle_gateway()` 내부
+  #   로컬 함수라 모듈 최상위 심볼이 아니므로 여기 넣지 않는다(2026-08-18 ultracode
+  #   1라운드에서 지적된 실수 — ImportError로 항상 죽는 스모크가 될 뻔했다).
+  echo "== 이미지 경로 누출 방지 신규 심볼 import 스모크 =="
+  local GW2_PY='
+from parse_service.parsers.pdf.paddle_gw import _splice_gw2_block_content
+from parse_service.parsers.pdf.image_refs import replace_image_refs, find_image_refs
+from parse_service.parsers.pdf.odl_image_summary import summarize_odl_image
+from parse_service.parsers.ocr import _page_traces_for_ocr
+print("OK gw2_odl_ocr_trace_import")
+'
+  local gout
+  if [ -n "$TIMEOUT_BIN" ]; then
+    gout="$("$TIMEOUT_BIN" "${IMPORTS_CHECK_TIMEOUT:-60}" "$ENGINE" run --rm -w /app -e PYTHONPATH=/app \
+      --entrypoint python "$ref" -c "$GW2_PY" 2>&1)"
+  else
+    gout="$("$ENGINE" run --rm -w /app -e PYTHONPATH=/app --entrypoint python "$ref" -c "$GW2_PY" 2>&1)"
+  fi
+  case "$gout" in
+    *OK\ gw2_odl_ocr_trace_import*) echo "  ${GRN}✓ gw2/odl/ocr-trace import 성공${RST}" ;;
+    *) echo "  ${RED}✗ gw2/odl/ocr-trace 신규 심볼 import 실패 — 이미지엔 없는 코드일 수 있다:${RST}"
+       echo "$gout" | tail -6 | sed 's/^/    /'; return 1 ;;
+  esac
 }
 
 # --parse-only 를 어디에 붙여도 받는다(순서 무관):  --env .env --parse-only  /  --parse-only --env .env
