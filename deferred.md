@@ -220,8 +220,9 @@
   기준 재현이 필요하다. `~/.claude/plans/phase25-lane-visibility-ui.md` v2~v4 변경이력에
   전체 추적 기록이 있다. 별도 조사·plan 필요(재현 → 실제 영향 범위 확정 → 수정 여부 결정).
 
-- **D58 facade `/parse` idem_key — 영구 캐시라 오염이 KB/그룹 경계 없이 전파된다**
-  (2026-08-17, 라이브 조사). [별도 레포] `99.projects/shinhan_trust/knowledge_base`
+- **D58 facade `/parse` idem_key — 영구 캐시라 오염이 KB/그룹 경계 없이 전파된다
+  — 후속 수정 완료(2026-08-17)**. [별도 레포]
+  `99.projects/shinhan_trust/knowledge_base`
   에서 "소유권이전 프로세스.pptx"(13페이지) 재적재 시 `documents.page_count=1363`
   으로 계속 잘못 찍히는 걸 실사용자가 보고. `kbp.jobs` 직접 조회로 확인: 이 파일의
   `docs_id`(content_hash 앞16자 `4dd9a74105e23f9c`)로 2026-06-11~2026-08-16 사이
@@ -255,3 +256,25 @@
   즉시 조치: 해당 문서(`7854d9c0-5769-4b7a-b117-fc45d2eda5ab`)의 `page_count` 는
   틀린 채로 방치(라이브 DB 직접 수정 안 함, 사용자 지시 없음) — 표시용 부가 필드라
   검색/청킹 정확도에는 영향 없음(`document_pages`/`chunks_meta` 는 이미 정상 13).
+
+  **후속 수정(2026-08-17, 완료)**: plan `~/.claude/plans/
+  d58-idem-key-tenant-boundary-fix.md`(v3 READY, ultracode 2라운드). 사이드카
+  의혹(kb-backend parse-preview 스테이징이 별개로 낡은 결과를 재사용하는지)을
+  먼저 라이브 로그로 확인 — `POST parse-preview → 폴링 1회`만에 완료 + 문서 생성
+  간격 78초(정상 파싱은 13p급 문서가 100~130초 실측)라 **캐시 히트가 확정**되고
+  사이드카는 무관함을 재확인. 후보 두 가지(위 1·2번) 중 **1번(검증 게이트)은
+  드롭** — 사용자 판단: "페이지가 정상인 경우를 특정할 수 없다"(원본 파일의 실제
+  페이지수와 비교할 근거가 이 계층엔 없어 절대 상한값은 결국 추측). **2번(호출자측
+  시간버킷)만 채택**: `kb_pipeline_client.py::parse()`의 idem_key를
+  `"kb-parse:{docs_id}"` → `"kb-parse:{docs_id}:{bucket}"`로 바꿔(버킷 폭
+  기본 6시간, `kb_pipeline_parse_idem_window_seconds` 설정 가능), facade의
+  `derive_idem_key` 일반 규칙(명시 키=영구, `/jobs/insert`가 의존)은 전혀
+  안 건드리고 **호출자만 고쳤다** — 단일 레포(kb-backend) 변경으로 범위가
+  크게 줄었다. 버킷 폭 안에서는 기존처럼 캐시 재사용(최적화 유지), 폭을 넘으면
+  자연스럽게 재파싱 기회가 생겨 이번 사고(2달 방치)의 최대 방치 기간이 6시간으로
+  줄어든다. 신규 테스트 4건(접두어 검사, 같은 버킷 안정성, 버킷 경계에서 변경,
+  docs_id 없을 때 idem_key=None 회귀가드) — 기존 정확일치 테스트도 접두어 검사로
+  갱신. `backend/tests` 672 passed(순증 +3), 새 실패 0(기존 19건 baseline 동일).
+  **잔여 위험**: 버킷 폭(6h) 안에서는 여전히 틀린 결과가 캐싱될 수 있음(검증
+  게이트를 드롭했으므로) — 사고 재현 간격이 무제한→6시간으로 크게 줄었을 뿐,
+  완전히 막힌 건 아니다.
