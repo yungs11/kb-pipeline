@@ -325,6 +325,13 @@ services:
       KBP_PAGE_HYBRID_DIAGRAM_RULE: ${KBP_PAGE_HYBRID_DIAGRAM_RULE:-}
       # VL 계층구조(헤딩#/병합셀/도형 상하위) 규칙 오버라이드(선택, 빈 값이면 코드 기본값).
       KBP_PROMPT_HIERARCHY_RULE: ${KBP_PROMPT_HIERARCHY_RULE:-}
+      # ── 이미지 경로 누출 방지 (paddle_gw gw2 + ODL 이미지 필터, 2026-08-17) ──
+      # 게이트웨이가 없는 폐쇄망(KBP_GATE_OCR_LANE=vl)이면 paddle_gw 자체가 안 쓰여 gw2는
+      # 자연히 no-op. ODL 이미지 요약은 MODEL_API_URL 재사용 — 새 외부 의존 없음.
+      KBP_GW_IMAGE_OCR_ENABLE: ${KBP_GW_IMAGE_OCR_ENABLE:-1}
+      KBP_ODL_IMAGE_VL_MIN_AREA: ${KBP_ODL_IMAGE_VL_MIN_AREA:-0.01}
+      KBP_ODL_IMAGE_SUMMARY_PROMPT: ${KBP_ODL_IMAGE_SUMMARY_PROMPT:-}
+      KBP_ODL_IMAGE_COUNT_VL_ESCALATE: ${KBP_ODL_IMAGE_COUNT_VL_ESCALATE:-2}
       # 구조화출력 방식. 사내 서빙 스택(vLLM/TGI/litellm)마다 지원 형태가 달라
       # response_format 을 못 받는 게이트웨이가 있다. 리터럴이면 교체 수단이 없다.
       GUIDED_JSON_MODE: ${GUIDED_JSON_MODE:-response_format}

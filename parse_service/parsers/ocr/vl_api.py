@@ -141,6 +141,7 @@ async def call_vl_api_with_base64(
     system_prompt: str,
     *,
     max_tokens: int | None = None,
+    guided_json: bool = True,
 ) -> Tuple[str, "VLCallMeta"]:
     """base64 이미지로 Vision-Language 모델 API를 호출합니다.
 
@@ -151,15 +152,25 @@ async def call_vl_api_with_base64(
     `usage.completion_tokens`·`finish_reason` 이 여기서 버려지고 있었는데, 그 둘이
     "max_tokens 소진" 과 "서빙이 스스로 끊음" 을 가르는 유일한 신호다(V0 실측).
     `elapsed` 는 `meta.elapsed` 로 그대로 있다.
+
+    `guided_json`(기본 True — 기존 호출부 전부 무영향) — `False` 로 넘기면 `USE_GUIDED_JSON`
+    env 값과 무관하게 이 호출만 `OCR_JSON_SCHEMA` 강제를 끈다. ODL 이미지 요약(§C,
+    `odl_image_summary.py`)처럼 1~3문장 자유 텍스트가 필요한 호출용 — table/figure 카테고리
+    구조를 강제하면 그 응답을 못 받는다.
     """
     payload = _build_payload(base64_image, user_prompt, system_prompt,
-                             max_tokens=max_tokens)
+                             max_tokens=max_tokens, guided_json=guided_json)
     response_json, elapsed_time = await _request_vl_api(payload)
     return _extract_result(response_json), _call_meta(response_json, elapsed_time)
 
 
-def _apply_guided_json(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """설정(env)에 따라 guided_json 스키마를 payload에 주입한다."""
+def _apply_guided_json(payload: Dict[str, Any], *, guided_json: bool = True) -> Dict[str, Any]:
+    """설정(env)에 따라 guided_json 스키마를 payload에 주입한다.
+
+    `guided_json=False` 면 env(`USE_GUIDED_JSON`) 와 무관하게 항상 건너뛴다(per-call override).
+    """
+    if not guided_json:
+        return payload
     use_guided = os.environ.get("USE_GUIDED_JSON", "1").lower() not in ("0", "false", "")
     if not use_guided:
         return payload
@@ -185,7 +196,7 @@ def _apply_guided_json(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _build_payload(base64_image: str, user_prompt: str, system_prompt: str,
-                   *, max_tokens: int | None = None) -> Dict[str, Any]:
+                   *, max_tokens: int | None = None, guided_json: bool = True) -> Dict[str, Any]:
     """Vision-Language 모델 API 호출 페이로드를 구성합니다.
 
     `max_tokens` 우선순위: **인자 > `VL_MAX_TOKENS` env > 2000**.
@@ -241,7 +252,7 @@ def _build_payload(base64_image: str, user_prompt: str, system_prompt: str,
         _ignore = [x.strip() for x in _blocked.split(",") if x.strip()]
         if _ignore:
             payload["provider"] = {"ignore": _ignore}
-    return _apply_guided_json(payload)
+    return _apply_guided_json(payload, guided_json=guided_json)
 
 
 @dataclass(frozen=True)

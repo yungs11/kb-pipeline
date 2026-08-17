@@ -33,8 +33,81 @@ def _digital_text_len(md: str) -> int:
     return len(_WS_RE.sub("", stripped))
 
 
-def _page_markdowns(file_bytes: bytes, filename: str) -> list[str]:
+def _page_markdowns(file_bytes: bytes, filename: str) -> tuple[list[str], dict[str, bytes]]:
     return convert_pdf_to_page_markdowns(file_bytes, filename)
+
+
+def _resolve_odl_page_images(
+    file_bytes: bytes, md: str, page_number: int, odl_images: dict[str, bytes],
+) -> tuple[str, list[dict] | None]:
+    """§B.2/B.3 — ODL 마크다운의 이미지 참조를 면적 기준으로 지우거나 VL 요약으로 치환.
+
+    반환 `(md, blocks_override)`: 보통은 `blocks_override=None`(호출부가 `md` 를 그대로
+    `hybrid_to_blocks` 에 넘긴다). **이미지 개수가 `KBP_ODL_IMAGE_COUNT_VL_ESCALATE` 초과**면
+    개별 서술 대신 그 페이지 전체를 기존 `vl`(전면 VL 전사, PAGE_HYBRID) 경로로 넘기고
+    `blocks_override` 에 완성된 blocks 를 채운다 — 이때만 "네이티브 텍스트는 안 바꾼다"는
+    원칙이 예외적으로 완화된다(사용자 결정 — 이미지가 그 정도로 많은 페이지는 순수 본문
+    페이지가 아닐 가능성이 높다는 판단).
+    """
+    from parse_service.parsers.pdf.image_refs import find_image_refs, image_dest, strip_image_refs
+
+    refs = find_image_refs(md)
+    if not refs:
+        return md, None
+
+    try:
+        import pymupdf
+        doc = pymupdf.open(stream=file_bytes, filetype="pdf")
+        try:
+            if not (0 <= page_number - 1 < doc.page_count):
+                return strip_image_refs(md), None
+            page = doc[page_number - 1]
+            pm_images = page.get_image_info(hashes=False, xrefs=False)
+            page_area = (page.rect.width * page.rect.height) or 1.0
+        finally:
+            doc.close()
+    except Exception:  # noqa: BLE001 — PyMuPDF 재오픈 실패 시 안전하게 참조만 제거
+        log.exception("ODL 이미지 매칭용 PyMuPDF 재오픈 실패 (page %d)", page_number)
+        return strip_image_refs(md), None
+
+    # 런타임 가드(§B.2) — ODL 참조 개수와 PyMuPDF 이미지 개수가 다르면 위치매칭을 포기하고
+    # 전부 스트립한다(오매칭보다 안전 — leak 은 없고 정보손실만 발생).
+    if len(refs) != len(pm_images):
+        return strip_image_refs(md), None
+
+    count_escalate = int(os.environ.get("KBP_ODL_IMAGE_COUNT_VL_ESCALATE", "2") or "2")
+    if len(refs) > count_escalate:
+        try:
+            rendered = _render_pages(file_bytes, {page_number})
+            rp = next((r for r in rendered if r.page_number == page_number), None)
+            if rp is not None:
+                elements = _ocr_elements_for_page(rp.jpeg, f"page-{page_number}.jpeg")
+                blocks = vl_elements_to_blocks(
+                    elements, page_idx=page_number, adopt_vl_table=True,
+                    counters=collections.Counter())
+                if blocks:
+                    return md, blocks
+        except Exception:  # noqa: BLE001 — 전면 VL 실패 시 참조 스트립으로 폴백(leak 방지)
+            log.exception("ODL 이미지 개수초과 전면VL 전사 실패 (page %d)", page_number)
+        return strip_image_refs(md), None
+
+    min_area = float(os.environ.get("KBP_ODL_IMAGE_VL_MIN_AREA", "0.01") or "0.01")
+    for ref, pm_img in zip(refs, pm_images):
+        bbox = pm_img.get("bbox")
+        area = 0.0
+        if bbox:
+            area = abs(bbox[2] - bbox[0]) * abs(bbox[3] - bbox[1]) / page_area
+        ref_text = ref.group(0)
+        replacement = ""
+        if area >= min_area:
+            img_bytes = odl_images.get(image_dest(ref_text))
+            if img_bytes:
+                from parse_service.parsers.pdf.odl_image_summary import summarize_odl_image
+                desc = summarize_odl_image(img_bytes)
+                if desc:
+                    replacement = desc
+        md = md.replace(ref_text, replacement, 1)
+    return md, None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -53,7 +126,7 @@ def _label(b: dict) -> str:
     return (b.get("block_label") or "").strip().lower()
 
 
-def _contributes(b: dict, page_size, counters: dict) -> bool:
+def _contributes(b: dict, page_size, counters: dict, labels: frozenset | set = _VISUAL_LABELS) -> bool:
     """이 layout 블록이 "전면 VL 이 필요한 그림"으로 쳐지는가.
 
     면적 하한(``KBP_VL_VISUAL_MIN_AREA``, 기본 0.05)을 image/figure/chart **전부에** 적용한다.
@@ -64,8 +137,13 @@ def _contributes(b: dict, page_size, counters: dict) -> bool:
     **면적을 알 수 없으면 fail-closed(False)** 다. 발동은 paddle 본문이 VL 로 교체되는 회귀지만
     미발동은 현행 유지라 회귀가 아니다 — 불확실할 땐 현행을 택한다. 게이트웨이가 width/height 를
     주지 않을 때 fail-open 이면 전 페이지가 무조건 전면 VL 이 된다.
+
+    ``labels`` — 기본은 `_VISUAL_LABELS`(전면 VL 교체 소비). gw2(§A.2, paddle_gw.py)는
+    `_IMAGE_TRIGGER_LABELS`(header_image/footer_image 포함, chart 포함)를 넘겨 재사용한다 —
+    `_VISUAL_LABELS` 자체는 건드리지 않는다(header/footer 이미지가 대형일 때 기존 전면VL교체
+    동작이 바뀌는 회귀 방지).
     """
-    if _label(b) not in _VISUAL_LABELS:
+    if _label(b) not in labels:
         return False
     bb = b.get("block_bbox")
     if not page_size or not all(page_size) or not (
@@ -561,6 +639,7 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
 
     # ── seeding (전부 분기 밖) ────────────────────────────────────────────────
     odl_md: list[str] = []
+    odl_images: dict[str, bytes] = {}   # §B.1 — ODL이 추출한 이미지 바이트({상대경로: bytes})
     gw_by_pno: dict[int, dict] = {}
     demoted_pnos: set[int] = set()
     # `_hybrid_scan_pages` 가 전면 VL 로 갈아끼운 페이지 — 게이트 대상에서 뺀다(§4b).
@@ -573,6 +652,14 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
 
     def _att(pno: int, stage: str, outcome: str, meta: dict | None = None) -> None:
         attempts.setdefault(pno, []).append((stage, outcome, meta or {}))
+
+    # 2026-08-18 사용자 지시 — "왜 그 파싱레인(bucket)으로 갔는지 로그에 없다": triage
+    # 판정(bucket/사유/이미지개수·커버리지)을 attempts 맨 앞에 항상 남긴다. 새 컬럼/스키마
+    # 없이 기존 `attempts`(자유형 리스트) 계약 안에서 채운다 — knowledge_base 쪽 무변경.
+    for _sig in decision.page_signals or ():
+        _att(_sig.page_number, "triage", _sig.bucket.name if _sig.bucket else "unknown",
+             {"reason": _sig.reason, "image_count": _sig.image_count,
+              "image_coverage": round(_sig.image_coverage, 4), "is_diagram": _sig.is_diagram})
     # ⚠️ **plain dict 다 — defaultdict 가 아니다.** 새 키를 `+= 1` 하려면 반드시 여기
     #    리터럴에 먼저 넣어야 한다(없으면 KeyError → 문서 전체 500).
     #    같은 리터럴 사본이 `tests/test_parser_pdf_hybrid.py` 에도 하드코딩돼 있다.
@@ -587,7 +674,7 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
     # 항상 "" 이고 병합의 md 폴백이 **구조적으로 도달 불가**가 된다.
     if odl_pnos or skip_pnos or vl_pnos or total_pages == 0:
         try:
-            odl_md = _page_markdowns(file_bytes, filename)
+            odl_md, odl_images = _page_markdowns(file_bytes, filename)
         except Exception as exc:  # noqa: BLE001
             # **문서 실패가 아니라 VL 폴백**(사용자 확정 2026-08-04). odl_md 가 비면 odl 레인
             # 페이지는 전부 thin 판정 → 아래 VL 전사 배치가 내용을 살린다.
@@ -679,6 +766,8 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
             else:
                 _att(_n, "gw", _pg.get("status") or "ok",
                      {"error": _pg.get("error"), "blocks": len(_pg.get("blocks") or ())})
+                if _pg.get("gw2_meta"):
+                    _att(_n, "gw2", _pg["gw2_meta"].get("outcome"), _pg["gw2_meta"])
 
     # ── 4) VL 전사 대상 = thin odl ∪ 강등 paddle. 300dpi 1회 렌더 + 배치 호출 ──
     def _md(pno: int) -> str:
@@ -904,7 +993,9 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
                     # ⚠️ leader-dot 을 **여기서도** 접는다. 안 하면 목차 페이지를 md 로
                     #    채운 뒤 degen 5-gram 지배 규칙이 통째로 지워 문서가 다시 죽는다
                     #    (실측 전례 있는 조합 — 2a 에서 native 경로만 처리했었다).
-                    blocks = hybrid_to_blocks(_strip_leader_dots(md), page_idx=pno)
+                    _resolved_md, _blocks_override = _resolve_odl_page_images(
+                        file_bytes, _strip_leader_dots(md), pno, odl_images)
+                    blocks = _blocks_override or hybrid_to_blocks(_resolved_md, page_idx=pno)
                     src = "vl_md_fallback"
                     counters["fallback_md"] += 1
                 else:                                          # ← rp.text
@@ -920,7 +1011,9 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
                     log.warning("VL 폴백 — page %d, %s (%s)", pno, src, filename)
 
         elif _digital_text_len(md) >= _DIGITAL_MIN_CHARS:
-            blocks = hybrid_to_blocks(md, page_idx=pno)
+            _resolved_md, _blocks_override = _resolve_odl_page_images(
+                file_bytes, md, pno, odl_images)
+            blocks = _blocks_override or hybrid_to_blocks(_resolved_md, page_idx=pno)
             src = "odl_md"
 
         elif lane == "skip":
@@ -1095,7 +1188,7 @@ def _odl_lane(file_bytes: bytes, filename: str, *, ocr_url: str,
               diagram_pages: tuple = ()) -> RouteResult:
     from kb_pipeline.blockify import hybrid_to_blocks, elements_to_blocks
     try:
-        md_texts = _page_markdowns(file_bytes, filename)
+        md_texts, odl_images = _page_markdowns(file_bytes, filename)
     except ToolError as e:
         raise ParserError(str(e)) from e
 
@@ -1104,8 +1197,9 @@ def _odl_lane(file_bytes: bytes, filename: str, *, ocr_url: str,
     for i, md in enumerate(md_texts):
         page_number = i + 1
         if _digital_text_len(md) >= _DIGITAL_MIN_CHARS:
+            md, blocks_override = _resolve_odl_page_images(file_bytes, md, page_number, odl_images)
             pages.append({"page_number": page_number,
-                          "blocks": hybrid_to_blocks(md, page_idx=page_number)})
+                          "blocks": blocks_override or hybrid_to_blocks(md, page_idx=page_number)})
             continue
         if rendered is None:
             rendered = _render_pages(file_bytes)

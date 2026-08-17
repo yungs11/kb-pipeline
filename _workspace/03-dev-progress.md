@@ -1588,3 +1588,34 @@ verdict)를 orchestrator(`99.projects/shinhan_trust/knowledge_base`) 문서 상�
 항목 참조. `knowledge_base` 레포 `find_by_logical_identity`에 `exclude_document_id`
 추가 + `ingest_document` 배선. 신규 재업로드부터 적용(기존 중복은 비범위, 별건).
 plan: `~/.claude/plans/d57-reupload-dedup-fix.md`(v2 READY).
+
+## 이미지 경로 누출 방지 — gw2 block_content 스플라이싱 + 이미지 도메인 page_traces (2026-08-18)
+
+plan: `~/.claude/plans/concurrent-soaring-mango.md`(v8 READY). §A(paddle_gw gw2)·
+D(admin 화면)는 v8에서 이미 구현·검증됐고, 이번은 v8 라운드에서는 안 보였던 **후속
+구멍 2건**을 사용자 실사용(프리뷰 화면) 중 발견해 같은 plan 범위 안에서 추가 구현.
+
+**gw2 block_content 폐기 발견·수정**: gw2(`use_ocr_for_image_block=True`) 응답의
+top-level `text`는 opts 와 무관하게 동일하고(2026-08-17 실측: 323자 양쪽 동일), 실제
+VL 서술은 `layout[].blocks[].block_content`에만 실려 왔는데 `one()`이 이 필드를
+**한 번도 안 읽어** gw2를 켜도 서술이 최종 `enriched_content`에 반영되지 않는
+구조적 공백이 있었다. 사용자 결정(인라인/원위치 대체) 반영해
+`paddle_gw._splice_gw2_block_content()`(신규) + `image_refs.replace_image_refs()`
+(신규, `find_image_refs` 순서 기반 1:1 치환)로 gw2 성공 시 원래 이미지참조 자리에
+서술을 그대로 꽂는다. image-trigger 라벨 블록 개수와 md 안 참조 개수가 안 맞으면
+(표 흡수 등) 위치매칭을 포기하고 기존 안전망 스트립으로 폴백 — leak 은 어떤
+경우에도 안 남는다. 신규 유닛테스트 2건(`test_paddle_gw.py` — 정상 스플라이싱,
+개수불일치 폴백) green.
+
+**이미지/pptx 도메인(`ocr`) page_traces 신설**: `router.py:domain_of()`가 jpg/png/
+webp 등 `IMAGE_EXTS` 전체와 pptx 를 예외 없이 `ocr` 도메인 하나로 매핑하고
+paddle_gw 는 이 도메인에 연결돼 있지 않다(PDF 전용) — "어떤 lane 을 탔는지"를 볼
+분기 자체가 없었다. `parsers/ocr/__init__.py:parse()`가 이제 PDF 쪽 page_trace
+딕셔너리 계약과 키를 맞춘 단일 사실(`lane="vl_ocr_direct"`) 레코드를
+`_page_traces_for_ocr()`로 만들어 `RouteResult.page_traces`에 채운다 — 이전엔
+`None`이라 knowledge_base 의 `parse_preview_task`가 `if page_traces:` 에서 통째로
+no-op, 프리뷰로 올린 이미지 파일이 admin 파서 로그 화면(`document_pages` EXISTS
+필터)에 전혀 안 떴다(사용자 실측 보고: `i18_*.jpg`). 신규 유닛테스트 1건
+(`test_parser_ocr.py`) green.
+
+**검증**: kb-pipeline `parse_service/tests/` 전체 464 passed·2 skipped(신규 실패 0).

@@ -6,7 +6,7 @@ from parse_service.parsers import pdf as pdf_parser
 
 def test_digital_pdf_pages(monkeypatch):
     monkeypatch.setattr(pdf_parser, "_page_markdowns",
-                        lambda fb, fn: ["# p1 text", "# p2 text"])
+                        lambda fb, fn: (["# p1 text", "# p2 text"], {}))
     res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
     assert isinstance(res, RouteResult)
     assert res.kind == "pages" and res.chunk_needed is True
@@ -16,7 +16,7 @@ def test_digital_pdf_pages(monkeypatch):
 
 def test_scanned_page_gets_ocr(monkeypatch):
     # p2 가 빈 md → 렌더+OCR 보충 경로. 렌더/OCR 를 fake 로.
-    monkeypatch.setattr(pdf_parser, "_page_markdowns", lambda fb, fn: ["# p1", "   "])
+    monkeypatch.setattr(pdf_parser, "_page_markdowns", lambda fb, fn: (["# p1", "   "], {}))
     class FakeRP:  # render_pdf_pages 반환 원소 흉내
         page_number, jpeg = 2, b"jpegbytes"
     monkeypatch.setattr(pdf_parser, "_render_pages", lambda fb, page_numbers=None, **k: [FakeRP()])
@@ -48,7 +48,7 @@ def test_scanned_page_with_imagerefs_and_empty_tables_gets_ocr(monkeypatch):
         "<table>\n  <tr><th> </th><th> </th></tr>\n  <tr><td> </td><td> </td></tr>\n</table>"
     )
     monkeypatch.setattr(pdf_parser, "_page_markdowns",
-                        lambda fb, fn: ["# p1 실제 텍스트", scanned_md])
+                        lambda fb, fn: (["# p1 실제 텍스트", scanned_md], {}))
 
     class FakeRP:
         page_number, jpeg = 2, b"jpegbytes"

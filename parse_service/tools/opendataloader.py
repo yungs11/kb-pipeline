@@ -47,7 +47,36 @@ def _odl_convert(*, input_path: str, output_dir: str) -> None:
         raise ToolError(f"opendataloader 실행 실패: {type(e).__name__}: {e}") from e
 
 
-def convert_pdf_to_page_markdowns(file_bytes: bytes, filename: str) -> list[str]:
+def _collect_extracted_images(tmp: str) -> dict[str, bytes]:
+    """§B.1 — ODL 이 크롭해 `tmp`(추출 산출물 폴더, `.md` 와 같은 곳)에 써낸 이미지 파일들을
+    tmp 삭제 전에 바이트로 확보한다. 마크다운의 `<파일명>_images/imageFileN.png` 참조와
+    매칭시키기 위해 **tmp 기준 상대경로**(posix 슬래시)를 키로 쓴다.
+
+    실패는 이 함수 안에서 흡수(빈 dict 반환) — ODL 텍스트 추출(`convert_pdf_to_page_markdowns`
+    의 본 목적) 은 이미지 확보 실패와 무관하게 항상 성공해야 한다("네이티브 텍스트 레인은
+    안 바꾼다"는 하드 제약, CLAUDE.md 워크플로 참고).
+    """
+    try:
+        images: dict[str, bytes] = {}
+        for path in glob.glob(os.path.join(tmp, "**", "*_images", "*"), recursive=True):
+            if not os.path.isfile(path):
+                continue
+            rel = os.path.relpath(path, tmp).replace(os.sep, "/")
+            with open(path, "rb") as fh:
+                images[rel] = fh.read()
+        return images
+    except Exception:  # noqa: BLE001 — 이미지 확보는 비치명, 텍스트 레인 무영향
+        return {}
+
+
+def convert_pdf_to_page_markdowns(
+    file_bytes: bytes, filename: str,
+) -> tuple[list[str], dict[str, bytes]]:
+    """PDF → (페이지별 markdown 리스트, ODL이 추출한 이미지 파일 {상대경로: bytes}).
+
+    두 번째 원소는 §B.2(ODL 이미지 면적필터+VL요약)가 소비한다 — 호출부가 이미지를
+    안 쓰면(구 시그니처 기대) 튜플 언패킹이 필요하다: `md_texts, _images = convert_...(...)`.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         src = os.path.join(tmp, _safe_basename(filename))
         if os.path.commonpath([os.path.realpath(tmp), os.path.realpath(src)]) != os.path.realpath(tmp):
@@ -64,4 +93,5 @@ def convert_pdf_to_page_markdowns(file_bytes: bytes, filename: str) -> list[str]
         md_texts = full.split(PAGE_SEP)
         if len(md_texts) > 1 and not md_texts[0].strip():
             md_texts = md_texts[1:]
-        return md_texts
+        images = _collect_extracted_images(tmp)   # tmp 삭제(with 블록 종료) 전에 확보
+        return md_texts, images

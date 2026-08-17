@@ -11,8 +11,9 @@ def test_split_pages_by_sentinel(monkeypatch):
         with open(os.path.join(output_dir, "out.md"), "w", encoding="utf-8") as f:
             f.write(f"{odl.PAGE_SEP}page-1{odl.PAGE_SEP}page-2{odl.PAGE_SEP}page-3")
     monkeypatch.setattr(odl, "_odl_convert", fake_convert)
-    pages = odl.convert_pdf_to_page_markdowns(b"%PDF-fake", "a.pdf")
+    pages, images = odl.convert_pdf_to_page_markdowns(b"%PDF-fake", "a.pdf")
     assert pages == ["page-1", "page-2", "page-3"]
+    assert images == {}   # 이 픽스처는 `*_images/` 폴더를 안 만든다
 
 
 def test_no_md_raises_toolerror(monkeypatch):

@@ -13,14 +13,24 @@ parse() 의 빈결과 검사가 ODL/in-process VL 폴백으로 잡는다(사용�
 """
 from __future__ import annotations
 
+import collections
 import concurrent.futures
+import json
 import logging
 import os
 import re
 
 import httpx
 
+from parse_service.parsers.pdf.image_refs import find_image_refs, replace_image_refs, strip_image_refs
+
 log = logging.getLogger("kb_pipeline.parse_service.parsers.pdf.paddle_gw")
+
+# gw2(§A.2) 트리거 라벨 — image/figure/chart(사용자 결정, v7)/header_image/footer_image.
+# `_VISUAL_LABELS`(__init__.py, 전면VL교체 소비)와는 **별개 상수**다 — header_image/
+# footer_image 를 거기 추가하면 대형 헤더/푸터 이미지가 있는 기존 문서의 전면VL교체 동작이
+# 바뀌는 회귀가 생긴다. chart 는 `_VISUAL_LABELS` 에도 있어 이 상위집합 관계는 안전하다.
+_IMAGE_TRIGGER_LABELS = frozenset({"image", "figure", "chart", "header_image", "footer_image"})
 
 # 페이지당 총 시한 600s(사용자 결정 — 복잡한 페이지/일시 부하 여유). 행(hang) 게이트웨이
 # 조기 포기는 타임아웃이 아니라 **첫 페이지 프로브**가 담당(실패 시 즉시 폴백).
@@ -31,21 +41,50 @@ _POLL_INTERVAL = float(os.environ.get("KBP_PADDLE_GW_POLL_INTERVAL", "5"))
 _HTTP_TIMEOUT = float(os.environ.get("KBP_PADDLE_GW_HTTP_TIMEOUT", "60"))
 
 
-# 게이트웨이(paddleocr_vl)가 표/그림에 넣는 상대경로 이미지 참조. 실제 파일은 게이트웨이
-# 서버에만 있어 우리 MinIO/UI 엔 없음 → UI 404(2026-07-16 실관측 img_in_image_box_*.jpg).
-# 페이지 이미지는 parse-svc 가 따로 렌더·MinIO 업로드하므로 이 참조는 불필요·유해 → 제거.
-_IMG_TAG_RE = re.compile(r'<img\b[^>]*\bsrc=["\']imgs/[^"\']*["\'][^>]*/?>', re.I)
-_MD_IMG_RE = re.compile(r'!\[[^\]]*\]\(imgs/[^)]*\)')
-_BARE_IMG_RE = re.compile(r'^[ \t]*imgs/[^\s]+\.(?:jpg|jpeg|png|webp|bmp|tiff?)[ \t]*$',
+# 게이트웨이(paddleocr_vl)가 표/그림에 넣는 상대경로 이미지 참조 — 실제 파일은 게이트웨이
+# 서버에만 있어 우리 MinIO/UI 엔 없음(2026-07-16 실관측 img_in_image_box_*.jpg 404). 페이지
+# 이미지는 parse-svc 가 따로 렌더·MinIO 업로드하므로 이 참조는 불필요·유해 → 제거.
+# **v1~v5 결함 정정**: 실제 재현 사례가 `imgs/` 고정 접두어가 아니라
+# `<파일명>_images/imageFileN.png`(gw 자체 산출물, 2026-08-16 잡 e7646e6d 실측)였다 —
+# 접두어 고정 정규식은 이걸 못 잡는다. `image_refs.strip_image_refs`(임의 상대경로 + `<...>`
+# 꺾쇠괄호 destination 처리, ODL §B.3 과 공유)로 일반화한다.
+_BARE_IMG_RE = re.compile(r'^[ \t]*[^\s<>()]+\.(?:jpg|jpeg|png|webp|bmp|tiff?)[ \t]*$',
                           re.I | re.M)
 
 
-def _strip_gateway_image_refs(md: str) -> str:
-    """게이트웨이 상대경로 이미지 참조(imgs/...) 제거 — <img>·마크다운·맨몸 경로. 내용 보존."""
-    if not md or "imgs/" not in md:
+def _splice_gw2_block_content(md: str, layout: list[dict]) -> str:
+    """gw2(§A.2) 성공 시 `block_content`(이미지 블록 VL 서술)를 원래 이미지참조 자리에
+    인라인 치환한다(2026-08-18 사용자 결정 — "원위치 대체").
+
+    gw2 이전엔 top-level `text`가 image/figure 류 블록을 크롭 경로 참조로만 냈고,
+    `use_ocr_for_image_block=True`로 얻은 VL 서술은 `layout[].blocks[].block_content`에만
+    실려 온다(`text`는 opts와 무관하게 동일 — 2026-08-17 실측). `_parse_layout`이 layout
+    블록 dict를 그대로 보존하므로(§ 위 docstring) `block_content`는 이미 살아있다 —
+    여기서 그걸 md 안 참조 위치에 꽂아 넣는다.
+
+    `_IMAGE_TRIGGER_LABELS` 블록 개수와 md 안 이미지참조 개수가 안 맞으면(예: 표에
+    흡수된 이미지처럼 참조 자체가 없는 경우) 위치 매칭을 포기하고 md를 그대로 반환한다 —
+    이어지는 `_strip_gateway_image_refs`가 안전하게 참조만 지운다(leak 없음, 서술 손실만).
+    """
+    refs = find_image_refs(md)
+    if not refs:
         return md
-    md = _IMG_TAG_RE.sub("", md)
-    md = _MD_IMG_RE.sub("", md)
+    blocks = [b for b in layout
+              if (b.get("block_label") or "").strip().lower() in _IMAGE_TRIGGER_LABELS]
+    if len(blocks) != len(refs):
+        return md
+    contents = [(b.get("block_content") or "").strip() for b in blocks]
+    try:
+        return replace_image_refs(md, contents)
+    except ValueError:
+        return md
+
+
+def _strip_gateway_image_refs(md: str) -> str:
+    """게이트웨이 상대경로 이미지 참조 제거 — <img>·마크다운(꺾쇠괄호 포함)·맨몸 경로. 내용 보존."""
+    if not md:
+        return md
+    md = strip_image_refs(md)
     md = _BARE_IMG_RE.sub("", md)
     return md
 
@@ -100,22 +139,23 @@ def _parse_layout(body: dict) -> tuple[list[dict], tuple[int, int] | None]:
     return [], page_size
 
 
-def _post_page(jpeg: bytes, name: str) -> tuple[str, list[dict], tuple[int, int] | None]:
+def _post_page(jpeg: bytes, name: str, opts: dict | None = None) -> tuple[str, list[dict], tuple[int, int] | None]:
     """게이트웨이 페이지 호출(1회 재시도 래퍼) — raw JSON 형식 오류 시 한 번 더.
 
     반환 tuple 의 **markdown 요소로만** raw-JSON 판정한다. 재시도 성공 시 layout·page_size 도
-    재시도 응답 것으로 함께 교체된다.
+    재시도 응답 것으로 함께 교체된다. ``opts`` — gw2(§A.2) 전용, 예:
+    ``{"use_ocr_for_image_block": True, "use_chart_recognition": True}``.
     """
-    md, layout, page_size = _post_page_once(jpeg, name)
+    md, layout, page_size = _post_page_once(jpeg, name, opts)
     if _looks_like_raw_layout_json(md):
         log.warning("gateway returned raw layout JSON for %s — retrying once", name)
-        md, layout, page_size = _post_page_once(jpeg, name)
+        md, layout, page_size = _post_page_once(jpeg, name, opts)
         if _looks_like_raw_layout_json(md):
             raise RuntimeError(f"gateway raw-JSON output persisted for {name}")
     return md, layout, page_size
 
 
-def _post_page_once(jpeg: bytes, name: str) -> tuple[str, list[dict], tuple[int, int] | None]:
+def _post_page_once(jpeg: bytes, name: str, opts: dict | None = None) -> tuple[str, list[dict], tuple[int, int] | None]:
     """게이트웨이에 페이지 이미지 1장 → (markdown, layout blocks, page_size). **비동기(tasks) 방식**.
 
     submit(POST {url}/tasks → task_id) → poll(GET /tasks/{id}, 즉시응답) → result(GET .../result).
@@ -127,10 +167,13 @@ def _post_page_once(jpeg: bytes, name: str) -> tuple[str, list[dict], tuple[int,
     lang = os.environ.get("KBP_PADDLE_GW_LANG", "korean")
 
     # 1) submit — 즉시 task_id
+    data = {"lang": lang}
+    if opts:
+        data["opts"] = json.dumps(opts)
     resp = httpx.post(
         f"{base}/tasks",
         files={"file": (name, jpeg, "image/jpeg")},
-        data={"lang": lang},
+        data=data,
         timeout=_HTTP_TIMEOUT,
     )
     resp.raise_for_status()
@@ -184,8 +227,36 @@ def run_paddle_gateway(pdf_bytes: bytes, filename: str,
         return []
     max_workers = max(1, int(os.environ.get("KBP_VL_MAX_CONCURRENT", "8")))
 
-    def one(rp, probe: bool = False) -> tuple[int, list, list, tuple | None, str, str]:
-        """(page_number, blocks, layout, page_size, status, error) — **6-key 계약**.
+    gw2_enabled = os.environ.get("KBP_GW_IMAGE_OCR_ENABLE", "1") != "0"
+
+    def _needs_gw2(layout: list, page_size) -> tuple[bool, str]:
+        """§A.2/A.3 — (트리거여부, 사유) — 사유는 항상 채워서 gw2_meta 로그에 남긴다
+        (2026-08-18 사용자 지시 — "왜 gw2가 안 불렸는지 로그에 없다").
+
+        실측(같은 문서, 이미지가 표 셀 안에 40~60개 있던 사고 케이스): 게이트웨이
+        layout 이 그 사진들을 개별 image/figure 블록으로 안 내고 **table 블록 하나에
+        통째로 흡수**한다 — `_IMAGE_TRIGGER_LABELS` 라벨 매칭이 구조적으로 못 잡는 경우가
+        실재한다. 그래서 라벨 유무와 무관하게 **사유를 항상 남겨서** 이런 사각지대가
+        조용히 지나가지 않게 한다(트리거 로직 자체는 유지 — 사유 노출이 이번 변경).
+
+        대형 이미지류 블록(면적≥`KBP_VL_VISUAL_MIN_AREA`)이 있으면 기존
+        `_hybrid_scan_pages` 전면VL교체가 처리하므로 gw2 는 스킵. 그런 대형 블록은 없지만
+        `_IMAGE_TRIGGER_LABELS` 블록이 하나라도 있으면 gw2 트리거.
+        """
+        if not layout:
+            return False, "no_layout"
+        from parse_service.parsers.pdf import _contributes  # lazy — 순환 회피 겸 명시적
+        counters: dict = collections.Counter()
+        if any(_contributes(b, page_size, counters, labels=_IMAGE_TRIGGER_LABELS) for b in layout):
+            return False, "skipped_large_block_delegated_to_hybrid_vl"
+        if any((b.get("block_label") or "").strip().lower() in _IMAGE_TRIGGER_LABELS
+               for b in layout):
+            return True, "triggered"
+        return False, "skipped_no_image_labeled_blocks_in_layout"
+
+    def one(rp, probe: bool = False) -> tuple[int, list, list, tuple | None, str, str, dict | None]:
+        """(page_number, blocks, layout, page_size, status, error, gw2_meta) — **7-key 계약**
+        (v7 — gw2_meta 추가, 이전 6-key: page_number/blocks/layout/page_size/status/error).
 
         두 브랜치가 서로 다른 4-tuple 을 냈다(2026-08-12 재통합에서 합쳤다):
         HEAD `(n, blocks, status, error)` / scan-lane `(n, blocks, layout, page_size)`.
@@ -210,19 +281,45 @@ def run_paddle_gateway(pdf_bytes: bytes, filename: str,
                 raise  # 첫 페이지 실패 = 게이트웨이 불능 → 레인 포기(즉시 폴백)
             log.exception("paddle_gw page %d failed (%s)", rp.page_number, filename)
             return (rp.page_number, [], [], None,
-                    "error", f"{type(exc).__name__}: {str(exc)[:200]}")
-        md = _strip_gateway_image_refs(md)   # imgs/ 죽은 참조 제거(UI 404 방지)
+                    "error", f"{type(exc).__name__}: {str(exc)[:200]}", None)
+
+        # gw2_meta 는 **항상** 채운다(2026-08-18 사용자 지시) — 트리거 안 됐어도 왜
+        # 안 됐는지가 로그(page_traces.attempts)에 남아야 한다. 이전엔 트리거 안 되면
+        # `None`이라 아무 흔적도 안 남았다.
+        needs_gw2, gw2_reason = _needs_gw2(layout, page_size)
+        if not gw2_enabled:
+            gw2_meta = {"outcome": "skipped", "reason": "disabled_by_env"}
+        elif not needs_gw2:
+            gw2_meta = {"outcome": "skipped", "reason": gw2_reason}
+        else:
+            # §A.3 — 2차 호출은 자체 try/except로 격리한다. 실패해도 1차 결과(md/layout/
+            # page_size/status)는 그대로 유지 — 불필요한 전면 VL 재변환(demoted_pnos)을
+            # 유발하지 않는다.
+            try:
+                md2, layout2, page_size2 = _post_page(
+                    rp.jpeg, name,
+                    opts={"use_ocr_for_image_block": True, "use_chart_recognition": True})
+                md, layout, page_size = md2, layout2, page_size2
+                gw2_meta = {"outcome": "ok"}
+            except Exception as exc:  # noqa: BLE001
+                log.warning("paddle_gw gw2 page %d failed (%s): %s",
+                            rp.page_number, filename, exc)
+                gw2_meta = {"outcome": "error", "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+
+        if gw2_meta.get("outcome") == "ok":
+            md = _splice_gw2_block_content(md, layout)
+        md = _strip_gateway_image_refs(md)   # 미해석 이미지 참조 제거(gw2 실패/비활성/미매칭 시 폴백망)
         blocks = hybrid_to_blocks(md, page_idx=rp.page_number)
-        return rp.page_number, blocks, layout, page_size, "ok", ""
+        return rp.page_number, blocks, layout, page_size, "ok", "", gw2_meta
 
     results = [one(rendered[0], probe=True)]   # 프로브 — 실패 시 여기서 raise
     if len(rendered) > 1:
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
             results += list(ex.map(one, rendered[1:]))
 
-    # layout/page_size/status/error 는 **순수 추가** — 기존 두 키(page_number, blocks)는 그대로다.
-    # 모르는 소비자는 무시한다(blocks 계약 불변).
+    # layout/page_size/status/error/gw2_meta 는 **순수 추가** — 기존 두 키(page_number,
+    # blocks)는 그대로다. 모르는 소비자는 무시한다(blocks 계약 불변).
     return [{"page_number": n, "blocks": blocks, "layout": layout, "page_size": page_size,
-             "status": status, "error": err}
-            for n, blocks, layout, page_size, status, err
+             "status": status, "error": err, "gw2_meta": gw2_meta}
+            for n, blocks, layout, page_size, status, err, gw2_meta
             in sorted(results, key=lambda t: t[0])]

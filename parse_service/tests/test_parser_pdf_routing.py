@@ -63,7 +63,7 @@ def wire(monkeypatch):
 
     def set_md(md_list):
         rec["md"] = md_list
-        monkeypatch.setattr(pdf_parser, "_page_markdowns", lambda fb, fn: list(md_list))
+        monkeypatch.setattr(pdf_parser, "_page_markdowns", lambda fb, fn: (list(md_list), {}))
 
     # 기본 동작: 아무것도 못 냄(빈 목록). `set_gw` 가 이걸 갈아끼운다.
     rec["_gw_impl"] = lambda page_numbers: []
@@ -134,7 +134,7 @@ def test_pure_scan_document_skips_odl(wire, monkeypatch):
     """paddle 레인만 있는 문서는 ODL(JRE)을 부르지 않는다."""
     called = []
     monkeypatch.setattr(pdf_parser, "_page_markdowns",
-                        lambda fb, fn: called.append(1) or [])
+                        lambda fb, fn: called.append(1) or ([], {}))
     wire["set_gate"](_decision({1: "paddle_gw", 2: "paddle_gw"}))
     wire["set_gw"]([{"page_number": n, "blocks": [{"type": "text", "text": f"스캔 p{n}"}],
                      "layout": [], "page_size": None} for n in (1, 2)])
@@ -221,7 +221,7 @@ def test_thin_odl_page_gets_vl(wire):
 def test_gate_none_falls_back_to_odl_lane(monkeypatch):
     """게이트 예외(pymupdf 부재 등) → 문서 전체 ODL. 새 500 을 만들지 않는다."""
     monkeypatch.setattr(pdf_parser, "_safe_decide_route", lambda fb: None)
-    monkeypatch.setattr(pdf_parser, "_page_markdowns", lambda fb, fn: ["# p1"])
+    monkeypatch.setattr(pdf_parser, "_page_markdowns", lambda fb, fn: (["# p1"], {}))
     res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
     assert res.kind == "pages" and res.pages
 
@@ -270,7 +270,7 @@ def test_diagram_supplement_uses_diagram_prompt(wire, monkeypatch):
     monkeypatch.undo()
     monkeypatch.setattr(pdf_parser, "_safe_decide_route",
                         lambda fb: _decision({1: "odl"}, narrate=(1,)))
-    monkeypatch.setattr(pdf_parser, "_page_markdowns", lambda fb, fn: ["# 순서도"])
+    monkeypatch.setattr(pdf_parser, "_page_markdowns", lambda fb, fn: (["# 순서도"], {}))
     monkeypatch.setattr(pdf_parser, "_render_pages",
                         lambda fb, page_numbers=None, **k: [_RP(1)])
     monkeypatch.setattr(ocr_mod, "ocr_elements_many_sync", fake_many)
@@ -619,7 +619,7 @@ def test_triage_log_table_appears_with_page_signals(monkeypatch, caplog):
     sigs = (_psig(1, Bucket.TEXT_ONLY), _psig(2, Bucket.TEXT_ONLY))
     monkeypatch.setattr(pdf_parser, "_safe_decide_route",
                         lambda b: RouteDecision(lane="odl", page_signals=sigs))
-    monkeypatch.setattr(pdf_parser, "_page_markdowns", lambda fb, fn: ["# p1", "# p2"])
+    monkeypatch.setattr(pdf_parser, "_page_markdowns", lambda fb, fn: (["# p1", "# p2"], {}))
     with caplog.at_level(logging.INFO, logger=pdf_parser.log.name):
         pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
     msgs = [r.message for r in caplog.records]
@@ -634,7 +634,7 @@ def test_triage_log_table_toggle_off(monkeypatch, caplog):
     sigs = (_psig(1, Bucket.TEXT_ONLY),)
     monkeypatch.setattr(pdf_parser, "_safe_decide_route",
                         lambda b: RouteDecision(lane="odl", page_signals=sigs))
-    monkeypatch.setattr(pdf_parser, "_page_markdowns", lambda fb, fn: ["# p1"])
+    monkeypatch.setattr(pdf_parser, "_page_markdowns", lambda fb, fn: (["# p1"], {}))
     with caplog.at_level(logging.INFO, logger=pdf_parser.log.name):
         pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
     assert not any("판정근거" in r.message for r in caplog.records)
@@ -643,7 +643,7 @@ def test_triage_log_table_toggle_off(monkeypatch, caplog):
 def test_triage_log_handles_decision_none(monkeypatch, caplog):
     """decision=None(게이트 import 실패/decide_route 예외) — AttributeError 없이 짧은
     안내 로그만 남기고 정상 반환한다(§C 가드 앵커)."""
-    monkeypatch.setattr(pdf_parser, "_page_markdowns", lambda fb, fn: ["# 텍스트"])
+    monkeypatch.setattr(pdf_parser, "_page_markdowns", lambda fb, fn: (["# 텍스트"], {}))
     import parse_service.parsers.pdf.gate as gate
     monkeypatch.setattr(gate, "decide_route",
                         lambda b: (_ for _ in ()).throw(RuntimeError("boom")))

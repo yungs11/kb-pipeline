@@ -1467,3 +1467,19 @@ placeholder `stage="gate"`(파일 읽기 중, 곧 `parse`로 바뀜)가 이 집�
 tsc/lint/build clean. `run-kb-backend.sh`로 재기동, 프론트(:18080) `.next` 캐시 손상
 (별건 — `npm run build` 검증이 dev 서버와 캐시를 공유해 깨진 것, `rm -rf .next` 후
 재기동으로 해소) 확인 후 정상.
+
+## paddle_gw gw2 — block_content 폐기 버그 + 이미지 도메인 page_traces 부재 (2026-08-18)
+
+plan: `~/.claude/plans/concurrent-soaring-mango.md`(v8 READY, §A/§D 후속 보강). 상세는
+`03-dev-progress.md` "이미지 경로 누출 방지 — gw2 block_content 스플라이싱 + 이미지
+도메인 page_traces" 참조. 요지만 정정 기록:
+
+- gw2(`use_ocr_for_image_block=True`) 는 top-level `text`엔 opts 와 무관하게 서술을
+  안 실어준다 — **`block_content`에만** 실려 온다. `_parse_layout()`은 이미 그 필드를
+  보존하고 있었는데(1차 blocks 경로는 dict 전체를 그대로 통과) 그걸 최종 md 에
+  꽂아 넣는 코드가 아예 없어서 gw2 가 "켜져도 아무 효과가 없는" 상태였다 — 스플라이싱
+  함수 신설로 수정(인라인/원위치 대체, 사용자 결정).
+- 단일 이미지 파일(jpg/png/webp 등)·pptx 는 `ocr` 도메인 하나로만 라우팅되고
+  paddle_gw 자체가 안 붙어 있어 "레인 선택" 을 로그로 남길 분기가 원래 없었다 —
+  이미지 파일 업로드가 admin 파서 로그 화면에 전혀 안 뜨는 원인이었다. 단일
+  사실(`lane="vl_ocr_direct"`) 레코드로 PDF 와 같은 계약을 맞춰 해소.
