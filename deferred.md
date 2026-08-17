@@ -253,5 +253,33 @@
      취급(`is_domain_failure` 확장, `runner.py:38-47` 참고 — html 빈 콘텐츠 사례와
      같은 클래스의 가드).
   즉시 조치: 해당 문서(`7854d9c0-5769-4b7a-b117-fc45d2eda5ab`)의 `page_count` 는
-  틀린 채로 방치(라이브 DB 직접 수정 안 함, 사용자 지시 없음) — 표시용 부가 필드라
-  검색/청킹 정확도에는 영향 없음(`document_pages`/`chunks_meta` 는 이미 정상 13).
+  틀린 채로 방치(라이브 DB 직접 수정 안 함, 사용자 지시 없음).
+
+  **정정(2026-08-17, pptx-page-count-garbage-fix) — 위 인과 서사는 틀렸다.**
+  D58 수정(호출자측 idem_key 시간버킷, `d58-idem-key-tenant-boundary-fix.md`)을
+  배포한 뒤에도 "소유권이전 프로세스.pptx"를 **아예 새 KB**에 다시 올렸는데
+  여전히 `page_count=1363`이 재현됐다 — 캐싱이 원인이 아니라는 뜻이었다.
+  직접 재현 확인: 이 파일 바이트를 kb-backend
+  `document_signals.py::_extract_fallback`의 UTF-8 디코드 공식
+  (`len(file_bytes.decode("utf-8","ignore"))//1800`)에 그대로 넣으면
+  **facade/변환기와 완전히 무관하게 정확히 1363**이 나온다(실측: decoded
+  length 2,451,783 → 1363). **진짜 원인은 kb-backend
+  `document_signals._EXTRACTORS`에 pptx가 없어서**, pptx(ZIP 바이너리)가
+  UTF-8 텍스트인 척 디코딩되며 파일 크기(4,670,657바이트)에 비례하는 쓰레기
+  값을 낸 것 — facade의 idem_key 캐싱과는 처음부터 무관했다. 2단계 적재
+  (parse-preview→ingest)에서 facade가 계산한 **정확한** page_count(13)가
+  실제로 흘러오는데도, 사이드카 두 곳(`workers/tasks.py`/`routers/kb.py`)의
+  명시 key-pick이 `page_count`를 빠뜨려 조용히 버려지고 있었다(1-shot
+  업로드나 .pdf 버전은 이 콜백이 정상 발동해 13으로 나왔던 이유).
+  **수정 완료**: `pptx-page-count-garbage-fix.md`(v2 READY, ultracode
+  2라운드) — `_extract_pptx` 신설(zipfile 표준 라이브러리, 슬라이드 XML
+  개수를 정확히 셈) + `_extract_fallback`에 ZIP 매직바이트 가드(등록 안 된
+  ZIP 포맷은 쓰레기 추정 대신 안전한 최소값) + 사이드카 두 곳에 `page_count`
+  key-pick 추가. `backend/tests` 676 passed(신규 9건), 새 실패 0.
+  **D58의 `derive_idem_key` 영구캐시 사실 자체**(명시 idem_key가 시간버킷
+  없이 영구 캐시된다는 코드 레벨 특성)는 **별개로 여전히 유효**하니
+  deferred로 남기되, "이번 사고의 원인"이라는 인과 주장만 철회한다. D58
+  기반 시간버킷 수정은 잘못된 진단에 근거해 만든 것이라 롤백함(knowledge_base
+  commit `b726186`, kb-pipeline commit `bfa5199`) — 위 "다음에 붙일 때" 후보
+  1번(TTL/시간버킷)은 여전히 유효한 별개 개선 후보로 남지만 이번 사고와는
+  무관하다.
