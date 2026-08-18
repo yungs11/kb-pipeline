@@ -759,16 +759,23 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
         # `_hybrid_scan_pages` 가 남긴 `hybrid_vl` 발자국과 시간순이 뒤집힌다.
         # ⚠️ `_fail_if_vl_empty` 는 `a[0]=="vl"` ∧ `meta.attempt` 만 보므로 **판정 무영향**
         #    (quarantine 의 `hybrid_vl` 이 제외되는 것과 같은 이유).
+        # 2026-08-19: gw1/gw2 이원화 폐지(단일 호출 재설계) 후에도 여기서 `gw`·`gw2`
+        # 두 줄을 남기면 사용자가 "여전히 두 번 부르나?"로 오해한다(실사용 보고) — 아래
+        # 루프가 한 줄(`gw2`)로 합쳐서 남긴다.
         for _n in sorted(paddle_pnos):
             _pg = gw_by_pno.get(_n)
             if _pg is None:
-                _att(_n, "gw", "no_result")
+                _att(_n, "gw2", "no_result")
             else:
-                _att(_n, "gw", _pg.get("status") or "ok",
-                     {"error": _pg.get("error"), "blocks": len(_pg.get("blocks") or ()),
-                      "elapsed_ms": _pg.get("elapsed_ms")})
-                if _pg.get("gw2_meta"):
-                    _att(_n, "gw2", _pg["gw2_meta"].get("outcome"), _pg["gw2_meta"])
+                # 2026-08-19: gw/gw2 이원화 폐지(단일 호출 재설계) 후에도 로그는
+                # "gw:ok → gw2:ok" 두 줄로 남아 사용자가 "아직도 두 번 부르나?"로
+                # 오해했다 — 실은 같은 1회 호출의 결과를 두 단계로 나눠 기록한 것뿐이라
+                # 한 줄(`gw2`)로 합친다. `elapsed_ms`(processing_ms 합산용)는 계속 담는다.
+                _meta = {"error": _pg.get("error"), "blocks": len(_pg.get("blocks") or ()),
+                         "elapsed_ms": _pg.get("elapsed_ms")}
+                _gw2_meta = _pg.get("gw2_meta") or {}
+                _meta.update({k: v for k, v in _gw2_meta.items() if k != "outcome"})
+                _att(_n, "gw2", _gw2_meta.get("outcome") or _pg.get("status") or "ok", _meta)
 
     # ── 4) VL 전사 대상 = thin odl ∪ 강등 paddle. 300dpi 1회 렌더 + 배치 호출 ──
     def _md(pno: int) -> str:
