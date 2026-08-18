@@ -1924,8 +1924,28 @@ parse-only 기본값 8→16(최악 4×16=64, 둘 다 16이면 256이 될 뻔한 
 실행 필요). `docker compose -f docker-compose.airgap.yml config --services` 로
 10개 서비스 정상 파싱 확인. `bash -n`으로 스크립트 4종 문법 검증.
 
-**남은 것(실측 필요, 폐쇄망 검증 절차 V1-V10 중 미실행)**: 실제
-`build-bundle.sh --parse-only`+`verify-bundle.sh --images`로 번들에 이미지 포함
-확인, `parse-only-up.sh` 전체 재실행으로 6개 서비스 헬시 확인, 실제 xlsx/스캔
-이미지로 엔드투엔드 파싱 결과 렌더 확인, knowledge_base `tsc --noEmit`/`eslint`
-clean 확인 — 다음 세션에서 실측으로 닫을 것.
+**후속 실측 검증 완료(2026-08-19, 같은 날 이어서)**: `build-bundle.sh --parse-only`
+실행 → `kbp-parse-bundle-amd64.tar` 생성, 가드(`--images`/`--imports`) 전부 통과.
+`parse-only-up.sh`를 **격리 compose 프로젝트명**(`COMPOSE_PROJECT_NAME=
+kbp-parse-verify`)으로 재실행해 6개 서비스 전부 healthy 확인 — 이 머신에
+이미 떠 있던 dev 스택(`docker-compose.yml`, 프로젝트명 `kbp`)과 **같은
+프로젝트명+같은 볼륨명**을 재사용하면 postgres 볼륨 마운트 경로 불일치로
+크래시루프한다는 걸 실제로 밟아서 확인함(별도 프로젝트명으로 완전히 분리된
+볼륨을 새로 만들어 우회, dev 데이터는 안 건드림). 검증 중 실제 버그 2건 발견해
+수정(별도 커밋 fc50597): (1) `python:3.12-slim` 베이스에 `curl` 미설치라
+healthcheck가 상시 실패, (2) 엑셀 모드 렌더러가 8600 자신의 청크 필드명
+(chunk_type/sheet/path/content_text)을 그대로 썼는데 실제 parse-svc
+`RouteResult.chunks` 스키마는 chunk_index/text/titles_context/pages —
+실제 xlsx로 안 돌려봤으면 못 잡았을 버그. 수정 후 실제 7페이지 스캔 PDF
+(이미지파서 모드: ODL/스캔GW lane + 페이지별 한글 텍스트 정상 렌더)와 실제
+위임전결기준표 xlsx(엑셀파서 모드: 422청크, doc_guard 통과 배너, titles_context
+정상 렌더)로 각각 end-to-end 성공 확인, `/history` 목록 확인. 검증 중 이
+머신에 이전 세션에서 켜 둔 채 방치된 **호스트 레벨 `python -m service.worker`
+프로세스**(scripts/run-facade-worker.sh 로 띄운 것)가 같은 postgres 호스트포트
+(5433)를 통해 이번 검증용 잡 큐와 경합해, MinIO S3 API가 호스트에 노출 안
+되는 airgap 구성에서 `localhost:9000` 접속 실패로 잡을 실패시키는 것도
+발견·종료함 — 호스트 dev 프로세스를 안 내리고 컨테이너 스택을 병행 테스트하면
+잡 큐 경합이 일어날 수 있다는 새 gotcha(향후 memory 후보).
+검증 후 격리 볼륨/컨테이너는 정리하고 원래 dev 스택(postgres/minio/edgequake/
+edgequake_webui)을 복원. knowledge_base `tsc --noEmit`/`eslint`는 §E 적용
+직후 clean 확인 완료(위 절 참고).
