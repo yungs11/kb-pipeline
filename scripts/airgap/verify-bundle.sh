@@ -394,12 +394,15 @@ print("OK biff_chunks=%d sheets=%d" % (n, len(gs["sheets"])))
   #   page_traces 심볼이 이미지 안에도 있는지 확인한다. 외부 게이트웨이(paddle_gw)/VL
   #   API 실호출은 폐쇄망 내부망이라 빌드 타임에 도달 못 할 수 있어(§Non-goals) 여기선
   #   import 레벨만 본다 — "로컬 venv엔 있는데 이미지엔 없음"(kb 이미지 문서추출기
-  #   누락과 같은 부류)을 잡는 최소 방어선. `_needs_gw2`는 `run_paddle_gateway()` 내부
-  #   로컬 함수라 모듈 최상위 심볼이 아니므로 여기 넣지 않는다(2026-08-18 ultracode
-  #   1라운드에서 지적된 실수 — ImportError로 항상 죽는 스모크가 될 뻔했다).
+  #   누락과 같은 부류)을 잡는 최소 방어선. `_needs_gw2`는 gw1/gw2 이원화 폐지(2026-08-18
+  #   재설계)로 삭제됐다 — 애초에 `run_paddle_gateway()` 내부 로컬 함수라 모듈 최상위
+  #   심볼이 아니므로 여기 넣지 않는다(2026-08-18 ultracode 1라운드에서 지적된 실수 —
+  #   ImportError로 항상 죽는 스모크가 될 뻔했다). `_splice_gw2_block_content`는 같은
+  #   재설계에서 `_apply_gw2_block_content`로 rename됐다 — 이 스모크도 함께 갱신한다
+  #   (안 하면 rename 직후 이 가드가 ImportError로 항상 실패한다).
   echo "== 이미지 경로 누출 방지 신규 심볼 import 스모크 =="
   local GW2_PY='
-from parse_service.parsers.pdf.paddle_gw import _splice_gw2_block_content
+from parse_service.parsers.pdf.paddle_gw import _apply_gw2_block_content
 from parse_service.parsers.pdf.image_refs import replace_image_refs, find_image_refs
 from parse_service.parsers.pdf.odl_image_summary import summarize_odl_image
 from parse_service.parsers.ocr import _page_traces_for_ocr

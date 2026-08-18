@@ -1742,3 +1742,61 @@ jpg(`I10.jpg`) — parse-svc 직접 호출과 kb-backend parse-preview 경유(�
 인증) 둘 다 확인, `admin/parser-logs` API 응답에 `processing_ms` 값(13810)이
 끝까지 흘러들어옴을 실측 확인. 브라우저 픽셀 단위 시각 확인은 생략(데이터 흐름
 전 구간 실측 + 타입체크로 대체).
+
+## paddle_gw — gw1/gw2 이원화 폐지, 단일 호출 재설계 (2026-08-18)
+
+plan: `~/.claude/plans/concurrent-soaring-mango.md`(v2 READY, ultracode 2라운드).
+직전 절(위, "이미지 경로 누출 방지")에서 구현한 gw1(옵션없음)→조건부 gw2(옵션있음)
+이원화 설계를 같은 세션 실사용 중 실측으로 재검토해 **폐기·재설계**했다 — v8로 이미
+배포됐던 설계가 하루 안에 뒤집힌 사례다.
+
+**뒤집힌 전제 3가지** (모두 실측):
+1. 이미지 블록이 없는 페이지에서 옵션 유무는 비용 차이가 없다(25.34s vs 23.87s,
+   그날 관측된 게이트웨이 호출 편차 범위 안, `md` 완전 동일) — "필요할 때만 2차
+   호출"이라는 기존 설계의 존재 이유(비용 절감)가 실증되지 않았다.
+2. 대형 블록(≥`KBP_VL_VISUAL_MIN_AREA`, 기본 5%)의 전면 VL 교체(`_hybrid_scan_pages`)
+   라우팅은 `layout`/`bbox`가 **옵션과 무관하게 동일**함이 실측 확인됐다(I18/I56
+   두 실사례, opts=None vs opts=포함 `(label,bbox)` 정렬 리스트 완전 동일) — paddle_gw
+   호출 횟수와 독립적으로 이미 안전하게 처리되고 있었다.
+3. `block_content`가 있어도 최종 텍스트에 반영 안 되는 케이스가 실재했다
+   (`header_image`/`footer_image` — 게이트웨이가 본문 스트림에 아예 안 섞어줌,
+   참조 자체가 없어 옛 `_splice_gw2_block_content`의 위치매칭이 손을 못 댐). 반대로
+   `image`/`figure` 라벨은 게이트웨이가 **참조를 남긴 채로 알아서 옆에 내용을 붙여
+   주기도 한다**(I18/I56 둘 다 확인) — 이 경우 우리 코드가 다시 삽입하면 중복이었다.
+
+**설계 변경** (`parse_service/parsers/pdf/paddle_gw.py`):
+- `_needs_gw2()`(트리거 판정 함수) 전체 삭제 — 이제 항상 옵션(`use_ocr_for_image_block`
+  +`use_chart_recognition`) 포함 **1회만** 호출한다. `KBP_GW_IMAGE_OCR_ENABLE=0`(기존
+  탈출구 env)은 유지 — 꺼지면 옵션 없이 1회 호출 + 아래 반영 로직도 건너뛴다(완전
+  pre-gw2 동작 복귀).
+- `_splice_gw2_block_content`(위치매칭 스플라이싱) → `_apply_gw2_block_content`로
+  교체(이름+로직 전면 재설계). 위치/개수 대조 대신 **존재 확인** 방식: 이미지형 라벨
+  (`_IMAGE_TRIGGER_LABELS`) 블록마다 `block_content`가 없으면 버림(seal 류), 공백
+  정규화 후 md 에 이미 있으면 중복 삽입 안 함(게이트웨이 자체 병합 케이스), 전혀
+  없으면 문서 끝에 append(header_image/footer_image 류 content-loss 버그 수정).
+  `image_refs.find_image_refs`/`replace_image_refs` 위치매칭 의존 제거 — 참조 유무와
+  무관하게 동작해 이전에 실재했던 "개수 불일치 시 서술 전부 소실" 실패모드 자체가
+  없어졌다.
+- `gw2_meta` 스키마 변경: "트리거 여부"(`{"outcome":"skipped"/"ok"/"error", "reason"}`)
+  → "반영 결과 카운터"(`{"outcome":"ok","blocks_total","blocks_applied",
+  "blocks_already_present","blocks_empty"}`, 비활성 시 `{"outcome":"disabled_by_env"}`).
+  `pdf/__init__.py`의 attempts 로깅 호출부는 `.get("outcome")`만 읽어 코드 변경 불필요.
+- `scripts/airgap/verify-bundle.sh`의 `GW2_PY` import 스모크를
+  `_apply_gw2_block_content`로 갱신(안 하면 rename 직후 폐쇄망 가드가 ImportError로
+  항상 실패 — ultracode 1라운드 blocking 지적).
+
+**Non-goals**(이번 라운드에 안 넣음, 실측 근거 있으면 추후 `deferred.md`): `block_content`
+정확도(가비지 판별) 검증 — 5% 크기 게이트가 이미 위험군을 걸러냄. dedup 판정의 완벽한
+오탐 방지(위치/문맥 인식) — 공백정규화 비교로 완화만, 극히 짧고 반복되는 문구의 우연
+일치는 이론상 배제 못 함(실측 3케이스는 안 걸림).
+
+**검증**: `parse_service/tests/` 473 passed·2 skipped(신규 실패 0, `test_paddle_gw.py`
+gw2 관련 테스트 전면 재작성 — 트리거 개념 삭제 반영). 실동작 — I18/I56(9.kbp-parser-compare
+코퍼스 실사례)·AI페르소나만들기.pdf p1 세 페이지로 재확인: (a) `layout`/`page_size`가
+opts 유무와 무관하게 완전 동일함을 새 코드로 재검증 True, (b) I56 — `imgs/`/`img_in_`
+잔존 0, "갑 제3-4호증" 보존, (c) I18 — `layout` 불변 확인(대형 블록 라우팅은
+`_hybrid_scan_pages`가 독립적으로 처리하므로 영향 없음), (d) AI페르소나 p1 —
+"General Counseler 2030..."이 최종 텍스트에 append 로 살아남음(이전엔 소실), (e)
+`KBP_GW_IMAGE_OCR_ENABLE=0` — 옵션 없이 1회만 호출, `gw2_meta.outcome=="disabled_by_env"`,
+`block_content` 미반영 확인. 폐쇄망 가드(`_apply_gw2_block_content` import) 로컬
+스모크 통과.

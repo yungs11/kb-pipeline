@@ -22,7 +22,7 @@ def test_pages_parsed_in_parallel_with_table_html(monkeypatch):
                         lambda fb, page_numbers=None: [_RP(1), _RP(2)])
     seen = []
 
-    def fake_post(jpeg, name):
+    def fake_post(jpeg, name, opts=None):
         seen.append(name)
         if "page-1" in name:
             return ("# 제목\n\n본문 텍스트\n\n<table><tr><td>셀A</td></tr></table>", [], None)
@@ -45,7 +45,7 @@ def test_nonprobe_page_failure_nonfatal_empty_blocks(monkeypatch):
     monkeypatch.setattr(paddle_gw, "_render_pages",
                         lambda fb, page_numbers=None: [_RP(1), _RP(2), _RP(3)])
 
-    def fake_post(jpeg, name):
+    def fake_post(jpeg, name, opts=None):
         if "page-2" in name:
             raise RuntimeError("gateway 5xx")
         return (f"{name} 텍스트", [], None)
@@ -65,7 +65,7 @@ def test_probe_failure_raises_for_fast_fallback(monkeypatch):
                         lambda fb, page_numbers=None: [_RP(1), _RP(2)])
     calls = []
 
-    def boom(jpeg, name):
+    def boom(jpeg, name, opts=None):
         calls.append(name)
         raise RuntimeError("gateway hang/down")
 
@@ -236,7 +236,7 @@ def test_page_numbers_filters_rendered_pages(monkeypatch):
 
     monkeypatch.setattr(paddle_gw, "_render_pages", fake_render)
     monkeypatch.setattr(paddle_gw, "_post_page",
-                        lambda jpeg, name: (f"{name} 본문", [], None))
+                        lambda jpeg, name, opts=None: (f"{name} 본문", [], None))
     pages = paddle_gw.run_paddle_gateway(b"%PDF", "a.pdf", page_numbers={2, 5})
     assert seen["page_numbers"] == {2, 5}
     assert [p["page_number"] for p in pages] == [2, 5], "문서 절대 번호 유지"
@@ -253,7 +253,7 @@ def test_page_numbers_none_renders_all(monkeypatch):
 
     monkeypatch.setattr(paddle_gw, "_render_pages", fake_render)
     monkeypatch.setattr(paddle_gw, "_post_page",
-                        lambda jpeg, name: (f"{name} 본문", [], None))
+                        lambda jpeg, name, opts=None: (f"{name} 본문", [], None))
     pages = paddle_gw.run_paddle_gateway(b"%PDF", "a.pdf")
     assert seen["page_numbers"] is None
     assert [p["page_number"] for p in pages] == [1, 2]
@@ -266,7 +266,7 @@ def test_probe_uses_first_rendered_page_of_subset(monkeypatch):
                         lambda fb, page_numbers=None: [_RP(7), _RP(9)])
     calls = []
 
-    def boom(jpeg, name):
+    def boom(jpeg, name, opts=None):
         calls.append(name)
         raise RuntimeError("gateway down")
 
@@ -283,7 +283,7 @@ def test_empty_page_numbers_returns_empty(monkeypatch):
                         lambda fb, page_numbers=None: [])
     called = []
     monkeypatch.setattr(paddle_gw, "_post_page",
-                        lambda j, n: called.append(n) or ("", [], None))
+                        lambda j, n, opts=None: called.append(n) or ("", [], None))
     assert paddle_gw.run_paddle_gateway(b"%PDF", "a.pdf", page_numbers=set()) == []
     assert called == []
 
@@ -298,9 +298,11 @@ def test_empty_page_numbers_returns_empty(monkeypatch):
 # 유일한 실측 그물 V7 은 "hybrid 가 사문일 수 있다" 고 유보해 소실과 사문을 구분하지 못한다.
 # 그래서 실물 `run_paddle_gateway` 로 7키를 직접 단언한다.
 # ══════════════════════════════════════════════════════════════════════════════
-# v7(§A.4) — `gw2_meta` 추가로 6키→7키. v8(2026-08-18, 사용자 지시): 트리거 안 돼도
-# gw2_meta 는 항상 채워진다({"outcome":"skipped","reason":...}) — "왜 안 불렸는지"가
-# 로그에 남아야 한다. 2026-08-18(오후) — `elapsed_ms` 추가로 7키→8키(페이지별 처리시간).
+# v7(§A.4) — `gw2_meta` 추가로 6키→7키. `elapsed_ms` 추가로 7키→8키(페이지별 처리시간).
+# 2026-08-18 재설계: gw1/gw2 이원화 폐지 — 항상 옵션 포함 1회 호출 + `_apply_gw2_block_content`
+# 반영. `gw2_meta`는 이제 "트리거 여부"가 아니라 "이미지형 블록 content 반영 결과"
+# 카운터({"outcome":"ok","blocks_total","blocks_applied","blocks_already_present",
+# "blocks_empty"}, 비활성 시 {"outcome":"disabled_by_env"})를 담는다.
 _EIGHT_KEYS = {"page_number", "blocks", "layout", "page_size", "status", "error",
                "gw2_meta", "elapsed_ms"}
 
@@ -323,7 +325,8 @@ def test_page_dict_carries_six_key_contract_on_success(monkeypatch):
     assert pg["status"] == "ok" and pg["error"] == ""
     assert pg["layout"] == [{"label": "text"}] and pg["page_size"] == (800, 600)
     assert pg["blocks"], "정상 페이지는 blocks 가 있다"
-    assert pg["gw2_meta"] == {"outcome": "skipped", "reason": "skipped_no_image_labeled_blocks_in_layout"}
+    assert pg["gw2_meta"] == {"outcome": "ok", "blocks_total": 0, "blocks_applied": 0,
+                              "blocks_already_present": 0, "blocks_empty": 0}
     assert isinstance(pg["elapsed_ms"], float) and pg["elapsed_ms"] >= 0
 
 
@@ -351,142 +354,166 @@ def test_page_dict_carries_six_key_contract_on_page_error(monkeypatch):
     assert p1["status"] == "ok", "다른 페이지는 영향 없다(레인 포기 아님)"
 
 
-# ── gw2(§A.2~A.5) — 조건부 2차 호출(use_ocr_for_image_block/use_chart_recognition) ────
+# ── gw1/gw2 이원화 폐지(2026-08-18 재설계) — 항상 옵션 포함 1회 호출 ────────────
 
-def test_gw2_triggers_on_small_image_block(monkeypatch):
-    """대형 이미지(≥KBP_VL_VISUAL_MIN_AREA)는 없지만 소형 figure 블록이 있으면 gw2 호출."""
+def test_always_calls_once_with_options(monkeypatch):
+    """더 이상 트리거 판단이 없다 — 이미지형 블록 유무와 무관하게 항상 옵션 포함 1회 호출."""
     monkeypatch.setenv("KBP_PADDLE_OCR_GATEWAY_URL", "https://gw/ocr/paddleocr_vl")
     monkeypatch.setattr(paddle_gw, "_render_pages",
                         lambda fb, page_numbers=None: [_RP(1)])
-    small_figure = [{"block_label": "figure", "block_bbox": [0, 0, 10, 10]}]  # 100/(800*600)≈0.02%
-    calls = []
-
-    def fake_post(jpeg, name, opts=None):
-        calls.append(opts)
-        if opts:
-            return ("gw2 결과", small_figure, (800, 600))
-        return ("![](x_images/imageFile1.png)", small_figure, (800, 600))
-
-    monkeypatch.setattr(paddle_gw, "_post_page", fake_post)
-    (pg,) = paddle_gw.run_paddle_gateway(b"%PDF", "a.pdf")
-    assert len(calls) == 2, "1차(플래그없음) + gw2(플래그있음) 두 번 호출"
-    assert calls[0] is None
-    assert calls[1] == {"use_ocr_for_image_block": True, "use_chart_recognition": True}
-    assert pg["gw2_meta"] == {"outcome": "ok"}
-
-
-def test_gw2_skips_when_large_image_block_present(monkeypatch):
-    """면적≥KBP_VL_VISUAL_MIN_AREA(기본 5%) 대형 블록이 있으면 gw2 재호출 없음
-    (기존 `_hybrid_scan_pages` 전면VL교체가 처리)."""
-    monkeypatch.setenv("KBP_PADDLE_OCR_GATEWAY_URL", "https://gw/ocr/paddleocr_vl")
-    monkeypatch.setattr(paddle_gw, "_render_pages",
-                        lambda fb, page_numbers=None: [_RP(1)])
-    big_figure = [{"block_label": "figure", "block_bbox": [0, 0, 400, 400]}]  # 160000/480000≈33%
     calls = []
     monkeypatch.setattr(paddle_gw, "_post_page",
-                        lambda jpeg, name, opts=None: (calls.append(opts) or ("md", big_figure, (800, 600))))
-    (pg,) = paddle_gw.run_paddle_gateway(b"%PDF", "a.pdf")
-    assert len(calls) == 1, "대형 블록 있으면 gw2 재호출 없음"
-    assert pg["gw2_meta"] == {"outcome": "skipped", "reason": "skipped_large_block_delegated_to_hybrid_vl"}
+                        lambda jpeg, name, opts=None: (calls.append(opts) or ("본문", [], (800, 600))))
+    paddle_gw.run_paddle_gateway(b"%PDF", "a.pdf")
+    assert len(calls) == 1, "gw 는 페이지당 정확히 1회만 호출된다"
+    assert calls[0] == {"use_ocr_for_image_block": True, "use_chart_recognition": True}
 
 
-def test_gw2_disabled_by_env(monkeypatch):
-    """KBP_GW_IMAGE_OCR_ENABLE=0 이면 소형 이미지 블록이 있어도 gw2 재호출 없음(탈출구)."""
+def test_gw2_disabled_by_env_calls_without_options(monkeypatch):
+    """KBP_GW_IMAGE_OCR_ENABLE=0 이면 옵션 없이 1회만 호출하고 block_content 반영도 안 한다
+    (탈출구 — 기존 pre-gw2 동작으로 완전 복귀)."""
     monkeypatch.setenv("KBP_PADDLE_OCR_GATEWAY_URL", "https://gw/ocr/paddleocr_vl")
     monkeypatch.setenv("KBP_GW_IMAGE_OCR_ENABLE", "0")
     monkeypatch.setattr(paddle_gw, "_render_pages",
                         lambda fb, page_numbers=None: [_RP(1)])
-    small_figure = [{"block_label": "figure", "block_bbox": [0, 0, 10, 10]}]
+    small_figure = [{"block_label": "figure", "block_bbox": [0, 0, 10, 10],
+                     "block_content": "인식된 내용"}]
     calls = []
-    monkeypatch.setattr(paddle_gw, "_post_page",
-                        lambda jpeg, name, opts=None: (calls.append(opts) or ("md", small_figure, (800, 600))))
-    (pg,) = paddle_gw.run_paddle_gateway(b"%PDF", "a.pdf")
-    assert len(calls) == 1, "env 로 꺼지면 1차 호출만"
-    assert pg["gw2_meta"] == {"outcome": "skipped", "reason": "disabled_by_env"}
-
-
-def test_gw2_failure_does_not_pollute_first_call_result(monkeypatch):
-    """gw2 실패는 1차 결과를 오염시키지 않는다 — status='ok' 유지, blocks 는 1차 결과."""
-    monkeypatch.setenv("KBP_PADDLE_OCR_GATEWAY_URL", "https://gw/ocr/paddleocr_vl")
-    monkeypatch.setattr(paddle_gw, "_render_pages",
-                        lambda fb, page_numbers=None: [_RP(1)])
-    small_figure = [{"block_label": "figure", "block_bbox": [0, 0, 10, 10]}]
 
     def fake_post(jpeg, name, opts=None):
-        if opts:
-            raise RuntimeError("gw2 5xx")
-        return ("1차 결과 텍스트", small_figure, (800, 600))
+        calls.append(opts)
+        return ("![](x_images/imageFile1.png)", small_figure, (800, 600))
 
     monkeypatch.setattr(paddle_gw, "_post_page", fake_post)
     (pg,) = paddle_gw.run_paddle_gateway(b"%PDF", "a.pdf")
-    assert pg["status"] == "ok", "gw2 실패가 1차 status 를 오염시키면 안 된다"
-    assert pg["gw2_meta"]["outcome"] == "error"
-    assert "RuntimeError" in pg["gw2_meta"]["error"]
+    assert len(calls) == 1 and calls[0] is None, "env 로 꺼지면 옵션 없이 1회만 호출"
+    assert pg["gw2_meta"] == {"outcome": "disabled_by_env"}
+    text = "\n".join(b.get("text") or "" for b in pg["blocks"])
+    assert "인식된 내용" not in text, "비활성 시 block_content 는 반영되지 않는다"
+    assert "imageFile1.png" not in text, "안전망 strip 은 비활성 시에도 항상 실행된다"
 
 
-def test_gw2_skip_reason_when_images_absorbed_into_table_block(monkeypatch):
-    """실사고 재현(2026-08-18): 게이트웨이가 표 셀 안 사진들을 개별 image/figure 블록으로
-    안 내고 table 블록 하나에 흡수한 경우 — gw2는 못 트리거하지만 **왜 못 트리거했는지가
-    로그(gw2_meta.reason)에 남아야 한다**(사용자 지시 — 이전엔 흔적이 전혀 없었음)."""
+# ── `_apply_gw2_block_content`(2026-08-18 재설계) — 존재 확인 기반 반영 ─────────
+
+def test_apply_gw2_block_content_drops_empty_content():
+    """block_content 가 계속 비어있는 블록(인식 실패)은 버려진다 — 별도 처리 없음."""
+    md = "본문\n\n<img src=\"imgs/x.jpg\" />\n\n뒷문장"
+    layout = [{"block_label": "image", "block_content": ""}]
+    new_md, meta = paddle_gw._apply_gw2_block_content(md, layout)
+    assert new_md == md, "빈 content 는 md 를 바꾸지 않는다(안전망 strip 이 나중에 참조만 제거)"
+    assert meta == {"outcome": "ok", "blocks_total": 1, "blocks_applied": 0,
+                    "blocks_already_present": 0, "blocks_empty": 1}
+
+
+def test_apply_gw2_block_content_ignores_labels_outside_trigger_set():
+    """`_IMAGE_TRIGGER_LABELS` 밖의 라벨(예: seal — 실측 I56)은 이 함수가 아예 건드리지
+    않는다. 그래도 원래 이미지참조는 안전망(`_strip_gateway_image_refs`)이 별도로 지운다
+    (이 함수의 책임 밖 — run_paddle_gateway 통합 테스트에서 확인)."""
+    md = '본문\n\n<img src="imgs/seal.jpg" />\n\n뒷문장'
+    layout = [{"block_label": "seal", "block_content": ""}]
+    new_md, meta = paddle_gw._apply_gw2_block_content(md, layout)
+    assert new_md == md
+    assert meta == {"outcome": "ok", "blocks_total": 0, "blocks_applied": 0,
+                    "blocks_already_present": 0, "blocks_empty": 0}
+
+
+def test_apply_gw2_block_content_skips_when_already_present():
+    """게이트웨이가 이미 본문에 자체 병합한 경우(I18/I56 실측) 중복 삽입하지 않는다."""
+    md = '본문\n\n<img src="imgs/x.jpg" />\n\n갑 제3-4호증\n\n뒷문장'
+    layout = [{"block_label": "image", "block_content": "갑 제3-4호증"}]
+    new_md, meta = paddle_gw._apply_gw2_block_content(md, layout)
+    assert new_md == md, "이미 반영된 내용은 다시 append 하지 않는다"
+    assert meta == {"outcome": "ok", "blocks_total": 1, "blocks_applied": 0,
+                    "blocks_already_present": 1, "blocks_empty": 0}
+
+
+def test_apply_gw2_block_content_appends_when_absent():
+    """header_image/footer_image 처럼 게이트웨이가 본문 스트림에 아예 안 섞어준 경우 append."""
+    md = "본문\n\n뒷문장"
+    layout = [{"block_label": "header_image", "block_content": "General Counseler 2030"}]
+    new_md, meta = paddle_gw._apply_gw2_block_content(md, layout)
+    assert new_md == "본문\n\n뒷문장\n\nGeneral Counseler 2030"
+    assert meta == {"outcome": "ok", "blocks_total": 1, "blocks_applied": 1,
+                    "blocks_already_present": 0, "blocks_empty": 0}
+
+
+def test_apply_gw2_block_content_whitespace_normalized_match():
+    """게이트웨이 자체 병합 시 개행/공백이 원문과 달라도(포맷 차이) 중복 삽입하지 않는다."""
+    md = "본문\n\n갑   제3-4호증\n\n뒷문장"   # 공백이 더 들어간 형태로 이미 병합됨
+    layout = [{"block_label": "image", "block_content": "갑 제3-4호증"}]
+    new_md, meta = paddle_gw._apply_gw2_block_content(md, layout)
+    assert new_md == md
+    assert meta["blocks_already_present"] == 1 and meta["blocks_applied"] == 0
+
+
+def test_apply_gw2_block_content_mixed_blocks_each_handled_independently():
+    """실측(I56) 재현 — 한 페이지에 image(빈값)+image(이미 반영) 가 함께 있으면 각각
+    독립적으로 처리된다: 하나는 버려지고 다른 하나는 중복 삽입되지 않는다."""
+    md = '본문\n\n<img src="imgs/x.jpg" />\n\n갑 제3-4호증\n\n뒷문장'
+    layout = [
+        {"block_label": "image", "block_content": ""},
+        {"block_label": "image", "block_content": "갑 제3-4호증"},
+    ]
+    new_md, meta = paddle_gw._apply_gw2_block_content(md, layout)
+    assert new_md == md
+    assert meta == {"outcome": "ok", "blocks_total": 2, "blocks_applied": 0,
+                    "blocks_already_present": 1, "blocks_empty": 1}
+
+
+def test_apply_gw2_block_content_no_image_blocks_is_noop():
+    md = "본문 텍스트"
+    new_md, meta = paddle_gw._apply_gw2_block_content(md, [{"block_label": "text"}])
+    assert new_md == md
+    assert meta == {"outcome": "ok", "blocks_total": 0, "blocks_applied": 0,
+                    "blocks_already_present": 0, "blocks_empty": 0}
+
+
+# ── run_paddle_gateway 통합 — block_content 반영 + 안전망 strip 이 함께 동작 ─────
+
+def test_run_paddle_gateway_appends_recovered_content_and_strips_ref(monkeypatch):
+    """header_image 류 — block_content 는 append 되고 원래 이미지참조는 strip 된다."""
     monkeypatch.setenv("KBP_PADDLE_OCR_GATEWAY_URL", "https://gw/ocr/paddleocr_vl")
     monkeypatch.setattr(paddle_gw, "_render_pages",
                         lambda fb, page_numbers=None: [_RP(1)])
-    absorbed_layout = [
-        {"block_label": "table", "block_bbox": [118, 218, 1121, 1583]},
-        {"block_label": "footer", "block_bbox": [822, 1618, 1091, 1707]},
-    ]
+    layout = [{"block_label": "header_image", "block_content": "General Counseler 2030"}]
+    monkeypatch.setattr(
+        paddle_gw, "_post_page",
+        lambda jpeg, name, opts=None: ("본문 텍스트", layout, (800, 600)))
+    (pg,) = paddle_gw.run_paddle_gateway(b"%PDF", "a.pdf")
+    text = "\n".join(b.get("text") or "" for b in pg["blocks"])
+    assert "General Counseler 2030" in text
+    assert pg["gw2_meta"] == {"outcome": "ok", "blocks_total": 1, "blocks_applied": 1,
+                              "blocks_already_present": 0, "blocks_empty": 0}
+
+
+def test_run_paddle_gateway_drops_unrecognized_image_block_and_strips_ref(monkeypatch):
+    """계속 인식 실패한 image 블록(빈 block_content)은 참조만 지워지고 아무 흔적도 안 남는다."""
+    monkeypatch.setenv("KBP_PADDLE_OCR_GATEWAY_URL", "https://gw/ocr/paddleocr_vl")
+    monkeypatch.setattr(paddle_gw, "_render_pages",
+                        lambda fb, page_numbers=None: [_RP(1)])
+    layout = [{"block_label": "image", "block_content": ""}]
     monkeypatch.setattr(
         paddle_gw, "_post_page",
         lambda jpeg, name, opts=None: (
-            "<table><td>![](x_images/imageFile1.png)</td></table>", absorbed_layout, (1241, 1755)))
+            '본문\n\n<img src="imgs/x.jpg" alt="Image" />\n\n뒷문장', layout, (800, 600)))
     (pg,) = paddle_gw.run_paddle_gateway(b"%PDF", "a.pdf")
-    assert pg["gw2_meta"] == {"outcome": "skipped", "reason": "skipped_no_image_labeled_blocks_in_layout"}
-    # 안전망(§A.5)이 여전히 참조는 지운다 — leak 없음 확인.
-    assert "imageFile1.png" not in pg["blocks"][0]["table_body"]
+    text = "\n".join(b.get("text") or "" for b in pg["blocks"])
+    assert "imgs/" not in text and "x.jpg" not in text
+    assert pg["gw2_meta"] == {"outcome": "ok", "blocks_total": 1, "blocks_applied": 0,
+                              "blocks_already_present": 0, "blocks_empty": 1}
 
 
-# ── gw2 splice(2026-08-18 사용자 결정 — 인라인/원위치 대체) ──────────────────────
-
-def test_gw2_splices_block_content_inline_at_ref_position(monkeypatch):
-    """gw2 성공 시 block_content(VL 서술)가 원래 이미지참조 자리를 대체한다 —
-    경로 leak도 없고 서술도 살아남는다(이전엔 block_content가 버려져 서술이 소실됐음)."""
+def test_run_paddle_gateway_leaves_no_trace_for_label_outside_trigger_set(monkeypatch):
+    """실측(I56) 재현 — `_IMAGE_TRIGGER_LABELS` 밖의 라벨(seal)도 안전망 strip 이
+    참조를 지운다(이 라벨은 `_apply_gw2_block_content` 책임 밖이지만 leak 은 없어야 한다)."""
     monkeypatch.setenv("KBP_PADDLE_OCR_GATEWAY_URL", "https://gw/ocr/paddleocr_vl")
     monkeypatch.setattr(paddle_gw, "_render_pages",
                         lambda fb, page_numbers=None: [_RP(1)])
-    small_figure = [{"block_label": "figure", "block_bbox": [0, 0, 10, 10]}]
-    gw2_layout = [{"block_label": "figure", "block_bbox": [0, 0, 10, 10],
-                   "block_content": "General Counseler 2030 로고 이미지"}]
-
-    def fake_post(jpeg, name, opts=None):
-        if opts:
-            return ("본문\n\n![](x_images/imageFile1.png)\n\n뒷문장", gw2_layout, (800, 600))
-        return ("본문\n\n![](x_images/imageFile1.png)\n\n뒷문장", small_figure, (800, 600))
-
-    monkeypatch.setattr(paddle_gw, "_post_page", fake_post)
+    layout = [{"block_label": "seal", "block_content": ""}]
+    monkeypatch.setattr(
+        paddle_gw, "_post_page",
+        lambda jpeg, name, opts=None: (
+            '본문\n\n<img src="imgs/seal.jpg" alt="Image" />\n\n뒷문장', layout, (800, 600)))
     (pg,) = paddle_gw.run_paddle_gateway(b"%PDF", "a.pdf")
     text = "\n".join(b.get("text") or "" for b in pg["blocks"])
-    assert "imageFile1.png" not in text, "경로 leak 없음"
-    assert "General Counseler 2030 로고 이미지" in text, "서술이 원위치에 살아있어야 한다"
-
-
-def test_gw2_splice_falls_back_to_strip_on_ref_count_mismatch(monkeypatch):
-    """image-trigger 블록 개수와 md 안 참조 개수가 안 맞으면 위치매칭을 포기하고
-    안전하게 전부 스트립한다(leak 없음, 서술은 소실 — 오매칭보다 안전)."""
-    monkeypatch.setenv("KBP_PADDLE_OCR_GATEWAY_URL", "https://gw/ocr/paddleocr_vl")
-    monkeypatch.setattr(paddle_gw, "_render_pages",
-                        lambda fb, page_numbers=None: [_RP(1)])
-    small_figure = [{"block_label": "figure", "block_bbox": [0, 0, 10, 10]}]
-    # gw2 응답엔 참조가 2개인데 image-trigger 라벨 블록은 1개뿐 — 매칭 불가.
-    gw2_layout = [{"block_label": "figure", "block_bbox": [0, 0, 10, 10],
-                   "block_content": "설명"}]
-
-    def fake_post(jpeg, name, opts=None):
-        if opts:
-            return ("![](a_images/imageFile1.png) ![](a_images/imageFile2.png)",
-                    gw2_layout, (800, 600))
-        return ("![](a_images/imageFile1.png)", small_figure, (800, 600))
-
-    monkeypatch.setattr(paddle_gw, "_post_page", fake_post)
-    (pg,) = paddle_gw.run_paddle_gateway(b"%PDF", "a.pdf")
-    text = "\n".join(b.get("text") or "" for b in pg["blocks"])
-    assert "imageFile" not in text, "매칭 실패해도 leak 은 없어야 한다(안전망 스트립)"
+    assert "imgs/" not in text and "seal.jpg" not in text

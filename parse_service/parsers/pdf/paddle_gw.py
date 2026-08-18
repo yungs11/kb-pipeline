@@ -13,7 +13,6 @@ parse() 의 빈결과 검사가 ODL/in-process VL 폴백으로 잡는다(사용�
 """
 from __future__ import annotations
 
-import collections
 import concurrent.futures
 import json
 import logging
@@ -23,11 +22,14 @@ import time
 
 import httpx
 
-from parse_service.parsers.pdf.image_refs import find_image_refs, replace_image_refs, strip_image_refs
+from parse_service.parsers.pdf.image_refs import strip_image_refs
 
 log = logging.getLogger("kb_pipeline.parse_service.parsers.pdf.paddle_gw")
 
-# gw2(§A.2) 트리거 라벨 — image/figure/chart(사용자 결정, v7)/header_image/footer_image.
+# 이미지형 블록 라벨 — image/figure/chart/header_image/footer_image. gw 는 이제 항상
+# 이 라벨들의 VL 인식(`use_ocr_for_image_block`+`use_chart_recognition`)을 포함해 1회
+# 호출된다(2026-08-18 재설계 — gw1/gw2 이원화 폐지). `_apply_gw2_block_content`가 각
+# 블록의 `block_content`를 md 에 반영할지 판단하는 데 이 라벨 집합을 쓴다.
 # `_VISUAL_LABELS`(__init__.py, 전면VL교체 소비)와는 **별개 상수**다 — header_image/
 # footer_image 를 거기 추가하면 대형 헤더/푸터 이미지가 있는 기존 문서의 전면VL교체 동작이
 # 바뀌는 회귀가 생긴다. chart 는 `_VISUAL_LABELS` 에도 있어 이 상위집합 관계는 안전하다.
@@ -53,32 +55,49 @@ _BARE_IMG_RE = re.compile(r'^[ \t]*[^\s<>()]+\.(?:jpg|jpeg|png|webp|bmp|tiff?)[ 
                           re.I | re.M)
 
 
-def _splice_gw2_block_content(md: str, layout: list[dict]) -> str:
-    """gw2(§A.2) 성공 시 `block_content`(이미지 블록 VL 서술)를 원래 이미지참조 자리에
-    인라인 치환한다(2026-08-18 사용자 결정 — "원위치 대체").
+_WS_RE = re.compile(r"\s+")
 
-    gw2 이전엔 top-level `text`가 image/figure 류 블록을 크롭 경로 참조로만 냈고,
-    `use_ocr_for_image_block=True`로 얻은 VL 서술은 `layout[].blocks[].block_content`에만
-    실려 온다(`text`는 opts와 무관하게 동일 — 2026-08-17 실측). `_parse_layout`이 layout
-    블록 dict를 그대로 보존하므로(§ 위 docstring) `block_content`는 이미 살아있다 —
-    여기서 그걸 md 안 참조 위치에 꽂아 넣는다.
 
-    `_IMAGE_TRIGGER_LABELS` 블록 개수와 md 안 이미지참조 개수가 안 맞으면(예: 표에
-    흡수된 이미지처럼 참조 자체가 없는 경우) 위치 매칭을 포기하고 md를 그대로 반환한다 —
-    이어지는 `_strip_gateway_image_refs`가 안전하게 참조만 지운다(leak 없음, 서술 손실만).
+def _apply_gw2_block_content(md: str, layout: list[dict]) -> tuple[str, dict]:
+    """이미지형 블록의 `block_content`(VL 인식 결과)를 md 에 반영한다(2026-08-18 재설계).
+
+    gw 는 이제 항상 `use_ocr_for_image_block`+`use_chart_recognition` 옵션을 포함해
+    1회 호출되므로(§A.2), `_IMAGE_TRIGGER_LABELS` 블록마다 `block_content`가 항상 딸려
+    온다(실패 시 빈 문자열). 실측(I18/I56, 2026-08-17)으로 확인된 3가지 케이스를
+    각각 처리한다:
+
+      - `block_content` 없음(seal 처럼 VL 이 인식 못함) → 버림. 남은 이미지 참조는
+        뒤이은 `_strip_gateway_image_refs`가 흔적 없이 제거한다.
+      - `block_content` 있고 md 에 이미 있음(게이트웨이가 본문에 자체 병합 — image/
+        figure 라벨에서 관측됨) → 중복 삽입하지 않는다.
+      - `block_content` 있고 md 에 전혀 없음(header_image/footer_image — 게이트웨이가
+        본문 스트림에 아예 안 섞어줌) → 문서 끝에 append.
+
+    존재 확인은 공백 정규화 후 부분문자열 매칭이다 — 위치 매칭(옛 `find_image_refs`+
+    `replace_image_refs`)이 필요 없다(참조 유무와 무관하게 동작). 매칭은 완벽한 오탐
+    방지가 아니다 — 극히 짧거나 문서 전체에 반복되는 문구는 우연히 일치할 수 있다(계획서
+    Non-goals 참고, 실측 3케이스는 이 위험에 안 걸림).
     """
-    refs = find_image_refs(md)
-    if not refs:
-        return md
     blocks = [b for b in layout
               if (b.get("block_label") or "").strip().lower() in _IMAGE_TRIGGER_LABELS]
-    if len(blocks) != len(refs):
-        return md
-    contents = [(b.get("block_content") or "").strip() for b in blocks]
-    try:
-        return replace_image_refs(md, contents)
-    except ValueError:
-        return md
+    empty = applied = already = 0
+    to_append = []
+    norm_md = _WS_RE.sub("", md)
+    for b in blocks:
+        content = (b.get("block_content") or "").strip()
+        if not content:
+            empty += 1
+            continue
+        if _WS_RE.sub("", content) in norm_md:
+            already += 1
+            continue
+        to_append.append(content)
+        applied += 1
+    if to_append:
+        md = md.rstrip() + "\n\n" + "\n\n".join(to_append)
+    meta = {"outcome": "ok", "blocks_total": len(blocks), "blocks_applied": applied,
+            "blocks_already_present": already, "blocks_empty": empty}
+    return md, meta
 
 
 def _strip_gateway_image_refs(md: str) -> str:
@@ -230,31 +249,6 @@ def run_paddle_gateway(pdf_bytes: bytes, filename: str,
 
     gw2_enabled = os.environ.get("KBP_GW_IMAGE_OCR_ENABLE", "1") != "0"
 
-    def _needs_gw2(layout: list, page_size) -> tuple[bool, str]:
-        """§A.2/A.3 — (트리거여부, 사유) — 사유는 항상 채워서 gw2_meta 로그에 남긴다
-        (2026-08-18 사용자 지시 — "왜 gw2가 안 불렸는지 로그에 없다").
-
-        실측(같은 문서, 이미지가 표 셀 안에 40~60개 있던 사고 케이스): 게이트웨이
-        layout 이 그 사진들을 개별 image/figure 블록으로 안 내고 **table 블록 하나에
-        통째로 흡수**한다 — `_IMAGE_TRIGGER_LABELS` 라벨 매칭이 구조적으로 못 잡는 경우가
-        실재한다. 그래서 라벨 유무와 무관하게 **사유를 항상 남겨서** 이런 사각지대가
-        조용히 지나가지 않게 한다(트리거 로직 자체는 유지 — 사유 노출이 이번 변경).
-
-        대형 이미지류 블록(면적≥`KBP_VL_VISUAL_MIN_AREA`)이 있으면 기존
-        `_hybrid_scan_pages` 전면VL교체가 처리하므로 gw2 는 스킵. 그런 대형 블록은 없지만
-        `_IMAGE_TRIGGER_LABELS` 블록이 하나라도 있으면 gw2 트리거.
-        """
-        if not layout:
-            return False, "no_layout"
-        from parse_service.parsers.pdf import _contributes  # lazy — 순환 회피 겸 명시적
-        counters: dict = collections.Counter()
-        if any(_contributes(b, page_size, counters, labels=_IMAGE_TRIGGER_LABELS) for b in layout):
-            return False, "skipped_large_block_delegated_to_hybrid_vl"
-        if any((b.get("block_label") or "").strip().lower() in _IMAGE_TRIGGER_LABELS
-               for b in layout):
-            return True, "triggered"
-        return False, "skipped_no_image_labeled_blocks_in_layout"
-
     def one(rp, probe: bool = False) -> tuple[int, list, list, tuple | None, str, str, dict | None, float | None]:
         """(page_number, blocks, layout, page_size, status, error, gw2_meta, elapsed_ms) —
         **8-key 계약**(2026-08-18 — elapsed_ms 추가, 이전 7-key: ...gw2_meta까지).
@@ -278,8 +272,15 @@ def run_paddle_gateway(pdf_bytes: bytes, filename: str,
         """
         name = f"page-{rp.page_number}.jpeg"
         _t0 = time.perf_counter()
+        # 2026-08-18 재설계: gw1/gw2 이원화 폐지 — 항상 1회만 호출한다. 옵션 포함 호출은
+        # 옵션 없는 호출과 비용이 동일함이 실측됐고(이미지 블록 없는 페이지: 25.34s vs
+        # 23.87s, md 완전 동일), 대형 블록(≥5%)의 전면 VL 교체 라우팅은 `layout`/`bbox`가
+        # 옵션과 무관하게 동일함이 실측으로 확인돼(`_hybrid_scan_pages`가 독립적으로 처리)
+        # 이원화의 존재 이유(비용 절감)가 성립하지 않았다.
+        opts = ({"use_ocr_for_image_block": True, "use_chart_recognition": True}
+                if gw2_enabled else None)
         try:
-            md, layout, page_size = _post_page(rp.jpeg, name)
+            md, layout, page_size = _post_page(rp.jpeg, name, opts=opts)
         except Exception as exc:  # noqa: BLE001
             if probe:
                 raise  # 첫 페이지 실패 = 게이트웨이 불능 → 레인 포기(즉시 폴백)
@@ -288,32 +289,11 @@ def run_paddle_gateway(pdf_bytes: bytes, filename: str,
             return (rp.page_number, [], [], None,
                     "error", f"{type(exc).__name__}: {str(exc)[:200]}", None, elapsed_ms)
 
-        # gw2_meta 는 **항상** 채운다(2026-08-18 사용자 지시) — 트리거 안 됐어도 왜
-        # 안 됐는지가 로그(page_traces.attempts)에 남아야 한다. 이전엔 트리거 안 되면
-        # `None`이라 아무 흔적도 안 남았다.
-        needs_gw2, gw2_reason = _needs_gw2(layout, page_size)
-        if not gw2_enabled:
-            gw2_meta = {"outcome": "skipped", "reason": "disabled_by_env"}
-        elif not needs_gw2:
-            gw2_meta = {"outcome": "skipped", "reason": gw2_reason}
+        if gw2_enabled:
+            md, gw2_meta = _apply_gw2_block_content(md, layout)
         else:
-            # §A.3 — 2차 호출은 자체 try/except로 격리한다. 실패해도 1차 결과(md/layout/
-            # page_size/status)는 그대로 유지 — 불필요한 전면 VL 재변환(demoted_pnos)을
-            # 유발하지 않는다.
-            try:
-                md2, layout2, page_size2 = _post_page(
-                    rp.jpeg, name,
-                    opts={"use_ocr_for_image_block": True, "use_chart_recognition": True})
-                md, layout, page_size = md2, layout2, page_size2
-                gw2_meta = {"outcome": "ok"}
-            except Exception as exc:  # noqa: BLE001
-                log.warning("paddle_gw gw2 page %d failed (%s): %s",
-                            rp.page_number, filename, exc)
-                gw2_meta = {"outcome": "error", "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
-
-        if gw2_meta.get("outcome") == "ok":
-            md = _splice_gw2_block_content(md, layout)
-        md = _strip_gateway_image_refs(md)   # 미해석 이미지 참조 제거(gw2 실패/비활성/미매칭 시 폴백망)
+            gw2_meta = {"outcome": "disabled_by_env"}
+        md = _strip_gateway_image_refs(md)   # 항상 마지막에 — 미해석/미반영 이미지 참조 제거
         blocks = hybrid_to_blocks(md, page_idx=rp.page_number)
         elapsed_ms = round((time.perf_counter() - _t0) * 1000, 1)
         return rp.page_number, blocks, layout, page_size, "ok", "", gw2_meta, elapsed_ms
