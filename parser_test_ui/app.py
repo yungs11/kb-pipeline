@@ -186,24 +186,26 @@ def _render_result(result: dict[str, Any]) -> str:
         parts.append(_page_traces_table(traces))
 
     if result.get("chunk_needed") is False:
+        # parse-svc excel RouteResult.chunks 실측 스키마(8600 excel-parser 자체 청크
+        # 스키마와 다르다): chunk_index/text/titles_context/pages — chunk_type/sheet/
+        # path/content_text 아님.
         chunks = result.get("chunks") or []
-        counts: dict[str, int] = {}
-        for c in chunks:
-            counts[c.get("chunk_type", "")] = counts.get(c.get("chunk_type", ""), 0) + 1
         parts.append(_gate_banner(result.get("gate_summary")))
-        parts.append(f"<p>{len(chunks)} 청크 | {_escape(str(counts))}</p>")
+        parts.append(f"<p>{len(chunks)} 청크</p>")
         rows = []
-        for i, c in enumerate(chunks):
-            path = " &gt; ".join(_escape(p) for p in (c.get("path") or []))
-            content = _escape(c.get("content_text") or "")
+        for c in chunks:
+            idx = c.get("chunk_index", "")
+            titles = " &gt; ".join(_escape(str(t)) for t in (c.get("titles_context") or []))
+            pages = ", ".join(str(p) for p in (c.get("pages") or []))
+            content = _escape(c.get("text") or "")
             rows.append(
-                f"<tr><td>{i}</td><td>{_escape(c.get('chunk_type', ''))}</td>"
-                f"<td>{_escape(c.get('sheet', '') or '')}</td>"
-                f"<td>{path}</td><td><pre style='margin:0;white-space:pre-wrap'>{content}</pre></td></tr>"
+                f"<tr><td>{_escape(str(idx))}</td><td>{titles}</td>"
+                f"<td>{_escape(pages)}</td>"
+                f"<td><pre style='margin:0;white-space:pre-wrap'>{content}</pre></td></tr>"
             )
         parts.append(
             "<table border='1' cellpadding='4' style='border-collapse:collapse;font-size:13px;width:100%'>"
-            "<tr style='background:#eee'><th>#</th><th>type</th><th>sheet</th><th>path</th><th>content</th></tr>"
+            "<tr style='background:#eee'><th>#</th><th>titles_context</th><th>pages</th><th>content</th></tr>"
             + "".join(rows) + "</table>"
         )
     else:

@@ -103,8 +103,8 @@ def test_excel_success_renders_chunk_table_and_gate_banner(client):
         if url.endswith("/jobs/job-excel-1/result"):
             return _FakeResponse(200, {
                 "chunk_needed": False,
-                "chunks": [{"chunk_type": "table", "sheet": "Sheet1",
-                           "path": ["Sheet1"], "content_text": "a,b,c"}],
+                "chunks": [{"chunk_index": 0, "titles_context": ["Sheet1"],
+                           "pages": [], "text": "a,b,c"}],
                 "gate_summary": {"sheets": [{"sheet": "Sheet1", "findings": [
                     {"code": "ref_error", "detail": "REF!", "cells": ["A1"]},
                 ]}]},

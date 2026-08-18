@@ -204,11 +204,12 @@ log "요약"
 "${COMPOSE[@]}" ps 2>/dev/null | tail -n +1 || true
 cat <<EOF
 
-파싱 배치 전용 구성(5개)으로 기동했습니다.
+파싱 배치 전용 구성(6개)으로 기동했습니다.
   잡 제출:   curl -sS -H "X-Facade-Key: \$KBP_FACADE_KEY" -F file=@문서.pdf -F filename=문서.pdf \\
                http://localhost:${FPORT}/parse
   ※ 응답은 파싱 결과(동기 대기) 또는 잡 참조다 — facade 계약은 docs/facade-api.md 참고.
   parse-svc 직접 호출(잡 큐 없이 동기 파싱)도 가능하다(compose 의 parse-svc ports 참고).
+  PARSER 테스트 UI(무인증):  http://localhost:8601/
 
 빠진 서비스: edgequake / adaptive_chunk / doc_guard / edgequake_webui
   → 청킹(/chunk)·적재(/insert)·검색(/search)·엑셀게이트(/gate)는 이 구성에서 동작하지 않는다.
