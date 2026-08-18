@@ -1619,3 +1619,83 @@ no-op, 프리뷰로 올린 이미지 파일이 admin 파서 로그 화면(`docum
 (`test_parser_ocr.py`) green.
 
 **검증**: kb-pipeline `parse_service/tests/` 전체 464 passed·2 skipped(신규 실패 0).
+
+## 폐쇄망(airgap) 번들 최신화 + 기존 DB 마이그레이션 검증 (2026-08-18)
+
+plan: `~/.claude/plans/concurrent-soaring-mango.md`(v7 READY, ultracode 8라운드 —
+kbp/kb 각 레포 별개 스캐치 project 로 라이브 데이터 무변경 검증). 사용자 요청: 위
+이미지 경로 누출 방지 최신소스로 kbp/kb 폐쇄망 번들 재생성 + 기존 DB 데이터 위
+마이그레이션 안전성 + 이번 수정범위 실동작 확인.
+
+**번들 재생성**: `build-all-bundles.sh`로 kbp-full·kbp-parse-only 재생성(kb 는
+`build-bundle.sh` 단독, 소스가드가 origin 기준이라 아래 이유로 `SKIP_GIT_GUARD=1`
+사용). 3개 번들 다 `verify-bundle.sh --images --imports` 통과(신규 gw2/odl/
+ocr-trace import 스모크 포함).
+
+**§B verify-bundle.sh 보강**: `check_env()`에 `KBP_ODL_IMAGE_VL_MIN_AREA`(0~1
+float)/`KBP_ODL_IMAGE_COUNT_VL_ESCALATE`(양의 정수) 타입가드 추가(위반 시 명확한
+사유로 실패, happy/negative path 둘 다 직접 실행 확인) + `check_imports()`에
+parse-svc 이미지 안에서 `_splice_gw2_block_content`/`replace_image_refs`/
+`find_image_refs`/`summarize_odl_image`/`_page_traces_for_ocr` import 스모크 추가.
+
+**기존 스크립트 버그 2건 발견·수정**(이번 세션 변경과 무관한 기존 버그, 검증 과정에서
+실측 발견): (1) `pg-backup.sh:112` 임시 컨테이너 마운트 경로가 `/var/lib/postgresql`
+였는데 실제 라이브 마운트 규약은 `/var/lib/postgresql/data` — PG_VERSION을 못 찾고
+빈 클러스터를 initdb해 "성공"처럼 보이는 빈 dump를 냈다. (2) `pg-backup.sh`/
+`pg-restore.sh`의 `find_ctr()`가 컨테이너를 못 찾으면 `set -e` 아래서 스크립트가
+조용히 죽어 자체 폴백/에러메시지 분기가 죽은 코드였다. 디스포저블 볼륨 복사본으로
+수정 검증(WAL crash-recovery 후 실제 25 workspaces 정상 조회).
+
+**postgres pg16→pg18 드리프트 실측 확인**: 라이브 `kbp-postgres-1`은 pg16.14(2개월
+전 이미지, `:latest` 로컬 캐시 미갱신)인데 현재 `kbp-postgres:airgap`(digest 핀)는
+pg18.4로 이미 드리프트돼 있었다. 이번 세션에서 재설계하지는 않음(비범위, 기존
+pg-backup/restore/upgrade.sh 체인의 존재 이유) — 다만 §D의 pg_dump/pg_restore(논리
+복원)는 이 방향(구버전→신버전 업그레이드)을 정상 지원해 마이그레이션 검증 자체는
+문제없이 통과했다.
+
+**§D 스캐치 마이그레이션 검증**(`COMPOSE_PROJECT_NAME=kbp-migtest`/`kb-migtest`,
+`docker-compose.airgap.migtest-override.yml`로 호스트 포트 전부 `!reset []` —
+일반 `ports: []`는 다중파일 병합에서 base와 합집합돼 실제로는 안 지워짐, 실측 확인):
+kbp(`docker exec kbp-postgres-1 pg_dump` → 스캐치 postgres+edgequake 기동 →
+`pg-restore.sh`) — `public._sqlx_migrations.max(version)`=38·`public.workspaces`
+25/25·`public.documents` 58/58 라이브와 완전 일치, edgequake health의
+`migrations_applied`=37도 일치. kb(같은 방식 덤프 → 스캐치 `db`만 먼저 기동 →
+`pg_restore` → 그 뒤에만 `api`/`worker` 기동해 alembic이 이미 채워진 스키마 위에서
+돌게 함) — `alembic_version`=`896d2d09993d`(head), `documents` 199/199·
+`document_pages` 110/110 완전 일치. **라이브 스택 데이터는 전 과정에서 변화 없음**
+(읽기전용 dump만 사용, 스캐치는 별도 project/볼륨).
+
+**부수 발견(이번 변경과 무관, 사용자 결정 필요 — 데이터 정리는 하지 않음)**:
+kb_orchestrator의 `chunks_meta`에 **라이브에도 이미 147개 orphan 행**(document_id가
+`documents`에 없음)이 있다 — FK는 `validated=true`인데 존재한다. pg_restore가 데이터
+자체(199 documents/12027 chunks_meta, 라이브와 완전 일치)는 다 복원하지만 이
+orphan 때문에 그 FK 제약(`chunks_meta_document_id_fkey`)만 재생성 실패한다. 실제
+재해로부터 복구할 때 이 제약 없이 복원될 수 있다는 뜻 — 근본 원인 불명(어떤 삭제
+경로가 CASCADE를 우회했는지), 데이터 정리 여부는 사용자 결정 필요.
+
+**§E 번들 이미지로 실동작 확인**(스캐치 스택 안에서 `docker exec curl`로 프로그램적
+확인, 호스트 포트 불필요): (1) PDF(`AI페르소나만들기.pdf`, header_image 블록 있음) —
+`enriched_content`에 `imageFile`/`.png`/`.jpg` 패턴 잔존 0건, page 1 `gw2` outcome=ok
+(실제 splice 확인, 200 OK 530초). (2) jpg(`test.jpg`) — parse-svc가
+`page_traces=[{lane:"vl_ocr_direct",...}]` 생성 → kb-migtest(같은 `KBP_NETWORK`로
+kbp-migtest_kbp에 연결)에 실제 JWT로 `/documents/parse-preview` 업로드 →
+`/admin/parser-logs/documents`에 정상 노출 + **일반 문서목록(`GET /kb/{id}/
+documents`)에는 안 뜸**(같은 세션에서 고친 프리뷰-노출 버그도 번들에서 재확인).
+과정에서 스캐치 MinIO 버킷(`document-parser`)이 없어 500 — `load-and-up.sh`가
+정상 경로에서 만드는 단계를 개별 기동이라 건너뛴 것뿐(코드 버그 아님, 정식 배포
+절차 `load-and-up.sh`를 그대로 쓰면 발생 안 함).
+
+**kb 레포 push 관련**: `build-bundle.sh`의 소스가드는 로컬 브랜치가 추적하는
+**설정된 upstream**(`origin`, GitHub)과의 동기화를 본다 — kb-front(사내
+`st-devtool.duckdns.org`) 전용 fallback이 아니다. 사용자 결정으로 origin에는
+push하지 않기로 해서, kb 번들 빌드는 `SKIP_GIT_GUARD=1`로 우회했다(kb-front에는
+정상 push 완료, ahead/behind=0/0). origin 동기화 전까지는 이 우회가 계속 필요하다.
+
+**정리**: 스캐치(kbp-migtest·kb-migtest) 전부 `down -v` 후 컨테이너/볼륨/네트워크
+잔여 0건 확인. 라이브 `kbp-postgres-1` 안 임시 덤프파일도 삭제.
+
+**남은 것**: (1) kb_orchestrator orphan 147건 — 사용자 결정 필요(정리 여부).
+(2) kb 레포 origin 동기화 — push 하거나 build-bundle.sh 소스가드 정책 재검토.
+(3) `_needs_gw2`(paddle_gw 내부 로컬 함수)처럼 향후 신규 함수를 추가할 때
+verify-bundle.sh import 스모크 목록에 모듈 최상위 심볼만 넣도록 유의(1라운드에서
+실제로 이 실수가 났었음).
