@@ -1699,3 +1699,46 @@ push하지 않기로 해서, kb 번들 빌드는 `SKIP_GIT_GUARD=1`로 우회했
 (3) `_needs_gw2`(paddle_gw 내부 로컬 함수)처럼 향후 신규 함수를 추가할 때
 verify-bundle.sh import 스모크 목록에 모듈 최상위 심볼만 넣도록 유의(1라운드에서
 실제로 이 실수가 났었음).
+
+## 이미지파서 로그 — 페이지별 처리시간(processing_ms) 노출 (2026-08-18)
+
+plan: `~/.claude/plans/concurrent-soaring-mango.md`(v4 READY, ultracode 4라운드).
+사용자 요청: "이미지 파서 로그에 처리시간도 UI에서 보이게 할 수 있나?" → 페이지별
+처리시간까지 요청.
+
+**계측 신설**(이전엔 페이지 단위 시간이 전혀 없었음): `vl_api.VLCallMeta.to_dict()`에
+`elapsed_ms` 추가(VL 예외/실패 경로도 `time.perf_counter()`로 감싸 elapsed를 남기도록
+보강 — 안 그러면 "시도했다 실패"와 "애초에 시도 없음"이 둘 다 `processing_ms=None`으로
+뭉개짐, ultracode 검증에서 실측 발견). `paddle_gw.one()` 7-key→8-key 계약 확장
+(`elapsed_ms`, gw+gw2 총 소요). `pdf/__init__.py`의 page_traces 조립 루프가 그 페이지
+attempts 안의 `elapsed_ms`를 합산해 `processing_ms`를 낸다 — **주 경로(paddle_gw "gw",
+VL "vl") 두 개만** 잰다(hybrid_vl/폴백 체인은 비범위). thin-ODL 페이지(lane="odl" 유지,
+VL 트랜스크립션 거침)는 값이 채워지고, gw/vl 시도가 아예 없는 순수 ODL/skip 페이지만
+`None`이다 — "ODL 레인 = 항상 None"이 아니라는 게 ultracode 검증에서 정정된 지점.
+이미지/pptx 도메인(`ocr/__init__.py`)도 `call_metas`를 `parse()`까지 끌어올려 동일하게
+반영.
+
+**ODL 대체 표시**(사용자 결정, plan v2→v3): gw/vl 시도가 없어 `processing_ms=None`인
+페이지는 **문서 전체 파싱시간**(`chunking_selection.stage_timings.stages.parse.total_ms`
+— 주의: `stage_timings.parse_ms`가 아니다, 실제 경로는 `stages.parse.total_ms`,
+구현 중 실측으로 정정)으로 대체 표시("{ms} (문서 전체)"). knowledge_base 쪽
+`AdminDocumentItem/Detail`에 `chunking_selection` 필드 추가, `ParsingLanesCard`에
+`documentParseMs` prop + "처리시간" 열, 호출부 3곳(admin/parser-logs, 문서상세
+풀페이지+모달) 배선. 프리뷰 전용 문서는 `chunking_selection` 자체가 없어 자연히
+"—"로 폴백(정상, 별도 분기 불필요).
+
+**DB**: `document_pages.processing_ms`(Integer, nullable) 신규 컬럼, alembic
+`c76ffd2f8374`(head `896d2d09993d`의 자식 — v1 초안이 `b4c6e8f0a2d4`를 잘못 지목했다가
+ultracode 1라운드에서 정정됨). `upgrade head`/`downgrade -1`/재-`upgrade head` 왕복
+실제 실행 확인.
+
+**검증**: kb-pipeline `parse_service/tests/` 468 passed·2 skipped(신규 실패 0).
+kb-backend 686 passed·15 failed(기존 baseline red, 무관 확인 — test_pipeline*/
+test_job_status* 등, 이번 변경 파일과 겹치지 않음). 프론트 `tsc --noEmit`/`next lint`
+clean. **실동작 확인**(호스트 dev, 실제 파싱): PDF(`AI페르소나만들기.pdf`, 16페이지
+전부 paddle_gw) 각 페이지 `processing_ms` 정상 기록(게이트웨이 혼잡으로 페이지당
+43~155초 — 오늘 세션 내내 관측된 외부 게이트웨이 지연과 일치, 코드 문제 아님).
+jpg(`I10.jpg`) — parse-svc 직접 호출과 kb-backend parse-preview 경유(실제 JWT
+인증) 둘 다 확인, `admin/parser-logs` API 응답에 `processing_ms` 값(13810)이
+끝까지 흘러들어옴을 실측 확인. 브라우저 픽셀 단위 시각 확인은 생략(데이터 흐름
+전 구간 실측 + 타입체크로 대체).
