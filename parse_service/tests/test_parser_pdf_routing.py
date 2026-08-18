@@ -992,7 +992,7 @@ def test_chain_on_gateway_unavailable_is_not_fatal(wire, monkeypatch):
     wire["set_gw"](RuntimeError("KBP_PADDLE_OCR_GATEWAY_URL 미설정"))
     res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
     assert res.page_traces[0]["source"] == "native_fallback", "체인이 다음 단계로 이어져야 한다"
-    assert any(a[0] == "gw" and a[1] == "lane_unavailable"
+    assert any(a[0] == "gw_fallback" and a[1] == "lane_unavailable"
                for a in res.page_traces[0]["attempts"])
 
 
@@ -1012,7 +1012,7 @@ def test_chain_on_gw_page_cap_limits_fallback(wire, monkeypatch):
     res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
     assert wire["gw_calls"] == [(1, 2)], f"앞 2장만 보낸다: {wire['gw_calls']}"
     over = [t for t in res.page_traces
-            if any(a[0] == "gw" and a[1] == "over_cap" for a in t["attempts"])]
+            if any(a[0] == "gw_fallback" and a[1] == "over_cap" for a in t["attempts"])]
     assert {t["page_number"] for t in over} == {3, 4}
 
 
@@ -1033,14 +1033,9 @@ def test_chain_on_md_fallback_folds_leader_dots(wire, monkeypatch):
 
 
 def test_gw_stage_recorded_for_gateway_lane(wire):
-    """게이트웨이 시도가 `attempts` 에 남는다 — 이전엔 stage 어휘에 `gw`/`gw2` 가 없었다.
-
-    2026-08-19: gw1/gw2 이원화 폐지 이후 `gw`·`gw2` 두 줄로 남던 것을 한 줄(`gw2`)로
-    합쳤다(사용자가 "여전히 두 번 부르나?"로 오해 — 실은 같은 1회 호출 결과다)."""
+    """게이트웨이 시도가 attempts 에 gw 스테이지 하나로 남는다."""
     wire["set_gate"](_decision({1: "paddle_gw"}))
     wire["set_gw"]([{"page_number": 1, "blocks": [{"type": "text", "text": "스캔"}],
                      "layout": [], "page_size": None, "status": "ok"}])
     res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
-    assert any(a[0] == "gw2" and a[1] == "ok" for a in res.page_traces[0]["attempts"])
-    assert not any(a[0] == "gw" for a in res.page_traces[0]["attempts"]), \
-        "더 이상 별도 gw 줄은 안 남는다 — gw2 하나로 합쳐짐"
+    assert any(a[0] == "gw" and a[1] == "ok" for a in res.page_traces[0]["attempts"])

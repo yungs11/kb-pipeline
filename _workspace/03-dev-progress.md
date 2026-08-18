@@ -1800,3 +1800,60 @@ opts 유무와 무관하게 완전 동일함을 새 코드로 재검증 True, (b
 `KBP_GW_IMAGE_OCR_ENABLE=0` — 옵션 없이 1회만 호출, `gw2_meta.outcome=="disabled_by_env"`,
 `block_content` 미반영 확인. 폐쇄망 가드(`_apply_gw2_block_content` import) 로컬
 스모크 통과.
+
+**추가 정정(2026-08-19)**: 위 아키텍처 결정(이원화 폐지, 항상 1회 호출, 내부 필드명
+`gw2_meta`)은 그대로다 — 바뀐 건 **attempts 로그에 찍히는 표시 문자열**뿐이다.
+"gw:ok → gw2:ok" 두 줄을 한 줄로 합친 결과가 여전히 `"gw2"`라는 라벨을 쓰고 있어
+"아직도 두 번 부르나?" 오해가 반복됐다 — `parse_service/parsers/pdf/__init__.py`의
+그 병합 호출 라벨을 `"gw"`로 바꿨다(로직·아키텍처 결정 불변, 문자열만). 동시에 이
+파일의 별개 경로(VL 실패 후 게이트웨이 폴백, `meta={"fallback": True}`)가 이미
+`"gw"` 라벨을 쓰고 있어 충돌 — 그 경로는 `"gw_fallback"`으로 이름을 바꿔 구분했다.
+
+## knowledge_base — PARSER 테스트 메뉴 신설 + 메뉴 순서 조정 (2026-08-19)
+
+plan: `~/.claude/plans/concurrent-soaring-mango.md`(v6 READY, ultracode 4라운드).
+관리자 전용 새 메뉴 "PARSER 테스트"(엑셀파서/이미지파서 라디오) — 실제 KB 적재 없이
+facade `/parse`만 태워보는 수동 테스트 도구. "이미지파서 로그" 메뉴는 그대로 두고
+순서만 위로 옮겼다(서브탭 중첩 아님 — 사용자가 계획 승인 단계에서 범위를 명확히
+정정: 8600처럼 결과만 보여주면 되고, doc_guard 실호출도 불필요, 메뉴도 최상위
+순서조정일 뿐).
+
+**doc_guard는 실제로 호출하지 않는다**(사용자 결정 — "룰은 어차피 파서에서 만드니") —
+parse-svc의 엑셀 경로가 이미 `compute_gate_summary`를 in-process로 호출해 만든
+`gate_summary`를 그대로 돌려주고, 프론트가 `~/workspace/7.excel-parser/scripts/
+parse_ui.py`(8600 테스트 화면)의 `_RULE_LABELS`/`_gate_banner` 로직을 그대로 포팅해
+로컬 렌더링한다(`ExcelParserTestPanel.tsx`).
+
+**facade `/parse`가 프로덕션 문서 적재와 같은 전역 4-슬롯 세마포어를 공유**한다는
+사실이 ultracode adversarial 렌즈에서 발견돼(`service/jobs/api.py:44-60` `_WAITERS`,
+`_legacy_job`), 새 라우터(`backend/app/routers/parser_test.py`)에 3중 완화책을
+넣었다: (1) kb-backend 레벨 동시성 1건 제한(`asyncio.Semaphore(1)` — non-blocking
+acquire가 없어 `.locked()`로 진입 전 검사해야 "즉시 429"가 된다는 걸 검증 라운드에서
+잡음), (2) 업로드 크기 15MB 상한, (3) `DocGuardClient.parse_file` 타임아웃 300s로
+축소. MinIO(`document-parser`, dify/edgequake와 공유하는 프로덕션 버킷)에 표식 없이
+페이지 이미지가 쌓이는 문제도 검증에서 잡혀 `docs_id`를 `admtest-` 접두 무작위값으로
+명시(GC는 비범위 — 별도 요청된 "파싱 캐시 GC" 기능과 합쳐질 영역).
+
+**UTF-16 vs 코드포인트 오프셋 불일치**(ultracode logic-correctness 렌즈 발견): 이미지
+파서 화면이 페이지별 텍스트를 보여주려면 `page_spans`(Python 코드포인트 단위 오프셋)
+로 `enriched_content`를 잘라야 하는데, 프론트(JS, UTF-16 코드유닛)에서 slice하면
+서로게이트페어 문자(이모지, CJK 확장한자 등) 하나만 있어도 이후 페이지 전부 오프셋이
+틀어진다 — 백엔드가 오프셋을 만든 것과 같은 언어(Python)에서 미리 잘라
+`pages[].text`로 내려주도록 설계해 이 문제 자체를 없앴다.
+
+**동기 httpx 호출 → async 라우터 이벤트루프 블로킹**(ultracode adversarial 렌즈
+2라운드 발견): `DocGuardClient.parse_file`이 기존 동기 `httpx.Client` 기반(최대
+300초)인데 `async def` 라우터에서 직접 부르면 그 시간 동안 kb-backend 프로세스의
+이벤트루프 전체가 멈춘다 — `run_in_threadpool`로 감쌈(이 백엔드에 기존 사용례 없는
+신규 도입 패턴).
+
+**검증**: kb-pipeline `parse_service/tests/` 473 passed(신규 실패 0, gw/gw_fallback
+라벨 갱신 포함). knowledge_base backend 695 passed·15 failed(기존 baseline red,
+`test_pipeline*`/`test_job_status*` 등 — 이번 변경 파일과 겹치지 않음, 신규 테스트
+9건 전부 포함해 green). frontend `tsc --noEmit`/`eslint` clean. **실동작 확인**
+(호스트 dev, 실제 facade+parse-svc+MinIO): 실제 xlsx(위임전결기준표, 425청크)로
+엑셀파서 화면 테스트 — `gate_summary`에 실제 findings(`conflicting_code_mapping`)
+확인, `docs_id`가 `admtest-` 접두로 나옴. 실제 스캔 이미지(I10.jpg)로 이미지파서
+화면 테스트 — MinIO에 페이지 이미지 업로드 확인, `pages[].text`에 실제 한글 본문
+정상 병합, `/obj/{minio_object}`로 이미지 200 서빙 확인. 인증(401 무토큰/403
+non-developer) 확인.

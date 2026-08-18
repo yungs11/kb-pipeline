@@ -761,21 +761,22 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
         #    (quarantine 의 `hybrid_vl` 이 제외되는 것과 같은 이유).
         # 2026-08-19: gw1/gw2 이원화 폐지(단일 호출 재설계) 후에도 여기서 `gw`·`gw2`
         # 두 줄을 남기면 사용자가 "여전히 두 번 부르나?"로 오해한다(실사용 보고) — 아래
-        # 루프가 한 줄(`gw2`)로 합쳐서 남긴다.
+        # 루프가 한 줄로 합쳐서 남긴다. 표시 라벨은 `gw2`가 아니라 `gw`다(2026-08-19
+        # 재정정 — 이건 표시 라벨만 바꾸는 것이고 위 이원화 폐지 결정 자체는 안 바뀐다).
         for _n in sorted(paddle_pnos):
             _pg = gw_by_pno.get(_n)
             if _pg is None:
-                _att(_n, "gw2", "no_result")
+                _att(_n, "gw", "no_result")
             else:
                 # 2026-08-19: gw/gw2 이원화 폐지(단일 호출 재설계) 후에도 로그는
                 # "gw:ok → gw2:ok" 두 줄로 남아 사용자가 "아직도 두 번 부르나?"로
                 # 오해했다 — 실은 같은 1회 호출의 결과를 두 단계로 나눠 기록한 것뿐이라
-                # 한 줄(`gw2`)로 합친다. `elapsed_ms`(processing_ms 합산용)는 계속 담는다.
+                # 한 줄(`gw`)로 합친다. `elapsed_ms`(processing_ms 합산용)는 계속 담는다.
                 _meta = {"error": _pg.get("error"), "blocks": len(_pg.get("blocks") or ()),
                          "elapsed_ms": _pg.get("elapsed_ms")}
                 _gw2_meta = _pg.get("gw2_meta") or {}
                 _meta.update({k: v for k, v in _gw2_meta.items() if k != "outcome"})
-                _att(_n, "gw2", _gw2_meta.get("outcome") or _pg.get("status") or "ok", _meta)
+                _att(_n, "gw", _gw2_meta.get("outcome") or _pg.get("status") or "ok", _meta)
 
     # ── 4) VL 전사 대상 = thin odl ∪ 강등 paddle. 300dpi 1회 렌더 + 배치 호출 ──
     def _md(pno: int) -> str:
@@ -923,13 +924,13 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
             log.warning("VL 예산 소진 — 폴백 게이트웨이 건너뜀, %d페이지 (%s)",
                         len(need_gw), filename)
             for n in need_gw:
-                _att(n, "gw", "budget_exhausted", {"fallback": True})
+                _att(n, "gw_fallback", "budget_exhausted", {"fallback": True})
             need_gw = []
         if len(need_gw) > _fb_cap:
             log.warning("폴백 게이트웨이 대상 %d페이지 > 상한 %d — 앞 %d장만 (%s)",
                         len(need_gw), _fb_cap, _fb_cap, filename)
             for n in need_gw[_fb_cap:]:
-                _att(n, "gw", "over_cap", {"fallback": True})
+                _att(n, "gw_fallback", "over_cap", {"fallback": True})
             need_gw = need_gw[:_fb_cap]
         if need_gw:
             try:
@@ -938,7 +939,7 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
                         run_paddle_gateway(file_bytes, filename, page_numbers=set(need_gw))}
                 for n in need_gw:
                     pg_ = _got.get(n)
-                    _att(n, "gw",
+                    _att(n, "gw_fallback",
                          (pg_ or {}).get("status") or ("no_result" if pg_ is None else "ok"),
                          {"fallback": True, "error": (pg_ or {}).get("error")})
                     if pg_ and pg_.get("blocks"):
@@ -951,7 +952,7 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
                 #    던진다(paddle_gw.py). 안 잡으면 폴백을 켜는 순간 폐쇄망만 문서 전체 500.
                 log.warning("VL 폴백 게이트웨이 불가 — 체인 다음 단계로 (%s): %s", filename, exc)
                 for n in need_gw:
-                    _att(n, "gw", "lane_unavailable", {"fallback": True})
+                    _att(n, "gw_fallback", "lane_unavailable", {"fallback": True})
 
     # ── 5) 병합 ───────────────────────────────────────────────────────────────
     # `traces` 는 **별도 맵**이다 — `entry` dict(PageDoc 6-key 계약)에 키를 추가하면
