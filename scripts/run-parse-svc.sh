@@ -81,7 +81,7 @@ if [ -n "$KORDOC_PATH" ]; then
   export KORDOC_BIN="${KORDOC_BIN:-kordoc}"
 else
   echo "WARN: kordoc CLI 미발견 — 비-전결 xlsx 파싱이 \"*.md 를 찾을 수 없습니다\" 로 실패한다." >&2
-  echo "      npm i -g kordoc  또는 KORDOC_BIN 을 수동 지정할 것." >&2
+  echo "      npm i -g kordoc@4.9.0  또는 KORDOC_BIN 을 수동 지정할 것." >&2
 fi
 export KORDOC_MD_OUT="${KORDOC_MD_OUT:-/tmp/kordoc_md_out}"
 export EXCEL_PARSER_BACKEND="${EXCEL_PARSER_BACKEND:-auto}"

@@ -2,7 +2,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # parse-only-up.sh — [Phase B / 오프라인] **파싱 배치 전용** 축소 구성 기동
 #
-# 청킹·적재·검색 없이 **대량 파싱만** 돌리는 배포. 전체 스택(9개) 대신 5개만 띄운다:
+# 청킹·적재·검색 없이 **대량 파싱만** 돌리는 배포. 전체 스택(10개) 대신 6개만 띄운다:
 #
 #   parse-svc      실제 파싱 엔진
 #   facade         잡 접수 API (POST /parse → job_id)
@@ -13,6 +13,9 @@
 #   minio          ★ 잡 staging + 큰 payload/result 오프로딩.
 #                  **선택이 아니다** — 없으면 잡 접수 자체가 전면 실패한다
 #                  (실측: 버킷 미생성 시 /parse 가 NoSuchBucket 으로 500).
+#   parser-test-ui kb-backend/frontend 없이 facade 에 직접 붙는 무인증 테스트 화면
+#                  (:8601). 순수 테스트/데모 전용 — 무인증 오픈이라 실제 배치 워크로드와
+#                  공유하는 배포에 이 그대로 쓰지 말 것(plan §Non-goals).
 #
 # 빠지는 것: edgequake / adaptive_chunk / doc_guard / edgequake_webui
 #            (각각 적재·검색 / 청킹 / 엑셀게이트 / 그래프UI 용).
@@ -38,7 +41,7 @@ IMAGES_GLOB="$BUNDLE_ROOT/images"/kbp-*images-*.tar
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-300}"
 
 #: 파싱 배치에 필요한 서비스만. 순서는 의존 순(--no-deps 라 우리가 직접 지킨다).
-SERVICES=(postgres minio parse-svc facade facade-worker)
+SERVICES=(postgres minio parse-svc facade facade-worker parser-test-ui)
 
 log()  { printf '\n\033[1;36m▶ %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m! %s\033[0m\n' "$*"; }
@@ -99,7 +102,7 @@ fi
 [ -f "$BUNDLE_ROOT/.env" ] || {
   cp "$BUNDLE_ROOT/.env.airgap.example" "$BUNDLE_ROOT/.env"
   die ".env 를 생성했습니다. 파싱에 필요한 값을 채운 뒤 다시 실행하세요:
-     - KBP_FILECONVERT_URL/TOKEN  (docx·hwp·ppt·html 파싱에 필수)
+     - KBP_FILECONVERT_URL/TOKEN  (doc·ppt·pptx 파싱에 필수)
      - MODEL_API_URL/KEY          (이미지·스캔 VL-OCR)
      - KBP_OPENAI_*               (모달 보강 LLM)
      - MINIO_ACCESS_KEY/SECRET_KEY, POSTGRES_PASSWORD, KBP_FACADE_KEY"
@@ -125,7 +128,7 @@ log "야간 커뮤니티 배치 비활성(파서 전용 배포)"
 # ── 4) health 폴링 ────────────────────────────────────────────────────────────
 log "health 폴링 (상한 ${HEALTH_TIMEOUT}s)"
 deadline=$(( $(date +%s) + HEALTH_TIMEOUT ))
-for svc in postgres minio parse-svc facade; do
+for svc in postgres minio parse-svc facade parser-test-ui; do
   printf '  %-12s ' "$svc"
   while :; do
     cid="$("$ENGINE" ps -a --filter "label=com.docker.compose.service=${svc}" --format '{{.ID}}' | head -1)"

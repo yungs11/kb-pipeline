@@ -4,9 +4,9 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
       curl build-essential openjdk-21-jre-headless && rm -rf /var/lib/apt/lists/*
 ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
-# node + kordoc: docx/폴백 파서(parsers/docx) + excel_parser_rag kordoc 백엔드(Phase 2e).
+# node + kordoc: HWP/HWPX/DOCX 파서(parsers/docx) + excel_parser_rag 백엔드.
 RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm \
-    && rm -rf /var/lib/apt/lists/* && npm install -g kordoc
+    && rm -rf /var/lib/apt/lists/* && npm install -g kordoc@4.9.0
 ENV KORDOC_BIN=kordoc KORDOC_MD_OUT=/tmp/kordoc_md_out EXCEL_PARSER_BACKEND=auto
 RUN mkdir -p /tmp/kordoc_md_out
 # LibreOffice(Calc headless): 레거시 .xls(BIFF) → .xlsx 변환. openpyxl 은 BIFF 를 못 읽어

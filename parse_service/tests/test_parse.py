@@ -7,6 +7,7 @@ facade stays light. The ``/parse`` endpoint:
   * reports ``n_blocks`` and ``modal_spans:[{id, type, char_range}]`` so consumers
     know exactly where each 〈MODAL…〈/MODAL〉 atomic region sits.
 """
+import pytest
 from fastapi.testclient import TestClient
 
 from kb_pipeline.blockify import hybrid_to_blocks
@@ -465,6 +466,17 @@ def test_no_minio_yields_no_keys_but_keeps_page_metadata():
     assert all(pg["minio_object"] is None for pg in pages)
 
 
+def test_disable_page_image_upload_env_skips_upload_even_with_live_minio(monkeypatch):
+    """KBP_DISABLE_PAGE_IMAGE_UPLOAD=1 이면 MinIO 가 정상 연결돼도 페이지 이미지 업로드를
+    건너뛴다(2026-08-19, parser_test_ui/parse-only 배포용 — 잡 큐 blob 스토리지는 무관)."""
+    monkeypatch.setenv("KBP_DISABLE_PAGE_IMAGE_UPLOAD", "1")
+    m = _FakeMinio()
+    page_count, pages = _render_pages(None, m)
+    assert page_count == 3
+    assert all(pg["minio_object"] is None for pg in pages)
+    assert m.puts == [], "토글이 켜지면 put_page_image 자체를 호출하지 않는다"
+
+
 # ── 변환 진입 (run_parse 레벨, 2026-08-06) ──────────────────────────────────
 def _stub_route(svc, monkeypatch, sink):
     """router.route 를 가짜로 — 이 앵커는 parse_pages 없이 돌아 실제 ODL/JVM 을 타면 안 된다."""
@@ -497,9 +509,9 @@ def test_convert_feeds_both_consumers(monkeypatch):
                    for n in range(1, 8)]
     monkeypatch.setattr(svc, "_render_and_upload", capture)
 
-    out = svc.run_parse(b"HWPBYTES", "a.hwp", text_llm=None, vision_llm=None,
+    out = svc.run_parse(b"PPTXBYTES", "a.pptx", text_llm=None, vision_llm=None,
                         ocr_url="", excel_url="", docs_id="d")
-    assert sink["conv"] == "a.hwp", "변환이 1회 호출된다"
+    assert sink["conv"] == "a.pptx", "변환이 1회 호출된다"
     assert sink["route"] == (b"%PDF-conv", "a.pdf"), "라우팅이 변환 결과를 받는다"
     assert sink["render"] == (b"%PDF-conv", "a.pdf"), "페이지이미지도 같은 바이트·이름을 받는다"
     assert out["page_count"] == 7
@@ -519,6 +531,24 @@ def test_pdf_does_not_convert(monkeypatch):
     assert called == []
 
 
+@pytest.mark.parametrize("filename", ["a.hwp", "a.hwpx", "a.docx"])
+def test_kordoc_formats_do_not_convert(monkeypatch, filename):
+    """네이티브 kordoc 포맷은 원본 바이트·이름으로 라우팅하고 FileConverter를 안 탄다."""
+    import parse_service.app as svc
+    sink = {}
+    _stub_route(svc, monkeypatch, sink)
+    called = []
+    monkeypatch.setattr(svc.fileconvert, "convert_to_pdf",
+                        lambda fb, fn: called.append(fn) or b"%PDF-unexpected")
+    monkeypatch.setattr(svc, "_render_and_upload", lambda *a, **k: (1, []))
+
+    svc.run_parse(b"NATIVE", filename, text_llm=None, vision_llm=None,
+                  ocr_url="", excel_url="", docs_id="d")
+
+    assert called == []
+    assert sink["route"] == (b"NATIVE", filename)
+
+
 def test_convert_failure_is_parse_failed(monkeypatch):
     """ToolError 는 ParserError 서브클래스가 아니다 — 감싸지 않으면 internal_error 가 된다."""
     import pytest
@@ -529,7 +559,7 @@ def test_convert_failure_is_parse_failed(monkeypatch):
         raise ToolError("gateway down")
     monkeypatch.setattr(svc.fileconvert, "convert_to_pdf", boom)
     with pytest.raises(svc.FrontError) as ei:
-        svc.run_parse(b"HWP", "a.hwp", text_llm=None, vision_llm=None,
+        svc.run_parse(b"PPTX", "a.pptx", text_llm=None, vision_llm=None,
                       ocr_url="", excel_url="", docs_id="d")
     # 카테고리("parse_failed")만이 아니라 실제 예외 메시지도 실어야 한다(A6) —
     # 원인불명의 "결과가 비어있습니다" 로 소비측까지 정보가 사라지는 것을 막는다.

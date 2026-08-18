@@ -230,9 +230,9 @@ def _elements_to_pages(elements: list[dict]) -> list[dict]:
 
 
 def _page_traces_for_ocr(pages: list[dict], call_metas: list | None = None) -> list[dict]:
-    """이미지/pptx 도메인 page_traces(2026-08-18 사용자 지시 — "어떤 lane을 탔는지 로그가
-    없다"). PDF 처럼 triage/gate 레인 분기가 없어(§router.py — `IMAGE_EXTS`/pptx 전부
-    `ocr` 도메인 하나로 매핑, paddle_gw 미배선) 기록할 "선택"이 없다 — 그래서 매 페이지가
+    """이미지 도메인 page_traces(2026-08-18 사용자 지시 — "어떤 lane을 탔는지 로그가
+    없다"). PDF처럼 triage/gate 레인 분기가 없어(`IMAGE_EXTS`는 `ocr` 단일 도메인,
+    paddle_gw 미배선) 기록할 "선택"이 없다 — 그래서 매 페이지가
     항상 같은 단일 사실("vl_ocr_direct")을 남긴다. PDF 쪽 page_trace 딕셔너리 계약
     (`parsers/pdf/__init__.py`)과 키를 맞춰 admin 화면(knowledge_base)이 도메인 구분 없이
     렌더할 수 있게 한다.
@@ -258,7 +258,7 @@ def _page_traces_for_ocr(pages: list[dict], call_metas: list | None = None) -> l
             "lane": "vl_ocr_direct",
             "source": "vl" if bl else "empty",
             "attempts": [("route", "vl_ocr_direct",
-                          {"reason": "image_or_pptx_domain_single_path"})],
+                          {"reason": "image_domain_single_path"})],
             "chars": chars,
             "verdict": None,
             "state": None,
@@ -269,7 +269,9 @@ def _page_traces_for_ocr(pages: list[dict], call_metas: list | None = None) -> l
 
 
 def parse(file_bytes: bytes, filename: str, *, ocr_url: str | None = None) -> RouteResult:
-    """이미지 파일 → VL. **PAGE_HYBRID 프롬프트**(전사 + 시각 서술)를 쓴다.
+    """이미지 파일 → VL 직접 호출. PDF 변환·PDF triage·Paddle GW를 거치지 않는다.
+
+    **PAGE_HYBRID 프롬프트**(전사 + 시각 서술)를 쓴다.
 
     범용 전사 프롬프트(`build_user_prompt`)는 글자만 옮긴다 — 순서도·차트·아키텍처도
     이미지는 노드 라벨이 조각으로 흩어져 흐름·분기·계층이 사라진다(Plan A R2/R3 실측).

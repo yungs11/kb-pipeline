@@ -25,6 +25,7 @@ def test_inprocess_openpyxl_smoke(monkeypatch):
     wb.save(buf)
     res = excel_parser.parse(buf.getvalue(), "t.xlsx")
     assert res.chunk_needed is False and res.chunks
+    assert res.gate_summary["parser_backend"] == "openpyxl"
 
 
 def test_inprocess_uses_original_filename_as_document_title(monkeypatch):

@@ -24,10 +24,11 @@ log = logging.getLogger("kb_pipeline.parse_service.tools.fileconvert")
 # 검증할 수 없다. None 이면 httpx 기본 전송을 쓴다.
 _transport = None
 
-#: 명세 §3.1.3 지원 목록 ∩ (비-excel · 비-이미지 · 비-pdf · 비-html). **여기가 유일한 정의다.**
+#: PDF 변환이 필요한 포맷. HWP/HWPX/DOCX는 kordoc 네이티브 레인으로 이동했다.
+#: 구형 DOC는 kordoc 4.9.0 지원 목록에 없어서 PDF 변환에 남긴다.
 #: odt/odp/ods/rtf 는 명세에 없다 — 넣으면 원격 422 로 문서 전체가 실패한다.
 #: html/htm 은 2026-08-11 제외 — `parsers/html` 이 형변환 없이 처리한다(표 <table> 보존).
-CONVERTIBLE_EXTS = {"hwp", "hwpx", "doc", "docx", "ppt", "pptx"}
+CONVERTIBLE_EXTS = {"doc", "ppt", "pptx"}
 
 #: 변환도 파싱도 불필요한 평문. 그대로 블록화한다(router 의 text 도메인).
 #: csv 는 2026-08-11 엑셀 레인으로 이동(행 레코드 청크). xml 은 같은 날 편입 —

@@ -98,6 +98,84 @@ class FrontError(Exception):
         self.traces = traces
 
 
+_NATIVE_TRACE_LANES = {
+    # HTML은 추상 도메인명이 아니라 실제 변환 엔진을 로그에 드러낸다. MarkItDown은
+    # 제거됐고 현재 구현은 BeautifulSoup 전처리 + markdownify(표 원문 HTML 복원)다.
+    "html": ("markdownify", "markdownify_markdown"),
+    "kordoc": ("kordoc_native", "kordoc_markdown"),
+    "text": ("text_native", "plain_text"),
+    # 정상 PDF/OCR은 각 파서가 더 상세한 trace를 만든다. 아래 둘은 축퇴/레거시
+    # 경로에서 trace가 비었을 때 로그 화면에서 문서가 사라지지 않게 하는 안전망이다.
+    "pdf": ("odl", "odl_md"),
+    "ocr": ("vl_ocr_direct", "vl"),
+}
+
+
+def _trace_chars(blocks: list[dict]) -> int:
+    return sum(len((b.get("table_body") or b.get("text") or "")) for b in blocks or [])
+
+
+def _default_page_traces(
+    pages: list[dict], *, domain: str, extension: str, parse_ms: float,
+) -> list[dict]:
+    """상세 trace를 만들지 않는 도메인에 공통 관측 행을 보완한다.
+
+    native HTML/kordoc/text는 현재 논리 1페이지이므로 그 행에 전체 parser wall time을
+    기록한다. 혹시 여러 페이지인 축퇴 PDF 경로에는 문서 전체 시간을 페이지 시간으로
+    오인하지 않도록 ``processing_ms=None``으로 두고, 별도 ``timing_metrics.total_ms``를
+    문서 처리시간으로 쓴다.
+    """
+    lane, source = _NATIVE_TRACE_LANES.get(domain, (f"{domain}_native", domain))
+    one_page = len(pages or []) == 1
+    traces = []
+    for index, page in enumerate(pages or [], start=1):
+        blocks = page.get("blocks") or []
+        traces.append({
+            "page_number": page.get("page_number") or index,
+            "bucket": None,
+            "lane": lane,
+            "source": source if blocks else "empty",
+            "attempts": [["route", lane, {
+                "reason": f".{extension or 'unknown'} -> {lane}",
+                "extension": extension or None,
+            }]],
+            "chars": _trace_chars(blocks),
+            "verdict": None,
+            "state": None,
+            "verdict_reason": None,
+            "processing_ms": round(parse_ms, 1) if one_page else None,
+        })
+    return traces
+
+
+def _excel_trace(rr: RouteResult, *, extension: str, parse_ms: float) -> list[dict]:
+    backend = str((rr.gate_summary or {}).get("parser_backend") or "unknown").lower()
+    lane = f"excel_{backend}"
+    chunks = rr.chunks or []
+    return [{
+        # Excel은 페이지 모델이 아니라 문서 자체청킹 모델이다. document_pages 저장계약이
+        # 정수 식별자를 요구하므로 1번을 문서수준 logical trace id로 쓴다.
+        "page_number": 1,
+        "bucket": None,
+        "lane": lane,
+        "source": "excel_rag_parser",
+        "attempts": [["route", lane, {
+            "reason": f".{extension or 'unknown'} -> {lane}",
+            "extension": extension or None,
+            "backend": backend,
+        }]],
+        "chars": sum(len(c.get("text") or "") for c in chunks),
+        "verdict": None,
+        "state": None,
+        "verdict_reason": None,
+        "processing_ms": round(parse_ms, 1),
+    }]
+
+
+def _parser_total_ms(*values: float) -> float:
+    return round(sum(float(v or 0.0) for v in values), 1)
+
+
 # Locate each 〈MODAL id="X" type="Y"〉…〈/MODAL〉 atomic span in the enriched text.
 # The open marker carries id/type attributes (modal.py _open_marker); the close is
 # the literal MODAL_CLOSE. We use a non-greedy body so nested-free atomic spans map
@@ -169,7 +247,11 @@ def _render_and_upload(
     pages: list[dict] = []
     # 업로드가 한 번 실패하면 남은 페이지는 시도하지 않는다. 접속 불가일 때 페이지마다
     # 재시도하면 minio 라이브러리 백오프가 누적된다(실측: 7페이지에 50초 — 86페이지면 10분).
-    can_upload = minio is not None
+    # KBP_DISABLE_PAGE_IMAGE_UPLOAD=1 이면 MinIO 연결과 무관하게 업로드를 건너뛴다
+    # (2026-08-19, parser_test_ui/parse-only 배포용 — 잡 큐 blob 스토리지(입력파일/결과
+    # JSON)는 이 토글과 무관하게 그대로 동작한다, 페이지 이미지 업로드만 끈다).
+    can_upload = (minio is not None
+                  and os.environ.get("KBP_DISABLE_PAGE_IMAGE_UPLOAD", "0") != "1")
     if ext == "pdf":
         rendered = render(file_bytes)
         page_count = len(rendered)
@@ -228,6 +310,8 @@ def run_parse(file_bytes: bytes, filename: str, *,
     enriched_content/page_spans 는 정상 반환(썸네일만 누락).
     """
     docs_id = docs_id or _default_docs_id(file_bytes)
+    requested_extension = fileconvert.ext_of(filename)
+    requested_domain = router.domain_of(filename)
     # 모달 LLM 동시호출 상한. 프록시(LiteLLM/Cloudflare) 과부하로 인한 524 를 줄이려고
     # 기본 3 으로 낮춘다(KBP_MODAL_MAX_WORKERS 로 조정; 524 잦으면 2/1 로).
     max_workers = max(1, int(os.environ.get("KBP_MODAL_MAX_WORKERS", "3")))
@@ -245,8 +329,8 @@ def run_parse(file_bytes: bytes, filename: str, *,
     drm_ms = 0.0
     try:
         # ── DRM 해제(docs/REFERENCE_DRM해제_API.md) — 변환보다 먼저다. DRM 래핑된
-        # office 파일은 해제 후에도 여전히 hwp/docx 등이라 아래 fileconvert 단계를
-        # 거쳐야 한다. 매직바이트로 걸러 DRM 아닌 파일은 원격 호출 자체를 안 한다.
+        # office 파일은 해제 후에도 원래 확장자별 처리(kordoc 또는 fileconvert)를 거쳐야 한다.
+        # 매직바이트로 걸러 DRM 아닌 파일은 원격 호출 자체를 안 한다.
         if parse_pages is None and drm.is_drm(file_bytes):
             _td = time.perf_counter()
             try:
@@ -290,6 +374,10 @@ def run_parse(file_bytes: bytes, filename: str, *,
             rr = _route(file_bytes, filename, ocr_url=ocr_url, excel_url=excel_url)
         if rr.kind == "chunks":
             # excel: 자체청킹 — 모달/blockify/렌더 스킵. additive 계약 유지.
+            parse_ms = (time.perf_counter() - _t) * 1000.0
+            page_traces = rr.page_traces or _excel_trace(
+                rr, extension=requested_extension, parse_ms=parse_ms)
+            total_ms = _parser_total_ms(drm_ms, convert_ms, parse_ms)
             return {
                 "enriched_content": "\n\n".join(c.get("text", "") for c in rr.chunks),
                 "n_blocks": len(rr.chunks),
@@ -299,8 +387,10 @@ def run_parse(file_bytes: bytes, filename: str, *,
                 "chunk_needed": False,
                 "docs_id": docs_id,
                 "page_count": 0, "pages": [], "page_spans": [],
+                "page_traces": page_traces,
                 # v2(리뷰 B1): pages 경로와 동일 형태(modal_llm 포함) — 모니터링 집계자 호환.
-                "timing_metrics": {"parse_ms": round((time.perf_counter() - _t) * 1000.0, 1),
+                "timing_metrics": {"total_ms": total_ms,
+                                   "parse_ms": round(parse_ms, 1),
                                    "convert_ms": round(convert_ms, 1),
                                    "drm_ms": round(drm_ms, 1),
                                    "modal_enrich_ms": 0.0, "render_upload_ms": 0.0,
@@ -311,6 +401,11 @@ def run_parse(file_bytes: bytes, filename: str, *,
             }
         pages = rr.pages
         parse_ms = (time.perf_counter() - _t) * 1000.0  # opendataloader/OCR 단계
+        if not rr.page_traces and parse_pages is None:
+            rr.page_traces = _default_page_traces(
+                pages or [], domain=requested_domain,
+                extension=requested_extension, parse_ms=parse_ms,
+            )
         # 페이지 blocks 를 문서순으로 concat(평탄화). PUA 는 블록 텍스트 단계에서 제거.
         blocks: list[dict] = []
         for pd in pages:
@@ -347,6 +442,7 @@ def run_parse(file_bytes: bytes, filename: str, *,
         log.exception("render/upload failed for %s", filename)
         page_count, image_pages = 0, []
     render_ms = (time.perf_counter() - _t) * 1000.0
+    total_ms = _parser_total_ms(drm_ms, convert_ms, parse_ms, modal_ms, render_ms)
 
     return {
         "enriched_content": enriched,
@@ -377,8 +473,9 @@ def run_parse(file_bytes: bytes, filename: str, *,
         # 모니터링(P2, additive): 파서 단계 분해 — parse(opendataloader/OCR) vs
         # modal_enrich(표/이미지 LLM) vs render_upload. modal_llm 에 표 N개×LLM 분해.
         "timing_metrics": {
+            "total_ms": total_ms,
             "parse_ms": round(parse_ms, 1),
-            # 원격 변환(hwp/docx/pptx→PDF)은 parse_ms 밖이라 따로 낸다 — 최대 300초라
+            # 원격 변환(doc/ppt/pptx→PDF)은 parse_ms 밖이라 따로 낸다 — 최대 300초라
             # 빠뜨리면 모니터링이 "빨라졌다"고 읽는데 실제 벽시계는 는다.
             "convert_ms": round(convert_ms, 1),
             "drm_ms": round(drm_ms, 1),

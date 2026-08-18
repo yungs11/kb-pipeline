@@ -57,10 +57,11 @@
 |--------|--------|------------------|----------------|----------------|------|
 | PDF | `pdf` | **페이지수준 라우팅**(triage) → 페이지마다 odl / paddle_gw / vl / skip (아래 §3.1.1) | ✅ (06=70개, pipe=0) | True | JRE 21 의존(ODL). 문서당 .md 1개 → `<<<ODL_PAGE_BREAK>>>` sentinel 로 페이지 복원. 라우팅: `parse_service/parsers/pdf/gate.py`. 게이트웨이 실패 시 그 페이지만 VL 전사 |
 | XLSX/XLSM/XLS | `excel` | **excel_parser_rag**(vendored, `auto`→전결 openpyxl / 그 외 kordoc) | ✅ | **False** | LLM 없이 parse+chunk 결합 → native 청크. `chunk_strategy=excel_rag_parser` |
-| DOCX·HWP·HWPX·DOC·PPT·PPTX·HTML | `pdf` | **원격 변환 API → PDF → ODL/GW/VL** | ✅ | True | `run_parse` 가 변환 후 `.pdf` 이름으로 PDF 레인에 넣는다(2026-08-06) |
+| HWP·HWPX·DOCX | `kordoc` | **kordoc 4.9.0 → Markdown + inline HTML 표** | ✅ | True | 단순 pipe 표도 blockify에서 HTML 렌더, 병합표 rowspan/colspan 원문 보존 |
+| DOC·PPT·PPTX | `pdf` | **원격 변환 API → PDF → ODL/GW/VL** | ✅ | True | DOC는 kordoc 미지원, 슬라이드는 PDF 레인 유지 |
 | 단일 이미지 | `ocr` | **in-process VL OCR**(`parsers/ocr`) | ✅ + elements[] | True | 이미지→base64 → **PAGE_HYBRID**(전사 + 시각 서술) VL 호출. `IMAGE_EXTS`={png,jpg,jpeg,gif,bmp,tif,tiff,webp} |
 | TXT·MD·CSV·JSON | `text` | 그대로 블록화(utf-8-sig/utf-16/cp949) | — | True | 변환·파서 없음. `page_count=1` |
-| 그 외(폴백) | `fallback` | **kordoc** CLI | ✅ | True | 미지 확장자(hwpx 등)는 kordoc 로(구 markitdown 폴백 제거) |
+| 그 외(미지 확장자) | `pdf` | 없음 | — | — | PDF 매직바이트가 아니면 `not a PDF (and not convertible)`로 거절 |
 | 스캔 페이지 | (pdf 내부, `paddle_gw` 레인) | **PaddleOCR-VL 게이트웨이**(원격 GPU — layout + VL 인식 + 표 조립) | ✅ | True | **그 페이지만 전송**(`page_numbers` 부분집합, 2026-08-12). 페이지 이미지 1장씩 `/tasks` 비동기 호출. **layout 이 image/figure/chart 를 (면적 5%↑) 검출한 스캔 페이지는 전면 VL 로 교체하고 paddle 표는 승계**(Plan A — `_hybrid_scan_pages`). 미설정/레인 불능/엔진 사고 시 **그 페이지만 VL 전사 폴백** |
 | 가로형·다이어그램·혼합콘텐츠 페이지 | (pdf 내부, `vl` 레인) | **in-process VL 전면 전사**(PAGE_HYBRID) | ✅ | True | `LLM_NEEDED` 페이지 전부(2026-08-12 Phase 2a). 표·본문 원문전사 + 순서도 흐름서술 + 차트 요약을 **한 프롬프트**에서 처리 — 표 승계 없이 페이지 전체를 VL 이 읽는다 |
 | VL 전사 폴백 | (pdf 내부) | **네이티브 텍스트**(`RenderedPage.text`) | — | True | VL 전사 실패(절단·모델 퇴화) 시 PyMuPDF 추출본으로 폴백. 재시도는 무효였다(실측 회복률 0%, `temperature=0.1`). 폴백 체인 재설계는 Phase 2b |
@@ -95,8 +96,9 @@ mutation 이 odl/vl 페이지의 ODL 네이티브 본문까지 지운다.
 
 **강등(demote)은 엔진 사고뿐**이다 — 레인 불능(프로브 실패·URL 공란) 또는 페이지
 `status == "error"`. `status == "ok"` + 빈 blocks 는 강등하지 않고 게이트가 판정한다:
-그 집단이 v1 이 측정한 "게이트가 잡은 페이지" 이고 거기서 VL 은 **구조율 0 · 날조 2건**
-이었다(Fisher p=0.021).
+그 집단이 v1 이 측정한 "hard gate가 발화한 페이지" 이고, 그 5건에서 VL rescue는 0건,
+실패는 5건(날조 2·빈 출력 1·부분 출력 2)이었다(Fisher p=0.021). 이는 **표 구조율 비교가
+아니다**. 표가 있는 세로형 스캔 페이지의 GW-vs-VL 표본은 당시 0건이었다.
 
 **`paddle_gw` 페이지 dict = 6-key 계약**
 `(page_number, blocks, layout, page_size, status, error)`. 두 브랜치가 서로 다른 4-tuple 을
@@ -105,7 +107,8 @@ mutation 이 odl/vl 페이지의 ODL 네이티브 본문까지 지운다.
 
 | PDF | `pdf` | **문서수준 게이트**(triage) → 순수텍스트=**OpenDataLoader**(`markdown_with_html=True`) / 스캔·혼합=**MinerU**(hybrid-http-client) | ✅ (06=70개, pipe=0) | True | JRE 21 의존(ODL). 문서당 .md 1개 → `<<<ODL_PAGE_BREAK>>>` sentinel 로 페이지 복원. 게이트: `parse_service/parsers/pdf/gate.py` (triage 버킷 집계). MinerU 는 지연 import(로컬 미설치 허용), 실패 시 ODL/VL 폴백 |
 | XLSX/XLSM/XLS/**CSV** | `excel` | **excel_parser_rag**(vendored, `auto`→전결 openpyxl / 그 외 kordoc) | ✅ | **False** | LLM 없이 parse+chunk 결합 → native 청크. `chunk_strategy=excel_rag_parser`. csv 는 헤더 서식을 준 xlsx 로 메모리 합성해 **openpyxl 고정**(2026-08-11, `parsers/excel/csv_to_xlsx.py`) |
-| DOCX·HWP·HWPX·DOC·PPT·PPTX | `pdf` | **원격 변환 API → PDF → ODL/GW/VL** | ✅ | True | `run_parse` 가 변환 후 `.pdf` 이름으로 PDF 레인에 넣는다(2026-08-06). html 은 2026-08-11 이 경로에서 빠졌다 |
+| HWP·HWPX·DOCX | `kordoc` | **kordoc 4.9.0 → Markdown + inline HTML 표** | ✅ | True | 직접 파싱. 단순 pipe 표는 blockify에서 HTML 렌더, 병합표 inline HTML은 무변형 보존 |
+| DOC·PPT·PPTX | `pdf` | **원격 변환 API → PDF → ODL/GW/VL** | ✅ | True | DOC는 kordoc 미지원. `run_parse`가 변환 후 `.pdf` 이름으로 PDF 레인에 넣음 |
 | **HTML/HTM** | `html` | **`parsers/html`**(bs4 + markdownify, 형변환 API 미경유) | ✅ (원본 `<table>` 보존) | True | 최상위 표를 nonce sentinel 로 빼고 나머지만 markdown 화 후 복원. data-URI `<img>` 는 alt 로 대체(2026-08-11) |
 | 단일 이미지 | `ocr` | **in-process VL OCR**(`parsers/ocr`) | ✅ + elements[] | True | 이미지→base64 → **PAGE_HYBRID**(전사 + 시각 서술) VL 호출. `IMAGE_EXTS`={png,jpg,jpeg,gif,bmp,tif,tiff,webp} |
 | TXT·MD·JSON·LOG·XML | `text` | 그대로 블록화(`tools/textdecode.py`) | — | True | 변환·파서 없음. `page_count=1`. BOM utf-32/utf-16 → utf-8-sig → cp949. XML 은 2026-08-11 편입. 블록 0개면 `parse_failed`(조용한 빈 적재 금지) |
@@ -239,13 +242,23 @@ Rust, `crates/edgequake-pipeline`. passthrough 로 facade 청크를 받아 추�
 
 ### 7.1-B PageTrace — 페이지별 관측 (Phase 2b-1, 2026-08-13)
 
-`/parse` 응답의 **`page_traces`** — "이 페이지가 어느 레인으로 갔고, **무엇이 최종 blocks 를
-만들었고**, 무슨 일이 있었나". `page_verdicts`(게이트 대상 **부분집합**)와 **공존**한다.
+`/parse` 응답의 **`page_traces`** — "이 페이지/논리 문서가 어느 레인으로 갔고,
+**무엇이 최종 blocks/chunks를 만들었고**, 무슨 일이 있었나". PDF/VL은 페이지별 상세,
+HTML·kordoc·text는 논리 페이지, Excel은 문서수준 logical trace 1건을 낸다.
+`page_verdicts`(PDF 게이트 대상 **부분집합**)와 **공존**한다.
 
 ```
 {"page_number", "bucket", "lane", "source", "attempts", "chars",
- "verdict", "state", "verdict_reason"}
+ "verdict", "state", "verdict_reason", "processing_ms"}
 ```
+
+**전체 도메인 lane**: PDF=`odl|paddle_gw|vl|skip`, 이미지=
+`vl_ocr_direct`, HWP/HWPX/DOCX=`kordoc_native`, HTML=`markdownify`, 평문=
+`text_native`, Excel/CSV=`excel_openpyxl|excel_kordoc`(실제 auto 라우팅 결과 기준).
+`timing_metrics.total_ms`는 DRM+변환+파싱+모달+렌더를 합친 **parse-svc 내부** 시간이다.
+knowledge_base 관리자 로그의 문서 시간은 이 값이 아니라 파일 접수→KB worker 큐→facade
+큐/재시도→parse-svc→결과 준비를 합친 서버 `e2e_ms`를 우선 표시한다. 페이지별
+`processing_ms`는 계속 해당 lane의 parser-only 시간이며 E2E로 대체하지 않는다.
 
 **`source` 어휘** — 무엇이 최종 blocks 를 만들었나:
 
@@ -318,7 +331,7 @@ Excel(xlsx/xlsm/xls)은 parse-svc `parsers/excel` 이 vendored **excel_parser_ra
   `ERROR_RE` 가 `re.IGNORECASE` 다. 이게 없으면 `.xls` 문서에서 참조오류 검사가 통째로 침묵한다.
 - **csv 의 청킹 소유는 엑셀 레인**(2026-08-11) — csv 는 헤더 행에 서식(볼드+채우기)을 준 xlsx 로 메모리 합성돼(`parse_service/parsers/excel/csv_to_xlsx.py`) `chunk_needed=False` 로 자체 청킹된다. facade `/chunk` 를 타지 않는다. 백엔드는 **openpyxl 고정** — `auto` 는 전결 키워드나 계층 지배도가 없으면 kordoc 으로 떨어지는데 csv 유래 평면 표는 둘 다 아니고, `KORDOC_BIN` 없는 환경에선 실패한다. 헤더 서식이 없으면 `header_detector` 의 style gate 에 걸려 청크가 `사번: 1001` 대신 `A: 1001` 로 퇴화한다. **한계**: 첫 컬럼 헤더가 계층 spine 용어(`항목`·`구분`·`품명` 등)를 포함하면 그 열의 키 이름이 `A:` 로 떨어진다(값은 청크 경로에 보존) — `deferred.md` D45.
 
-> Phase 2e 로 외부 excel-parser/document-parser/redis 컨테이너는 compose 에서 제거됨 — 파싱 fleet 은 parse-svc 단일 이미지(java+node/kordoc+PyMuPDF)로 통합. office/hwp→PDF 는 원격 변환 API(2026-08-06, gotenberg 제거).
+> 외부 excel-parser/document-parser/redis 컨테이너는 제거됨 — 파싱 fleet은 parse-svc 단일 이미지(java+node/kordoc+PyMuPDF)로 통합. HWP/HWPX/DOCX는 kordoc 직접 파싱, DOC/PPT/PPTX만 원격 PDF 변환.
 
 ---
 

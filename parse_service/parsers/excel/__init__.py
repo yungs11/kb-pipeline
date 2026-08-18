@@ -106,12 +106,19 @@ def _fetch_rag_chunks(file_bytes: bytes, filename: str, excel_url: str | None = 
         tmp.write(file_bytes)
         tmp_path = Path(tmp.name)
     try:
-        chunks, _stats = get_backend(config.backend).parse(tmp_path, config)
+        chunks, stats = get_backend(config.backend).parse(tmp_path, config)
         raw = [c if isinstance(c, dict) else c.__dict__ for c in (chunks or [])]
         try:
             gate_summary = compute_gate_summary(tmp_path, raw)
         except Exception as exc:  # noqa: BLE001 — gate 계산 실패는 보수적 차단(ok=False)
             gate_summary = {"ok": False, "sheets": [], "error": str(exc)}
+        # 관측용 실제 backend. auto는 입력별로 openpyxl/kordoc 중 하나를 고르므로 설정값
+        # "auto"만 남기면 운영 화면에서 어느 구현이 느렸는지 알 수 없다. 게이트 계약에는
+        # 영향을 주지 않는 additive 메타이며, parse-svc가 excel_* lane 이름을 만들 때 쓴다.
+        gate_summary = dict(gate_summary or {})
+        gate_summary["parser_backend"] = (
+            (stats or {}).get("routed_backend") or config.backend or "unknown"
+        )
         return raw, gate_summary
     finally:
         tmp_path.unlink(missing_ok=True)

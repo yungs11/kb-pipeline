@@ -1,9 +1,10 @@
 """GW 페이지 판정 — 3-way triage contract + terminal quarantine.
 
 **v1 정책: `ESCALATE_VL` 은 contract 로만 존재하고 절대 반환되지 않는다.**
-실측 반증(2026-08-11, `V1_DECISION.md` conditional join): hard-fail 신호는
-**"VL 이 도움이 되는 페이지" 의 반대**를 고른다 — gate 가 발화한 페이지에서 VL rescue 0,
-날조 2. 확인된 rescue 6건은 전부 gate 가 놓친 페이지에서 나왔다. 그래서 GW→VL escalation
+실측 반증(2026-08-11, 당시 외부 `V1_DECISION.md` conditional join): hard-fail 신호는
+**"VL 이 도움이 되는 페이지" 의 반대**를 고른다 — gate 발화 5건에서 VL rescue 0,
+실패 5(날조 2·빈 출력 1·부분 출력 2). 이는 표 구조율 비교가 아니며, 확인된 rescue 6건은
+전부 gate 가 놓친 페이지에서 나왔다. 그래서 GW→VL escalation
 execution path 를 v1 에 만들지 않는다(그걸 만들면 GPU 를 써서 날조를 유입시킨다).
 `SOFT_RISK` trigger 가 실데이터로 검증되면 그때 한 줄 활성화한다(v1.1).
 

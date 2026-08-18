@@ -5,6 +5,24 @@
 
 ---
 
+## 0-AA. 전체 문서 parser trace/처리시간 관리자 로그 (2026-08-18)
+
+✅ Excel을 포함한 모든 parse-svc 도메인이 `page_traces`를 반환한다. PDF/VL 상세 trace는
+유지하고 HTML은 실제 엔진 `markdownify`, HWP/HWPX/DOCX는 `kordoc_native`, 평문은
+`text_native`, Excel은 실제 backend별 lane을 기록한다.
+`timing_metrics.total_ms` 문서 합계를 추가하고 knowledge_base 프리뷰/정식 적재 저장 및
+관리자 목록 lane·문서 처리시간 표시까지 연결했다. parse-service 전체
+`485 passed, 2 skipped`; knowledge_base 관련 86 tests와 frontend tsc/lint 통과.
+
+✅ 후속 정정: 관리자 목록/배지의 문서 시간은 parse-svc 내부 합계가 아니라 KB 접수부터
+결과 준비까지의 서버 `e2e_ms`를 우선한다. 페이지 상세 `processing_ms`는 parser-only로
+유지하며 미계측 페이지는 E2E 대체표시 없이 `—`다. preview→Phase2 최종 문서에도 E2E를
+승계하고 구 sidecar는 기존 `total_ms`로 폴백한다.
+
+## 0-A. HWP/HWPX/DOCX kordoc 4.9.0 직접 파싱 (2026-08-18)
+
+✅ HWP/HWPX/DOCX를 FileConverter→PDF에서 `kordoc → Markdown/inline HTML 표` 직접 레인으로 전환. DOC는 kordoc 미지원이라 변환 유지, PPT/PPTX도 변환 유지. Dockerfile은 `kordoc@4.9.0`으로 재현 가능하게 고정했다. 실 DOCX에서 19개 표 전부 최종 HTML 및 colspan 보존 확인, 현재 parse-service 전체 테스트 `485 passed, 2 skipped`.
+
 ## 0. 그룹 기반 KB 접근제어 (구현 완료·미머지, 2026-07-04)
 
 설계·결정: 02-changes §0-B, 01-architecture §6. 계획: `docs/superpowers/plans/2026-07-04-group-based-kb-access-control.md`
@@ -1857,3 +1875,57 @@ acquire가 없어 `.locked()`로 진입 전 검사해야 "즉시 429"가 된다�
 화면 테스트 — MinIO에 페이지 이미지 업로드 확인, `pages[].text`에 실제 한글 본문
 정상 병합, `/obj/{minio_object}`로 이미지 200 서빙 확인. 인증(401 무토큰/403
 non-developer) 확인.
+
+## kb-pipeline — standalone `parser_test_ui`(:8601, parse-only 번들 전용) 신설 (2026-08-19)
+
+plan: `~/.claude/plans/concurrent-soaring-mango.md`(v10 READY, ultracode 8라운드
+누적). 위 절의 knowledge_base "PARSER 테스트" 메뉴는 kb-backend/frontend 전체
+스택이 떠 있어야만 쓸 수 있어, `~/workspace/7.excel-parser/scripts/parse_ui.py`
+(8600) 패턴처럼 **kb-pipeline 자신의 facade 에 직접 HTTP 로 붙는 무인증 단일
+FastAPI 서비스**로 다시 만들었다 — parse-only 폐쇄망 번들에서 kb-backend 없이도
+같은 테스트를 할 수 있게 하는 것이 목적(로컬 전체 개발 스택 `docker-compose.yml`
+에는 편입하지 않음).
+
+**신규 파일**: `parser_test_ui/app.py`(+`Dockerfile`+`requirements.txt`+
+`tests/test_app.py` 9건), `scripts/run-parser-test-ui.sh`(호스트 dev 런처).
+**수정**: `docker-compose.airgap.yml`(서비스 추가, 앱 이미지 6→7종),
+`scripts/airgap/parse-only-up.sh`(SERVICES + health 폴링 루프 둘 다, 5→6개 서비스),
+`scripts/airgap/build-bundle.sh`(BUILDS 전체+`--parse-only` 분기 양쪽),
+`scripts/airgap/verify-bundle.sh`(IMAGES 배열), `docs/parse-only-guide.md`(서비스
+표+경고 문구), `.env.example`/`.env.airgap.example`/`.env.parse-only.example`
+(`KBP_FACADE_URL`/`KBP_DISABLE_PAGE_IMAGE_UPLOAD` 선언, parse-only 에서만 값 설정),
+`parse_service/app.py`(`KBP_DISABLE_PAGE_IMAGE_UPLOAD` 토글 신설),
+knowledge_base `frontend/components/ImageParserTestPanel.tsx`(파일 input `accept`
+제거 — router.py 가 모든 확장자를 이미 자동 변환기 경유로 받으므로 클라이언트
+제한이 무의미).
+
+**설계 핵심 3가지**(전부 8라운드 사용자 논의+ultracode 검증을 거쳐 확정):
+1. **MinIO 는 두 용도가 있다** — 잡 큐 blob 스테이징(구조적 필수, 못 없앰)과 페이지
+   이미지 표시 업로드(부가기능, `KBP_DISABLE_PAGE_IMAGE_UPLOAD=1` 로 전역 스킵 가능).
+   parse-only 는 이미지를 보여줄 화면이 없어 후자를 끈다.
+2. **로그 SoT는 통합하지 않는다** — KB DB를 거친 문서는 계속 KB DB에서, 이
+   standalone UI 로 만든 잡은 facade 자신의 `kbp.jobs`(`/history` 로 조회)에
+   남긴다. 유일한 격차였던 기본 72h TTL 을 `KBP_JOB_TTL_HOURS=8760`(parse-only
+   전용값)으로만 늘려 해결 — 새 코드 없음.
+3. **무인증·0.0.0.0 오픈을 유지한다**(사용자가 ultracode 의 loopback 제한 제안을
+   직접 되돌림) — `/history`의 batch_key 공유로 다른 방문자 문서 내용이 노출될
+   수 있다는 점, TTL 1년 연장이 디스크 누적 리스크가 된다는 점은 코드로 막지 않고
+   문서화(`docs/parse-only-guide.md` 경고문)로만 대응 — parse-only 배포가 순수
+   테스트/데모 전용이라는 전제 하의 수용된 리스크.
+
+**동시성 재조정**: `KBP_JOB_WORKER_CONCURRENCY`는 4 유지, `KBP_VL_MAX_CONCURRENT`만
+parse-only 기본값 8→16(최악 4×16=64, 둘 다 16이면 256이 될 뻔한 걸 사용자가
+비대칭 조정으로 억제).
+
+**검증**: `parse_service/tests/test_parse.py` 26 passed(토글 회귀 1건 포함).
+`parser_test_ui/tests/test_app.py` 9 passed(잡 제출→엑셀/일반 렌더, 413, 404,
+타임아웃 페이지 refresh 태그 유무, `/history`). `docker build`+실제 컨테이너 기동
++`/healthz`+`/` 응답 확인(로컬 amd64/arm64 스모크, 폐쇄망 번들 빌드 자체는 별도
+실행 필요). `docker compose -f docker-compose.airgap.yml config --services` 로
+10개 서비스 정상 파싱 확인. `bash -n`으로 스크립트 4종 문법 검증.
+
+**남은 것(실측 필요, 폐쇄망 검증 절차 V1-V10 중 미실행)**: 실제
+`build-bundle.sh --parse-only`+`verify-bundle.sh --images`로 번들에 이미지 포함
+확인, `parse-only-up.sh` 전체 재실행으로 6개 서비스 헬시 확인, 실제 xlsx/스캔
+이미지로 엔드투엔드 파싱 결과 렌더 확인, knowledge_base `tsc --noEmit`/`eslint`
+clean 확인 — 다음 세션에서 실측으로 닫을 것.

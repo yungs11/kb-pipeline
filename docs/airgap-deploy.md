@@ -77,7 +77,7 @@ facade / edgequake_webui.
 
 LLM · 임베딩 · 리랭커 · VL-OCR · **파일변환(한컴)**
 
-파일변환은 2026-08-06부터 **docx/hwp/ppt/html 파싱의 유일한 경로**다(구 kordoc 폴백 제거).
+파일변환은 **DOC/PPT/PPTX** 파싱 경로다. HWP/HWPX/DOCX는 이미지 내 kordoc 4.9.0을 사용한다.
 미설정이면 그 확장자 전부 파싱 실패한다.
 
 ---
@@ -174,7 +174,7 @@ vi .env      # 【A. 온프렘 재설정 필수】 블록
 | VL-OCR | `MODEL_API_URL`, `MODEL_API_KEY` | `http://vl.corp:8000/v1/chat/completions` | 이미지/PPTX 파싱 빈 결과 |
 | 임베딩 | `LITELLM_EMBEDDING_BASE_URL`, `ADAPTIVE_CHUNK_SCORING_EMBEDDING_BASE_URL`, `*_API_KEY`, `*_MODEL` | `http://embed.corp:8000/v1` | 적재/검색 임베딩 실패 |
 | 리랭커 | `EDGEQUAKE_RERANK_BASE_URL`(→`/v1/rerank`), `ADAPTIVE_CHUNK_RERANK_BASE_URL`(→`/v1`) | `http://rerank.corp:8000/...` | BM25 폴백(품질 저하, 비치명) |
-| 파일변환(한컴) | `KBP_FILECONVERT_URL`, `KBP_FILECONVERT_TOKEN` | `http://fileconvert.corp/api/fileconvert/agent/tool` | **docx/hwp/ppt/html 전면 실패** |
+| 파일변환(한컴) | `KBP_FILECONVERT_URL`, `KBP_FILECONVERT_TOKEN` | `http://fileconvert.corp/api/fileconvert/agent/tool` | **doc/ppt/pptx 전면 실패** |
 | facade 게이트 | `KBP_FACADE_KEY` | `openssl rand -hex 32` | 무인증으로 적재·삭제가 열린다 |
 
 > ⚠️ **`EDGEQUAKE_LLM_PROVIDER` 는 건드리지 말 것.** 실측(2026-08-07):
@@ -282,7 +282,9 @@ curl -sS -H "X-Facade-Key: $KBP_FACADE_KEY" -F "file=@문서.pdf" http://localho
 | xlsx/xlsm/xls | 자체 청킹(`chunk_needed=False`) | 불필요 |
 | png/jpg/jpeg 등 이미지 | VL-OCR in-process | 불필요 |
 | txt/md/markdown/csv/json/log | 그대로 블록화 | 불필요 |
-| **그 외**(docx·hwp·hwpx·ppt·pptx·html·htm) | **파일변환 API → PDF → ODL** | **필요** |
+| **HWP/HWPX/DOCX** | **kordoc 4.9.0 직접 파싱** | 불필요 |
+| **DOC/PPT/PPTX** | **파일변환 API → PDF → ODL/GW/VL** | **필요** |
+| **HTML/HTM** | 전용 HTML 파서 | 불필요 |
 
 구 kordoc docx 폴백은 제거됐다(장·조 계층 인식 실패). kordoc은 **엑셀 파서의 백엔드**로만 남아 있다.
 
@@ -305,7 +307,7 @@ curl -sS -H "X-Facade-Key: $KBP_FACADE_KEY" -F "file=@문서.pdf" http://localho
 | 적재가 **간헐적**으로 실패(`RemoteProtocolError` / `ReadError: Connection reset`) | 폴링 주기(3s) > 대상의 gunicorn keep-alive(2s) 경합. 잡은 succeeded 인데 폴링 연결이 끊겨 실패 처리 | 수정본은 폴링에 keep-alive 를 안 쓰고 전송계층 재시도도 한다(`service/http_retry.py`). 그래도 나면 대상 서비스 로그 확인 |
 | 청킹이 `embedding call failed: Name or service not known` 으로 실패 | 임베딩 주소 DNS 해석 실패(오타 또는 미기동) | `.env` 의 `*_EMBEDDING_BASE_URL` 확인. 컨테이너 안에서 `curl` 로 도달성 확인 |
 | 이미지/PPTX 파싱 빈 결과 | `MODEL_API_URL/KEY` 미설정 | §4 |
-| docx/hwp/ppt/html 파싱 실패 | `KBP_FILECONVERT_URL` 미설정/불통 | `podman exec <parse-svc> curl -fsS "$KBP_FILECONVERT_URL"`. facade 응답 `detail` 에 실제 원인이 실려 온다 |
+| doc/ppt/pptx 파싱 실패 | `KBP_FILECONVERT_URL` 미설정/불통 | `podman exec <parse-svc> curl -fsS "$KBP_FILECONVERT_URL"`. facade 응답 `detail` 에 실제 원인이 실려 온다 |
 | 검색은 되나 순위 이상 | 리랭커 불통 → BM25 폴백 | `*_RERANK_BASE_URL` 확인 |
 | `Bind for 0.0.0.0:PORT failed` | 호스트 포트 점유 | compose 의 해당 `ports:` **좌측(호스트)** 숫자만 변경 |
 | `NoSuchBucket` | 버킷 미생성 | `load-and-up.sh` 가 `mc stat` 로 검증하며 자동 생성. 수동은 부록 B |

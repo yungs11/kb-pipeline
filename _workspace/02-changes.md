@@ -4,6 +4,35 @@
 
 ---
 
+## 0-E. 전 확장자 parser trace + 문서 처리시간 (2026-08-18)
+
+**후속 정정 — 관리자 문서 시간은 서버 E2E(2026-08-18)**: 기존 목록의 "문서 처리시간"은
+실제로 parse-svc `timing_metrics.total_ms`라 KORDOC 1.5초인데 사용자는 큐·재시도·폴링을
+포함해 약 15초를 기다리는 차이가 있었다. knowledge_base parse-preview 접수 epoch를 worker에
+전달해 `e2e_ms`(접수→KB worker→facade job/재시도→parse-svc→결과 준비)를 추가하고 preview와
+Phase2 최종 문서가 이를 우선 저장하도록 변경했다. UI는 "문서 E2E"로 명시하고, 페이지
+`processing_ms`는 parser-only 값만 표시한다. HTML·DOCX·HWP·HWPX·Excel 공통 경로 테스트.
+
+- PDF/VL의 기존 페이지 trace를 유지하면서 HTML=`markdownify`, HWP/HWPX/DOCX=
+  `kordoc_native`, 평문=`text_native` 기본 trace를 추가했다.
+- Excel/CSV 자체청킹 조기 반환에도 logical trace 1건을 싣고, auto backend의 실제 선택을
+  `excel_openpyxl`/`excel_kordoc`으로 기록한다.
+- `/parse.timing_metrics.total_ms`에 DRM·파일변환·파싱·모달·렌더 합계를 추가했다.
+- knowledge_base는 프리뷰 문서에도 이 시간을 `chunking_selection.stage_timings` 계약으로
+  저장하고, 정식 적재 key-pick에서 누락되던 `processing_ms`를 보존한다. 관리자 로그 목록은
+  distinct lane과 문서 처리시간을 행에서 바로 보여준다.
+- 검증: parse-service `485 passed, 2 skipped`; HTML/XLSX 실스모크에서 각각
+  `markdownify`/`excel_openpyxl` 및 처리시간 생성 확인. knowledge_base 관련 86 tests와
+  frontend tsc/lint 통과(전체 suite의 15 failures는 기존 gate/raganything/chat baseline).
+
+## 0-D. HWP/HWPX/DOCX kordoc 네이티브 라우팅 복원 (2026-08-18)
+
+- `kordoc`을 3.8.3에서 **4.9.0으로 올리고 Docker 이미지에도 버전을 고정**했다.
+- HWP/HWPX/DOCX는 원격 PDF 변환에서 분리해 `kordoc → Markdown + inline HTML 표 → hybrid_to_blocks`로 직접 처리한다.
+- 단순 표는 kordoc pipe Markdown을 blockify가 HTML로 렌더하고, 병합표는 kordoc이 낸 inline HTML의 `rowspan`/`colspan`을 무변형 보존한다. Markdown 전체 재변환이나 표 문자열 치환은 하지 않는다.
+- 구형 DOC는 kordoc 4.9.0 공식 지원 목록에 없어 FileConverter→PDF에 남겼고, PPT/PPTX도 기존 PDF 변환을 유지한다.
+- 실 DOCX 표본: kordoc 4.9.0 직접 파싱 결과 `83 blocks / 19 tables / 26 headings`, 표 19개 전부 최종 HTML, colspan 포함 병합표 1개 보존. 현재 parse-service 전체 테스트 `485 passed, 2 skipped`.
+
 ## 0-C. 표(table) 원자 보존 — 〈MODAL〉 wrap + page 독립 경쟁 경로 (4레포, 2026-07-27~28)
 
 **문제**: 대형 문서에서 청커가 `<table>` HTML 을 청크 경계에서 `<td` 중간에 쪼개 렌더 깨짐 + 검색 시 행 손실. 실측(소장 46p): table 포함 청크의 **55%(22/40)가 쪼개짐**. test_doc(신탁 3p, 3/8)보다 훨씬 심각. 가중치 튜닝(bi.40)으로는 불가 — 모든 청킹 방법이 대량 쪼갬.
@@ -1124,8 +1153,10 @@ scan-lane 이 관측한 arXiv p5 4002자·p6 2527자가 후자다. 저쪽은 폴
 ### 결정 2 — demote 는 **엔진 사고뿐**
 
 `status == "ok"` + 빈 blocks 는 강등하지 않는다. 그 집단이 v1 이 측정한 "게이트가 잡은
-페이지" 이고 거기서 VL 은 **구조율 0 · 날조 2건**이었다(Fisher p=0.021). 강등하면 v1 이
-실측으로 기각한 GW→VL escalation 이 되살아난다.
+페이지" 이고, 그 hard-gate 발화 5건에서 VL rescue는 0건, 실패는 5건(날조 2·빈 출력 1·
+부분 출력 2)이었다(Fisher p=0.021). 이는 **표 구조율 비교가 아니다**. 표가 있는 세로형
+스캔 페이지의 GW-vs-VL 표본은 당시 0건이었다. 강등하면 v1 이 실측으로 기각한
+GW→VL escalation 이 되살아난다.
 
 ### 결정 3 — `paddle_gw` 페이지 dict = **6-key 계약**
 

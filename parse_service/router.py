@@ -1,15 +1,17 @@
 """확장자 → 도메인 파서 디스패치. 파싱 로직 없음(얇은 계층).
 
-매핑(2026-08-11): 엑셀→excel(자체청킹, chunk_needed=False), 이미지→ocr(in-process VL),
-html/htm→html(markdownify + `<table>` 보존, 형변환 API 미경유), 평문→text(그대로 블록화),
-**그 외 전부→pdf**.
+매핑(2026-08-18): 엑셀→excel(자체청킹, chunk_needed=False), HWP/HWPX/DOCX→kordoc,
+이미지→ocr(in-process VL **직접 호출; PDF 변환/triage/GW 미경유**),
+html/htm→html(markdownify + `<table>` 보존, 평문→text,
+**그 외 전부→pdf**. DOC/PPT/PPTX는 `run_parse`가 먼저 PDF로 변환한다.
 
-비-PDF 는 `run_parse` 가 **변환 API 로 PDF 를 만든 뒤** 여기로 보낸다(app.py). 변환은
-router 가 하지 않는다 — `route()` 의 `filename` 은 값 복사라 페이지 이미지 소비처
-(`_render_and_upload`)에 전파되지 않기 때문이다.
+DOC/PPT/PPTX는 `run_parse`가 **변환 API로 PDF를 만든 뒤** 여기로 보낸다(app.py). 변환은
+router가 하지 않는다 — `route()`의 `filename`은 값 복사라 페이지 이미지 소비처
+(`_render_and_upload`)에 전파되지 않기 때문이다. HWP/HWPX/DOCX는 원본 그대로 이
+router의 kordoc 도메인으로 들어온다.
 
-kordoc(docx) 레인은 제거됐다 — hwp 정관 실측(2026-08-06)에서 55개 헤딩이 전부 같은 레벨로
-나와 장·조 계층이 사라졌다. 변환 API → ODL 은 같은 문서에서 계층을 만든다.
+kordoc 레인은 4.9.0으로 재도입했다. 출력 Markdown을 그대로 blockify하며 단순 pipe 표는
+HTML로 렌더하고, 병합표 inline HTML의 rowspan/colspan은 원문 그대로 보존한다.
 """
 from __future__ import annotations
 
@@ -18,6 +20,7 @@ from parse_service.parsers import pdf as _pdf
 from parse_service.parsers import ocr as _ocr
 from parse_service.parsers import excel as _excel
 from parse_service.parsers import html as _html
+from parse_service.parsers import docx as _kordoc
 from parse_service.tools import fileconvert
 
 
@@ -35,6 +38,10 @@ def _excel_parse(fb, fn, *, ocr_url, excel_url):
 
 def _html_parse(fb, fn, **_):
     return _html.parse(fb, fn)
+
+
+def _kordoc_parse(fb, fn, **_):
+    return _kordoc.parse(fb, fn)
 
 
 def _text_parse(fb, fn, **_):
@@ -60,7 +67,7 @@ def _text_parse(fb, fn, **_):
                        pages=[{"page_number": 1, "blocks": blocks}])
 
 
-_PARSERS = {"pdf": _pdf_parse, "excel": _excel_parse,
+_PARSERS = {"pdf": _pdf_parse, "excel": _excel_parse, "kordoc": _kordoc_parse,
             "ocr": _ocr_parse, "html": _html_parse, "text": _text_parse}
 
 
@@ -69,7 +76,9 @@ def domain_of(filename: str) -> str:
     ext = fileconvert.ext_of(filename)          # 정의는 fileconvert 하나뿐
     if ext in _excel.EXCEL_EXTS:                # xlsx xlsm xls — 자체 청킹, 변환 금지
         return "excel"
-    if ext in _ocr.IMAGE_EXTS:                  # png jpg … — 이미지 직행
+    if ext in _kordoc.KORDOC_EXTS:              # hwp hwpx docx — kordoc Markdown 직행
+        return "kordoc"
+    if ext in _ocr.IMAGE_EXTS:                  # png jpg … — PDF/triage/GW 없이 VL 직행
         return "ocr"
     if ext in _html.HTML_EXTS:                  # html htm — 형변환 없이 자체 레인
         return "html"

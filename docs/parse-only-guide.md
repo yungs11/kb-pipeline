@@ -1,14 +1,14 @@
 # 파서 전용(파싱 배치) 설치·사용 가이드
 
 문서를 **파싱만** 하고 결과(마크다운 + 표 HTML + 페이지 이미지)를 받아 가는 배포.
-청킹·적재·검색은 하지 않는다. 전체 스택 9개 대신 **5개**만 띄운다.
+청킹·적재·검색은 하지 않는다. 전체 스택 10개 대신 **6개**만 띄운다.
 
 - 전체 스택이 필요하면 → [`airgap-deploy.md`](airgap-deploy.md)
 - API 상세 규격은 → [`facade-api.md`](facade-api.md) (본 문서는 파싱 경로만 발췌)
 
 ---
 
-## 1. 구성 — 왜 5개인가
+## 1. 구성 — 왜 6개인가
 
 | 서비스 | 역할 | 빼면 |
 |---|---|---|
@@ -17,9 +17,15 @@
 | **`facade-worker`** | **잡 실행**(facade 와 같은 이미지, 명령만 다름) | ⚠️ healthz 는 전부 통과하는데 `/parse` 가 **503**("no live facade-worker") — **한 건도 처리 안 됨** |
 | `postgres` | 잡 큐(`kbp.jobs`). 기동 시 스키마 자동 생성 — **빈 DB로 충분** | 잡 큐 불가 |
 | **`minio`** | 잡 staging(업로드 바이트 보관) | ⚠️ 잡 접수가 **`NoSuchBucket` 500** — 파서 단독이면 없어도 되지만 **facade 잡 큐엔 필수** |
+| `parser-test-ui`(:8601) | kb-backend/frontend 없이 facade 에 직접 붙는 **무인증** 파서 테스트 화면 — 결과+최근 실행 기록(`/history`)만, 페이지 원본 이미지는 안 보여준다 | 없어도 파싱 자체는 정상 — 브라우저로 결과를 훑어볼 화면만 없어진다 |
 
 **빠지는 것**: `edgequake`(적재·검색) / `adaptive_chunk`(청킹) / `doc_guard`(엑셀 게이트 판정) / `edgequake_webui`
 → `/chunk`·`/insert`·`/search`·`/gate` 는 이 구성에서 **동작하지 않는다**.
+
+> ⚠️ **`parser-test-ui`(:8601)는 완전 무인증이고 `/history`에서 누구나 다른 사람이
+> 올린 문서의 파싱 결과(본문 포함)를 볼 수 있습니다** — 민감한 문서는 이 도구에
+> 올리지 마세요. 이 번들이 실제 프로덕션 배치 파싱과 같은 인스턴스를 공유하지
+> **않는** 순수 테스트/데모 전용 배포일 때만 이 기본 구성을 쓰세요.
 
 > **엑셀은?** 파싱과 게이트 판정 재료(`gate_summary`) 생성까지는 **parse-svc 안에서** 끝난다.
 > `doc_guard` 는 그 재료로 **판정**만 하므로, 이 구성에서도 xlsx 파싱과 `gate_summary` 수신은 된다.
@@ -76,7 +82,7 @@ bash scripts/airgap/verify-bundle.sh --env .env --parse-only
 |---|---|---|
 | `KBP_FACADE_KEY` | 항상(권장) | 게이트가 꺼져 **무인증**으로 열린다 |
 | `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | 항상 | 잡 staging 불가 |
-| `KBP_FILECONVERT_URL` / `_TOKEN` | **docx·hwp·hwpx·ppt·pptx·html** 파싱 시 | 그 확장자 **전부 실패** |
+| `KBP_FILECONVERT_URL` / `_TOKEN` | **doc·ppt·pptx** 파싱 시 | 그 확장자 **전부 실패** |
 | `KBP_DRM_URL` / `_TOKEN` | **DRM(Fasoo) 문서**가 있을 때 | DRM 문서 **전부 실패**<br>(`detail: "parse_failed: KBP_DRM_URL 미설정 — DRM 해제 불가"`) |
 | `MODEL_API_URL` / `MODEL_API_KEY` | **스캔 PDF·이미지·PPTX** 파싱 시(VL-OCR) | 그 문서들 `enriched_content` 가 빈다 |
 | `KBP_OPENAI_*` | 모달(표/그림) 보강 LLM | 보강 없이 진행 |
@@ -205,7 +211,9 @@ find ./docs -name '*.pdf' -print0 | xargs -0 -P 4 -I{} \
 | xlsx / xlsm / xls | 자체 청킹(`chunk_needed:false`) | — |
 | png / jpg / jpeg / gif / bmp / tif / webp | VL-OCR | `MODEL_API_URL` |
 | txt / md / markdown / csv / json / log | 그대로 블록화 | — |
-| **docx · hwp · hwpx · ppt · pptx · html · htm** | **파일변환 API → PDF → ODL** | **`KBP_FILECONVERT_URL`** |
+| **hwp · hwpx · docx** | **kordoc 4.9.0 → Markdown/inline HTML 표** | `KORDOC_BIN` |
+| **doc · ppt · pptx** | **파일변환 API → PDF → ODL/GW/VL** | **`KBP_FILECONVERT_URL`** |
+| **html · htm** | 전용 HTML 파서 | 없음 |
 
 DRM(Fasoo) 래핑 파일은 **확장자와 무관하게** 먼저 `KBP_DRM_URL` 로 해제한 뒤 위 경로를 탄다.
 
@@ -218,7 +226,7 @@ DRM(Fasoo) 래핑 파일은 **확장자와 무관하게** 먼저 `KBP_DRM_URL` �
 | `/parse` 가 **503** | `facade-worker` 미기동 | `/jobs/workers` 로 `online` 확인 → worker 컨테이너 로그 |
 | `/parse` 가 **500 `NoSuchBucket`** | MinIO 버킷 미생성 | `parse-only-up.sh` 가 자동 생성한다. 수동은 [`airgap-deploy.md` 부록 B](airgap-deploy.md) |
 | `status:"failed"`, `detail: "…KBP_DRM_URL 미설정…"` | DRM 문서인데 해제 API 미설정 | `.env` 의 `KBP_DRM_URL`/`_TOKEN` |
-| `detail` 에 파일변환 관련 오류 | docx/hwp/ppt/html 인데 변환 API 불통 | `KBP_FILECONVERT_URL` 도달성 확인 |
+| `detail` 에 파일변환 관련 오류 | doc/ppt/pptx인데 변환 API 불통 | `KBP_FILECONVERT_URL` 도달성 확인 |
 | `enriched_content` 가 비었는데 실패는 아님 | 스캔 문서인데 VL 미설정/불통 | `MODEL_API_URL` 확인. parse-svc 로그에 `VL API CONNECT_ERROR` |
 | 401 / 403 | `X-Facade-Key` 불일치 | `.env` 의 `KBP_FACADE_KEY` 와 헤더 값 일치 |
 | 요청이 거절됨(대기자 초과) | 클라이언트 병렬도 > `KBP_JOB_MAX_WAITERS` | 병렬도를 낮추거나 두 값을 함께 올린다 |

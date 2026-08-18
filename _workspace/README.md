@@ -35,7 +35,7 @@
 | 구성요소 | 포트 | 한 줄 정의 |
 |----------|------|-----------|
 | facade (kb-pipeline) | 3000 | 오케스트레이터. parse→chunk→insert→search 노출, 청킹·모달원자성 소유 (`service/app.py`) |
-| parse-svc | 19001 | **모든 문서 파싱 in-process**(PDF·excel_parser_rag·VL OCR). hwp/doc/docx/ppt/pptx 는 원격 변환 API 로 PDF 화 후 PDF 레인 + modal LLM 서술 → enriched_content + 모달 마커 (`parse_service/app.py`). 이미지=java+node/kordoc+PyMuPDF 통합 (Phase 2) |
+| parse-svc | 19001 | **모든 문서 파싱 통합**. HWP/HWPX/DOCX=`kordoc@4.9.0` 네이티브 Markdown(표는 최종 `<table>`), DOC/PPT/PPTX=원격 변환 API→PDF, PDF·Excel·이미지는 각 전용 레인 + modal 처리 (`parse_service/app.py`). 이미지=java+node/kordoc+PyMuPDF 통합 |
 | adaptive_chunk | 18060 | 청킹 허브. atomic_markers 받아 모달 원자 보존, 텍스트 갭만 4방법 경쟁 |
 | edgequake | 3001 | 베이스 엔진. passthrough 적재 + 추출/임베딩/AGE 그래프/검색 |
 | postgres (eq-pg-kbp) | 5433 | 단일 저장소. pgvector + Apache AGE |

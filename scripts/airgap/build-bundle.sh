@@ -35,6 +35,7 @@ BUILDS=(
   "kbp-adaptive_chunk:${TAG}|-|../99.projects/adaptive_chunk"
   "kbp-doc_guard:${TAG}|-|../99.projects/shinhan_trust/doc_guard"
   "kbp-edgequake_webui:${TAG}|edgequake/edgequake_webui/Dockerfile|edgequake"
+  "kbp-parser-test-ui:${TAG}|parser_test_ui/Dockerfile|."
 )
 # pull 대상: "업스트림참조|로컬태그"
 #
@@ -72,6 +73,7 @@ if [ "$PARSE_ONLY" -eq 1 ]; then
   BUILDS=(
     "kbp-parse-svc:${TAG}|Dockerfile.parse-svc|."
     "kbp-facade:${TAG}|Dockerfile.facade|."
+    "kbp-parser-test-ui:${TAG}|parser_test_ui/Dockerfile|."
   )
   IMAGES_TAR="$BUNDLE/images/kbp-parse-images-${ARCH_SHORT}.tar"
   BUNDLE_NAME="kbp-parse-bundle-${ARCH_SHORT}.tar"

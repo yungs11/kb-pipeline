@@ -18,7 +18,7 @@ def test_elements_grouped_into_pages(monkeypatch):
 
 
 def test_page_traces_record_single_vl_direct_lane(monkeypatch):
-    """2026-08-18 — 이미지/pptx 도메인도 admin 로그 화면에 뜨려면 page_traces가 있어야 한다."""
+    """이미지 도메인도 admin 로그 화면에 뜨려면 page_traces가 있어야 한다."""
     monkeypatch.setattr(ocr_parser, "_whole_file_elements",
                         lambda fb, fn, ocr_url, prompt_override=None, with_meta=False: ([
                             {"category": "text", "content": {"markdown": "hello"}, "page_idx": 0},

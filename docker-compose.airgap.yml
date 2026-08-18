@@ -4,7 +4,7 @@
 #
 # base docker-compose.yml 과의 차이 (왜 별도 파일인가):
 #   1) build: 전부 제거 → image: 태그만.   (오프라인에서 podman 이 빌드 시도 못 하게 원천 차단.
-#      6개 앱 이미지는 온라인 Mac 에서 buildx amd64 로 미리 빌드→save→load 됨.)
+#      7개 앱 이미지는 온라인 Mac 에서 buildx amd64 로 미리 빌드→save→load 됨.)
 #   2) docker-compose.override.yml 의 `!override` 커스텀 YAML 태그 제거 → 호스트 포트를
 #      본문에 직접 인라인.  (podman-compose 는 `!override` 태그를 파싱하지 못함.)
 #   3) 각 서비스에 restart: unless-stopped 추가 → podman-compose 가 depends_on 의
@@ -12,7 +12,7 @@
 #      (최종 정상성은 load-and-up.sh 의 health 폴링이 보증한다.)
 #
 # 이미지 태그 규약:
-#   - 앱 6종(빌드): kbp-<svc>:airgap   ← build-bundle.sh 가 이 이름으로 태깅/save 한다.
+#   - 앱 7종(빌드): kbp-<svc>:airgap   ← build-bundle.sh 가 이 이름으로 태깅/save 한다.
 #   - 인프라 3종(pull): 업스트림 원본 태그 그대로   ← load 후 로컬에 존재하므로 pull 안 함.
 #
 # 엔드포인트(온프렘 재설정 대상)는 전부 .env 에서 온다. 무엇을/어디서 바꾸는지는
@@ -417,6 +417,24 @@ services:
       parse-svc: { condition: service_healthy }
       adaptive_chunk: { condition: service_healthy }
       edgequake: { condition: service_healthy }
+    networks: [kbp]
+
+  # ── PARSER 테스트 standalone UI (parse-only 번들 전용, 사용자 확인 v2→v3) ──────
+  # kb-backend/frontend 없이 facade 에 직접 붙는 무인증 테스트 화면. plan:
+  # /Users/xxx/.claude/plans/concurrent-soaring-mango.md
+  parser-test-ui:
+    image: kbp-parser-test-ui:airgap
+    restart: unless-stopped
+    environment:
+      KBP_FACADE_URL: http://facade:19000
+    ports: ["8601:8601"]   # 외부노출: 호스트 8601 → 무인증 테스트 UI(의도적 오픈, plan §v2→v3 정정 2)
+    depends_on:
+      facade: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD","curl","-fsS","http://localhost:8601/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
     networks: [kbp]
 
   # ── 그래프 적재 확인용 WebUI (선택 서비스) ──────────────────────────────────

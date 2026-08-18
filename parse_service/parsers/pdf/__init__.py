@@ -748,8 +748,10 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
         #   · 레인 불능(프로브 실패·URL 공란) → 응답 자체가 없다
         #   · 개별 페이지 `status == "error"` → 게이트웨이 타임아웃/5xx
         # ⚠️ `status == "ok"` + 빈 blocks 는 **강등하지 않는다.** 그 페이지 집단이 정확히
-        #    v1 이 측정한 "게이트가 잡은 페이지" 이고, 거기서 VL 은 구조율 0 · 날조 2건이었다
-        #    (Fisher p=0.021). 그대로 게이트에 넘겨 EMPTY/quarantine 판정을 받게 둔다.
+        #    v1 이 측정한 hard-gate 발화 5건이고, 그 집단에서 VL rescue 0 / 실패 5
+        #    (날조 2·빈 출력 1·부분 출력 2, Fisher p=0.021)였다. 이는 표 구조율 비교가
+        #    아니다(표가 있는 세로형 스캔의 GW-vs-VL 표본은 당시 0건). 그대로 게이트에
+        #    넘겨 EMPTY/quarantine 판정을 받게 둔다.
         demoted_pnos = {n for n in paddle_pnos
                         if n not in gw_by_pno
                         or (gw_by_pno.get(n) or {}).get("status") == "error"}

@@ -21,7 +21,7 @@ rc=0
 # 로컬 태그를 붙여 save 하기 때문(그래야 podman load 후에도 이름이 살아남는다).
 IMAGES=(
   kbp-edgequake kbp-parse-svc kbp-facade kbp-adaptive_chunk kbp-doc_guard kbp-edgequake_webui
-  kbp-postgres kbp-minio
+  kbp-parser-test-ui kbp-postgres kbp-minio
 )
 # .env 에서 반드시 채워야 하는 시크릿/엔드포인트 키
 REQUIRED_ENV=(
@@ -261,8 +261,13 @@ check_imports() {
     out="$("$ENGINE" run --rm --entrypoint sh "$ref" \
       -c 'command -v kordoc && kordoc --version' 2>&1)"
   fi
-  if [ $? -eq 0 ]; then
-    echo "  ${GRN}✓ kordoc 설치 확인 ($ref)${RST}"
+  local kordoc_rc=$?
+  if [ "$kordoc_rc" -eq 0 ] && [[ "$out" == *"4.9.0"* ]]; then
+    echo "  ${GRN}✓ kordoc 4.9.0 설치 확인 ($ref)${RST}"
+  elif [ "$kordoc_rc" -eq 0 ]; then
+    echo "  ${RED}✗ kordoc 버전 불일치($ref) — 4.9.0 필요:${RST}"
+    echo "$out" | sed 's/^/    /'
+    return 1
   else
     echo "  ${RED}✗ kordoc 없음/실행 실패($ref) — 엑셀 파서 kordoc 백엔드가 조용히 깨진다:${RST}"
     echo "$out" | sed 's/^/    /'
@@ -386,8 +391,8 @@ print("OK biff_chunks=%d sheets=%d" % (n, len(gs["sheets"])))
   esac
   # ⚠️ 파일변환(한컴) API 는 이미지 안 도구가 아니라 온프렘 HTTP 엔드포인트라 여기서
   # 도달성을 못 확인한다 — check_env() 의 KBP_FILECONVERT_URL 값 존재 확인이 유일한
-  # 사전 방어선이다. docx/hwp/ppt 파싱은 그 서비스가 실제로 응답해야 성공한다
-  # (A6 — 구 kordoc docx 폴백은 제거됨, 지금은 이 경로가 유일하다).
+  # 사전 방어선이다. doc/ppt/pptx 파싱은 그 서비스가 실제로 응답해야 성공한다.
+  # HWP/HWPX/DOCX는 위에서 검증한 이미지 내 kordoc 4.9.0 레인을 사용한다.
   # (html 은 2026-08-11 이 경로에서 빠졌다 — parsers/html 이 형변환 없이 처리한다.)
 
   # ★ 이미지 경로 누출 방지(2026-08-18) — gw2 스플라이싱/ODL 이미지필터/ocr 도메인

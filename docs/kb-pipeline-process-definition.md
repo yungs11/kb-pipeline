@@ -36,7 +36,7 @@
 | 구성요소 | 포트 | 한 줄 정의 |
 |----------|------|-----------|
 | facade (kb-pipeline) | 3000 | 오케스트레이터. parse→chunk→insert→search capability 를 노출하고 청킹·모달원자성을 소유하며 다운스트림을 숨긴다(`service/app.py`). |
-| parse-svc | 19001 | **모든 문서 파싱을 in-process 로 수행**(PDF=OpenDataLoader / Excel=vendored excel_parser_rag / 이미지=in-process VL OCR / html=`parsers/html` / hwp·doc·docx·ppt·pptx=**원격 변환 API→PDF**)하고 표/그림을 modal LLM 으로 서술해 enriched_content + 모달 마커를 반환한다. 이미지에 java21 + node/kordoc + PyMuPDF 내장(Phase 2). |
+| parse-svc | 19001 | 문서 파싱 통합 서비스. PDF=ODL/GW/VL, Excel=excel_parser_rag, 이미지=VL OCR, HTML=전용 파서, HWP/HWPX/DOCX=`kordoc@4.9.0`, DOC/PPT/PPTX=원격 변환 API→PDF. 표/그림 modal 처리 후 enriched_content를 반환한다. |
 | adaptive_chunk | 18060 | 청킹 허브. atomic_markers 를 받아 모달 스팬을 원자 보존하고, 텍스트 갭만 4방법 경쟁으로 청킹해 선택 근거(method_selected/scores)를 반환한다. |
 | edgequake | 3001 | 베이스 엔진. passthrough 로 facade 청크를 받아 엔티티/관계 추출 → 임베딩 → AGE 그래프 → 단일 Postgres 적재(RLS)와 검색을 수행한다. |
 | postgres (eq-pg-kbp) | 5433 | 단일 저장소. pgvector + Apache AGE 를 한 DB에. docker, POSTGRES_PASSWORD=edgequake_secret. |
@@ -80,7 +80,7 @@ Parse → Blockify → Modal Enrich → Chunking → Insert → Community → Se
 |------|------|
 | 수행 주체 | parse-svc(`:19001`)가 업로드된 문서를 내려받아 **in-process 도메인 파서**로 파싱한다(외부 파서 서비스 미경유). |
 | 입력 | 업로드 파일과 파일명(선택적으로 문서 ID·콘텐츠 타입). 문서 ID 가 없으면 파일 내용 해시로 자동 부여하고, 파일명은 안전한 형태로 정규화한다(경로 탈출 차단). |
-| 처리 | 문서 종류(확장자)에 따라 `parse_service/router.py` 가 도메인 파서를 고른다. 일반 PDF 는 OpenDataLoader 로 페이지별 파싱하고, 글자가 거의 없는 스캔 페이지는 그 페이지만 이미지로 렌더해 in-process VL OCR 로 보충한다(혼합 PDF 대응). 이미지는 in-process VL OCR(PAGE_HYBRID), hwp·doc·docx·ppt·pptx 는 **원격 변환 API 로 PDF 화**한 뒤 PDF 레인으로 보낸다. html 은 `parsers/html` 이 형변환 없이 처리한다(표 `<table>` 보존). 평문(txt·md·json·log·xml)은 그대로 블록화한다. 파싱 결과의 비표시 특수문자는 정리한다. |
+| 처리 | 확장자에 따라 `parse_service/router.py`가 도메인 파서를 고른다. PDF는 ODL/GW/VL 페이지 라우팅, 이미지는 VL OCR, HWP/HWPX/DOCX는 kordoc Markdown 직행, DOC/PPT/PPTX는 PDF 변환 후 PDF 레인, HTML은 전용 파서, 평문은 그대로 블록화한다. |
 | 산출물 | 페이지 경계가 보존된 페이지별 블록 묶음(페이지 번호 1-based 부여). Excel 은 `chunk_needed=False` native chunks. |
 
 > 코드 레퍼런스(§5.7): `POST /parse` → `run_parse()` → `parse_service/router.py:route()` → 도메인 파서(`parsers/{pdf,excel,html,ocr}`). (구 `parse_to_pages()`/`parse_to_markdown()`·markitdown 은 Phase 2d 삭제.) 문서 ID 폴백 = `sha256(file_bytes).hexdigest()[:16]`(orchestrator 동일 식 → MinIO 키 일치), 파일명 정규화 = `parse_service/tools.safe_basename`(`[A-Za-z0-9._-]` 외 `_`, 구 `parsing._safe_basename` 이동). 산출 타입 `list[PageDoc]`, `PageDoc = {"page_number": int(1-based), "blocks": list[dict]}`, 각 블록 `page_idx` 1-based. 비표시 문자 제거 = PUA(U+E000–U+F8FF, `_PUA_RE`).
@@ -89,9 +89,13 @@ Parse → Blockify → Modal Enrich → Chunking → Insert → Community → Se
 라우팅 소유는 `parse_service/router.py`(구 `kb_pipeline.blockify.PARSER_ROUTING`/`recommended_parser` 는 Phase 2d 삭제). markitdown 은 코드·requirements 에서 완전 제거(재유입 가드 `parse_service/tests/test_no_markitdown.py`). 2026-08-11 markup-lane 에서 markitdown 을 재검토했으나 같은 사유(병합표 손실)로 재차 기각했다 — 가드 유지. html 은 `parsers/html`(markdownify + `<table>` 보존)이 형변환 없이 처리한다.
 - **PDF** → `pdf`: OpenDataLoader(`opendataloader_pdf.convert`, `markdown_with_html=True`, `markdown_page_separator`). 문서당 .md 1개, 페이지 앞에 sentinel `<<<ODL_PAGE_BREAK>>>`(`_PAGE_SEP`) 삽입 → SEP로 split해 페이지 복원. JVM 호출 1회.
 - **XLSX/XLSM/XLS/CSV(Excel)** → `excel`: vendored **excel_parser_rag**(in-process). `EXCEL_PARSER_BACKEND=auto`(전결 문서 → openpyxl, 그 외 → kordoc .md). LLM 없이 parse+chunk 결합 → `chunk_needed=False`, `chunk_strategy=excel_rag_parser`. 표 `<table>` HTML 보존. CSV 는 2026-08-11 편입 — 헤더 행에 서식을 준 xlsx 로 메모리 합성해 **openpyxl 고정**으로 흘린다(`parse_service/parsers/excel/csv_to_xlsx.py`).
-- (구 **DOCX** → `docx` kordoc 레인은 2026-08-06 제거됐다. DOCX 는 아래 변환 API 경로를 탄다.)
+- **HWP·HWPX·DOCX** → `kordoc`: `kordoc@4.9.0` Markdown을 blockify한다. 단순 pipe 표는 HTML로 렌더하고 병합표 inline HTML의 `rowspan`/`colspan`은 그대로 보존한다.
+- **관측**: 모든 확장자는 `/parse.page_traces`를 반환한다. PDF/VL은 페이지별 실제 레인,
+  HTML=`markdownify`, HWP/HWPX/DOCX=`kordoc_native`, 평문=`text_native`,
+  Excel/CSV=`excel_openpyxl|excel_kordoc`이다. `timing_metrics.total_ms`는 문서 파서 전체
+  처리시간(DRM+변환+파싱+모달+렌더)이다.
 - **단일 이미지(`IMAGE_EXTS`={png,jpg,jpeg,gif,bmp,tif,tiff,webp})** → `ocr`: **in-process VL OCR**(`parsers/ocr`). 이미지→base64 → **PAGE_HYBRID**(전사 + 시각 서술) VL 호출. 순서도·차트 이미지도 흐름으로 서술된다.
-- **HWP·HWPX·DOC·DOCX·PPT·PPTX** → `pdf`: `run_parse` 가 **원격 변환 API**(`KBP_FILECONVERT_URL`)로 PDF 화한 뒤 `.pdf` 이름으로 PDF 레인에 넣는다.
+- **DOC·PPT·PPTX** → `pdf`: `run_parse`가 원격 변환 API로 PDF화한다. DOC는 kordoc 4.9.0 미지원이라 이 경로에 남는다.
 - **HTML/HTM** → `html`: `parse_service/parsers/html`(bs4 + markdownify, 최상위 `<table>` 은 원문 HTML 보존). 형변환 API 미경유(2026-08-11).
 - **TXT·MD·JSON·LOG·XML** → `text`: 변환·파서 없이 그대로 블록화(BOM utf-32/utf-16 → utf-8-sig → cp949, `tools/textdecode.py`). XML 은 2026-08-11 편입(그 전엔 `pdf` 도메인 오분류로 `%PDF` 가드에서 실패). 블록이 0개면 `parse_failed` — 조용한 빈 적재를 막는다.
 - **그 외(미지 확장자)** → `pdf` 도메인으로 가서 `app.py` 의 `%PDF` 가드가 거절한다. 별도 폴백 파서는 없다.

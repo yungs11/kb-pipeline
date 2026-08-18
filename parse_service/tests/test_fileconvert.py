@@ -40,7 +40,7 @@ def _ok(request):
 
 def test_converts_and_downloads(monkeypatch):
     seen = _wire(monkeypatch, _ok)
-    assert fileconvert.convert_to_pdf(b"HWP", "a.hwp") == PDF
+    assert fileconvert.convert_to_pdf(b"PPTX", "a.pptx") == PDF
     post, get = seen
     assert post.method == "POST" and post.url.path.endswith("/convert-sync")
     assert get.method == "GET" and get.url.path.endswith("/download/621")
@@ -49,7 +49,7 @@ def test_converts_and_downloads(monkeypatch):
 def test_auth_header_on_post_only(monkeypatch):
     """명세 §2.2 — 변환에만 인증, 다운로드는 인증 불필요."""
     seen = _wire(monkeypatch, _ok)
-    fileconvert.convert_to_pdf(b"HWP", "a.hwp")
+    fileconvert.convert_to_pdf(b"PPTX", "a.pptx")
     post, get = seen
     assert post.headers.get("authorization") == "Bearer T0KEN"
     assert "authorization" not in get.headers
@@ -60,7 +60,7 @@ def test_url_unset_raises_without_http(monkeypatch):
     monkeypatch.delenv("KBP_FILECONVERT_URL", raising=False)
     seen = _wire(monkeypatch, _ok)
     with pytest.raises(ToolError):
-        fileconvert.convert_to_pdf(b"HWP", "a.hwp")
+        fileconvert.convert_to_pdf(b"PPTX", "a.pptx")
     assert seen == []
 
 
@@ -70,7 +70,7 @@ def test_http200_with_errorcode_is_failure(monkeypatch):
         200, json={"errorCode": "E000001", "errorMsg": "필수 파일이 첨부되지 않았습니다.",
                    "data": None}))
     with pytest.raises(ToolError, match="E000001"):
-        fileconvert.convert_to_pdf(b"", "a.hwp")
+        fileconvert.convert_to_pdf(b"", "a.pptx")
 
 
 def test_unsupported_ext_422(monkeypatch):
@@ -87,7 +87,7 @@ def test_download_not_pdf_raises(monkeypatch):
         return httpx.Response(500, json={"errorCode": "E000007"})   # 명세 §3.2.3
     _wire(monkeypatch, h)
     with pytest.raises(ToolError, match="PDF"):
-        fileconvert.convert_to_pdf(b"HWP", "a.hwp")
+        fileconvert.convert_to_pdf(b"PPTX", "a.pptx")
 
 
 def test_pdf_with_preamble_accepted(monkeypatch):
@@ -97,18 +97,19 @@ def test_pdf_with_preamble_accepted(monkeypatch):
             return httpx.Response(200, json={"success": True, "cnvId": 3})
         return httpx.Response(200, content=b"junk\r\n" + PDF)
     _wire(monkeypatch, h)
-    assert fileconvert.convert_to_pdf(b"HWP", "a.hwp").endswith(b"body")
+    assert fileconvert.convert_to_pdf(b"PPTX", "a.pptx").endswith(b"body")
 
 
 def test_token_not_in_error_message(monkeypatch):
     _wire(monkeypatch, lambda r: httpx.Response(200, json={"errorCode": "E1", "errorMsg": "x"}))
     with pytest.raises(ToolError) as ei:
-        fileconvert.convert_to_pdf(b"x", "a.hwp")
+        fileconvert.convert_to_pdf(b"x", "a.pptx")
     assert "T0KEN" not in str(ei.value)
 
 
 @pytest.mark.parametrize("filename,expected", [
-    ("a.hwp", True), ("A.HWP", True), ("a.docx", True), ("a.pptx", True),
+    ("a.hwp", False), ("A.HWP", False), ("a.hwpx", False), ("a.docx", False),
+    ("a.doc", True), ("a.ppt", True), ("a.pptx", True),
     ("a.pdf", False), ("a.xlsx", False), ("a.png", False), ("a.txt", False),
     ("a.odt", False), ("upload", False), ("a.tar.gz", False),
 ])
