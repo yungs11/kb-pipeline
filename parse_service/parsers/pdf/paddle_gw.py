@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+import time
 
 import httpx
 
@@ -254,9 +255,11 @@ def run_paddle_gateway(pdf_bytes: bytes, filename: str,
             return True, "triggered"
         return False, "skipped_no_image_labeled_blocks_in_layout"
 
-    def one(rp, probe: bool = False) -> tuple[int, list, list, tuple | None, str, str, dict | None]:
-        """(page_number, blocks, layout, page_size, status, error, gw2_meta) — **7-key 계약**
-        (v7 — gw2_meta 추가, 이전 6-key: page_number/blocks/layout/page_size/status/error).
+    def one(rp, probe: bool = False) -> tuple[int, list, list, tuple | None, str, str, dict | None, float | None]:
+        """(page_number, blocks, layout, page_size, status, error, gw2_meta, elapsed_ms) —
+        **8-key 계약**(2026-08-18 — elapsed_ms 추가, 이전 7-key: ...gw2_meta까지).
+        `elapsed_ms`는 이 함수 몸통 전체(1차 gw 호출 + gw2 있으면 그것까지) 소요시간이다
+        — page_traces.processing_ms 계산에 쓰인다.
 
         두 브랜치가 서로 다른 4-tuple 을 냈다(2026-08-12 재통합에서 합쳤다):
         HEAD `(n, blocks, status, error)` / scan-lane `(n, blocks, layout, page_size)`.
@@ -274,14 +277,16 @@ def run_paddle_gateway(pdf_bytes: bytes, filename: str,
         "붕괴 페이지" 로 기록된다.** 판정(quarantine)과 사고(engine error)를 가른다.
         """
         name = f"page-{rp.page_number}.jpeg"
+        _t0 = time.perf_counter()
         try:
             md, layout, page_size = _post_page(rp.jpeg, name)
         except Exception as exc:  # noqa: BLE001
             if probe:
                 raise  # 첫 페이지 실패 = 게이트웨이 불능 → 레인 포기(즉시 폴백)
             log.exception("paddle_gw page %d failed (%s)", rp.page_number, filename)
+            elapsed_ms = round((time.perf_counter() - _t0) * 1000, 1)
             return (rp.page_number, [], [], None,
-                    "error", f"{type(exc).__name__}: {str(exc)[:200]}", None)
+                    "error", f"{type(exc).__name__}: {str(exc)[:200]}", None, elapsed_ms)
 
         # gw2_meta 는 **항상** 채운다(2026-08-18 사용자 지시) — 트리거 안 됐어도 왜
         # 안 됐는지가 로그(page_traces.attempts)에 남아야 한다. 이전엔 트리거 안 되면
@@ -310,16 +315,17 @@ def run_paddle_gateway(pdf_bytes: bytes, filename: str,
             md = _splice_gw2_block_content(md, layout)
         md = _strip_gateway_image_refs(md)   # 미해석 이미지 참조 제거(gw2 실패/비활성/미매칭 시 폴백망)
         blocks = hybrid_to_blocks(md, page_idx=rp.page_number)
-        return rp.page_number, blocks, layout, page_size, "ok", "", gw2_meta
+        elapsed_ms = round((time.perf_counter() - _t0) * 1000, 1)
+        return rp.page_number, blocks, layout, page_size, "ok", "", gw2_meta, elapsed_ms
 
     results = [one(rendered[0], probe=True)]   # 프로브 — 실패 시 여기서 raise
     if len(rendered) > 1:
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
             results += list(ex.map(one, rendered[1:]))
 
-    # layout/page_size/status/error/gw2_meta 는 **순수 추가** — 기존 두 키(page_number,
-    # blocks)는 그대로다. 모르는 소비자는 무시한다(blocks 계약 불변).
+    # layout/page_size/status/error/gw2_meta/elapsed_ms 는 **순수 추가** — 기존 두 키
+    # (page_number, blocks)는 그대로다. 모르는 소비자는 무시한다(blocks 계약 불변).
     return [{"page_number": n, "blocks": blocks, "layout": layout, "page_size": page_size,
-             "status": status, "error": err, "gw2_meta": gw2_meta}
-            for n, blocks, layout, page_size, status, err, gw2_meta
+             "status": status, "error": err, "gw2_meta": gw2_meta, "elapsed_ms": elapsed_ms}
+            for n, blocks, layout, page_size, status, err, gw2_meta, elapsed_ms
             in sorted(results, key=lambda t: t[0])]

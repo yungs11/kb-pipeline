@@ -275,6 +275,10 @@ class VLCallMeta:
 
     def to_dict(self) -> Dict[str, Any]:
         d = {"model": self.model, "tokens": self.tokens, "finish": self.finish}
+        if self.elapsed is not None:
+            # ms 단위로 노출(2026-08-18) — page_traces.processing_ms 계산이 이 값을
+            # 그대로 합산하므로, 소비자 쪽 관례(ms, round 1자리)에 맞춘다.
+            d["elapsed_ms"] = round(self.elapsed * 1000, 1)
         if self.error:
             d["error"] = self.error
         return {k: v for k, v in d.items() if v is not None}

@@ -74,9 +74,19 @@ async def ocr_file_to_elements(file_bytes: bytes, filename: str,
     # 페이지 VL 호출은 **동시**에 돌린다(`_sem()` 으로 KBP_VL_MAX_CONCURRENT 제한).
     # 이전에는 sequential await 라 세마포어가 아무 일도 하지 않았다 — 코루틴이 하나뿐이었다.
     async def _call(b64: str) -> tuple[str, "vl_api.VLCallMeta"]:
-        async with _sem():
-            return await vl_api.call_vl_api_with_base64(
-                b64, user_p, system_p, max_tokens=max_tokens)
+        import time
+        _t0 = time.perf_counter()
+        try:
+            async with _sem():
+                return await vl_api.call_vl_api_with_base64(
+                    b64, user_p, system_p, max_tokens=max_tokens)
+        except Exception as exc:
+            # 실패해도 걸린 시간은 남긴다(2026-08-18) — `call_vl_api_with_base64`는
+            # 실패 시 meta 없이 예외만 던지므로(§docstring), 여기서 측정해 예외 객체에
+            # 실어 올린다. 안 남기면 "시도했다 실패"가 "애초에 시도 없음"과
+            # `processing_ms=None`으로 똑같이 뭉개진다.
+            exc._vl_elapsed = time.perf_counter() - _t0  # noqa: SLF001
+            raise
 
     responses = await asyncio.gather(*(_call(b) for b in b64_pages),
                                      return_exceptions=True)
@@ -87,7 +97,8 @@ async def ocr_file_to_elements(file_bytes: bytes, filename: str,
             # 없다. `VLCallMeta.error` 로 사유를 실어 올린다 — 동작은 그대로(continue).
             log.error("VL OCR failed page %d", page_num, exc_info=resp)
             call_metas.append(vl_api.VLCallMeta(
-                error=f"{type(resp).__name__}: {str(resp)[:160]}"))
+                error=f"{type(resp).__name__}: {str(resp)[:160]}",
+                elapsed=getattr(resp, "_vl_elapsed", None)))
             continue
         resp, meta = resp
         call_metas.append(meta)
@@ -121,13 +132,18 @@ async def ocr_file_to_elements(file_bytes: bytes, filename: str,
 
 def ocr_elements_sync(file_bytes: bytes, filename: str,
                       prompt_override: tuple[str, str] | None = None,
-                      *, max_tokens: int | None = None) -> list[dict]:
+                      *, max_tokens: int | None = None,
+                      return_meta: bool = False) -> list[dict] | dict:
     # parse-svc /parse 핸들러는 async def 라 이벤트루프가 도는 스레드에서 호출될 수 있다 —
     # 그 안에서 asyncio.run() 은 RuntimeError. 루프가 돌고 있으면 별도 스레드에서
     # asyncio.run 을 실행해 안전하게 블로킹한다.
+    # `return_meta=True`(2026-08-18, 이미지 도메인 page_traces 시간 계측용)면 `["elements"]`
+    # 만 골라내지 않고 `ocr_file_to_elements`의 전체 dict({"elements","call_metas",...})를
+    # 그대로 돌려준다 — 기존 호출부(`pdf/__init__.py:443` 등)는 기본값 `False`라 무변경.
     def _run():
-        return asyncio.run(ocr_file_to_elements(
-            file_bytes, filename, prompt_override, max_tokens=max_tokens))["elements"]
+        d = asyncio.run(ocr_file_to_elements(
+            file_bytes, filename, prompt_override, max_tokens=max_tokens))
+        return d if return_meta else d["elements"]
     try:
         asyncio.get_running_loop()
     except RuntimeError:
@@ -150,12 +166,19 @@ async def ocr_elements_many(jobs: list[Job]) -> list[tuple[list[dict], list]]:
     건별 실패는 비치명 — 그 자리에 빈 리스트가 들어간다(인덱스 정렬 보존).
     """
     async def _one(job: Job) -> tuple[list[dict], list]:
-        file_bytes, filename = job[0], job[1]
-        prompt_override = job[2] if len(job) > 2 else None
-        max_tokens = job[3] if len(job) > 3 else None
-        res = await ocr_file_to_elements(
-            file_bytes, filename, prompt_override, max_tokens=max_tokens)
-        return res["elements"], res.get("call_metas") or []
+        import time
+        _t0 = time.perf_counter()
+        try:
+            file_bytes, filename = job[0], job[1]
+            prompt_override = job[2] if len(job) > 2 else None
+            max_tokens = job[3] if len(job) > 3 else None
+            res = await ocr_file_to_elements(
+                file_bytes, filename, prompt_override, max_tokens=max_tokens)
+            return res["elements"], res.get("call_metas") or []
+        except Exception as exc:
+            # _call()과 동일 — 실패해도 걸린 시간을 예외 객체에 실어 올린다(2026-08-18).
+            exc._vl_elapsed = time.perf_counter() - _t0  # noqa: SLF001
+            raise
 
     results = await asyncio.gather(*(_one(j) for j in jobs), return_exceptions=True)
     out: list[tuple[list[dict], list]] = []
@@ -166,7 +189,8 @@ async def ocr_elements_many(jobs: list[Job]) -> list[tuple[list[dict], list]]:
             log.error("VL OCR job failed (%s)", job[1], exc_info=r)
             from parse_service.parsers.ocr import vl_api
             out.append(([], [vl_api.VLCallMeta(
-                error=f"{type(r).__name__}: {str(r)[:160]}")]))
+                error=f"{type(r).__name__}: {str(r)[:160]}",
+                elapsed=getattr(r, "_vl_elapsed", None))]))
         else:
             out.append(r)
     return out
@@ -186,7 +210,11 @@ def ocr_elements_many_sync(jobs: list[Job]) -> list[tuple[list[dict], list]]:
 
 
 def _whole_file_elements(file_bytes: bytes, filename: str, ocr_url: str | None = None,
-                         prompt_override: tuple[str, str] | None = None) -> list[dict]:
+                         prompt_override: tuple[str, str] | None = None,
+                         *, with_meta: bool = False) -> list[dict] | tuple[list[dict], list]:
+    if with_meta:
+        d = ocr_elements_sync(file_bytes, filename, prompt_override, return_meta=True)
+        return d["elements"], d.get("call_metas") or []
     return ocr_elements_sync(file_bytes, filename, prompt_override)
 
 
@@ -201,20 +229,31 @@ def _elements_to_pages(elements: list[dict]) -> list[dict]:
     return [{"page_number": pn, "blocks": by_page[pn]} for pn in sorted(by_page)]
 
 
-def _page_traces_for_ocr(pages: list[dict]) -> list[dict]:
+def _page_traces_for_ocr(pages: list[dict], call_metas: list | None = None) -> list[dict]:
     """이미지/pptx 도메인 page_traces(2026-08-18 사용자 지시 — "어떤 lane을 탔는지 로그가
     없다"). PDF 처럼 triage/gate 레인 분기가 없어(§router.py — `IMAGE_EXTS`/pptx 전부
     `ocr` 도메인 하나로 매핑, paddle_gw 미배선) 기록할 "선택"이 없다 — 그래서 매 페이지가
     항상 같은 단일 사실("vl_ocr_direct")을 남긴다. PDF 쪽 page_trace 딕셔너리 계약
     (`parsers/pdf/__init__.py`)과 키를 맞춰 admin 화면(knowledge_base)이 도메인 구분 없이
     렌더할 수 있게 한다.
+
+    `call_metas`(2026-08-18, 페이지별 처리시간 노출) — `ocr_file_to_elements`가
+    `enumerate(responses, start=1)`로 원본 페이지 순서 그대로 채우므로(실패해도
+    `VLCallMeta(error=...)`로 자리를 지킴) `call_metas[page_number-1]`이 그 페이지의
+    VL 호출과 1:1 대응한다. 개수가 안 맞거나 없으면(방어) `processing_ms=None`.
     """
     traces = []
     for p in pages:
         bl = p.get("blocks") or []
         chars = sum(len((b.get("table_body") or b.get("text") or "")) for b in bl)
+        pno = p.get("page_number")
+        processing_ms = None
+        if call_metas and isinstance(pno, int) and 0 <= pno - 1 < len(call_metas):
+            meta = call_metas[pno - 1]
+            md_ = meta.to_dict() if hasattr(meta, "to_dict") else {}
+            processing_ms = md_.get("elapsed_ms")
         traces.append({
-            "page_number": p.get("page_number"),
+            "page_number": pno,
             "bucket": None,
             "lane": "vl_ocr_direct",
             "source": "vl" if bl else "empty",
@@ -224,6 +263,7 @@ def _page_traces_for_ocr(pages: list[dict]) -> list[dict]:
             "verdict": None,
             "state": None,
             "verdict_reason": None,
+            "processing_ms": processing_ms,
         })
     return traces
 
@@ -239,8 +279,8 @@ def parse(file_bytes: bytes, filename: str, *, ocr_url: str | None = None) -> Ro
     from parse_service.parsers.ocr import prompts
     override = prompts.page_hybrid_prompts()  # call-time — env(KBP_PAGE_HYBRID_DIAGRAM_RULE) 반영
     try:
-        elements = _whole_file_elements(file_bytes, filename, ocr_url,
-                                        prompt_override=override)
+        elements, call_metas = _whole_file_elements(
+            file_bytes, filename, ocr_url, prompt_override=override, with_meta=True)
     except Exception as e:  # noqa: BLE001
         raise ParserError(f"ocr failed for {filename}: {e}") from e
     if not elements:
@@ -252,4 +292,4 @@ def parse(file_bytes: bytes, filename: str, *, ocr_url: str | None = None) -> Ro
     if removed:
         log.warning("VL 퇴화 블록 %d개 제거 (%s)", removed, filename)
     return RouteResult(kind="pages", chunk_needed=True, pages=pages,
-                       page_traces=_page_traces_for_ocr(pages))
+                       page_traces=_page_traces_for_ocr(pages, call_metas))

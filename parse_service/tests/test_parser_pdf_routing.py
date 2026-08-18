@@ -218,6 +218,27 @@ def test_thin_odl_page_gets_vl(wire):
     assert "VL 전사" in _texts(res.pages, 2)
 
 
+def test_thin_odl_page_processing_ms_from_vl_elapsed(wire, monkeypatch):
+    """thin-ODL 페이지(lane="odl" 유지, VL 전사 경로를 탐)는 `processing_ms`가
+    채워진다 — "ODL 레인은 무조건 None"이 아니다(2026-08-18 ultracode 3라운드 정정:
+    gw/vl 시도가 아예 없는 페이지만 None, VL 트랜스크립션을 거친 thin-ODL은 값이
+    채워진다)."""
+    from parse_service.parsers.ocr.vl_api import VLCallMeta
+
+    def fake_batch(jobs, ocr_url=None, **k):
+        return [([{"category": "text", "content": {"markdown": "VL 전사"}, "page": 0}],
+                  [VLCallMeta(elapsed=0.2)])
+                for _ in jobs]
+
+    monkeypatch.setattr(pdf_parser, "_ocr_elements_for_pages", fake_batch)
+    wire["set_gate"](_decision({1: "odl", 2: "odl"}))
+    wire["set_md"](["# 본문 있음", "![img](x.png)"])     # p2 = 실텍스트 0(thin)
+    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    p2 = next(t for t in res.page_traces if t["page_number"] == 2)
+    assert p2["lane"] == "odl", "lane 은 재대입 없이 odl 로 유지된다"
+    assert p2["processing_ms"] == 200.0
+
+
 def test_gate_none_falls_back_to_odl_lane(monkeypatch):
     """게이트 예외(pymupdf 부재 등) → 문서 전체 ODL. 새 500 을 만들지 않는다."""
     monkeypatch.setattr(pdf_parser, "_safe_decide_route", lambda fb: None)
@@ -709,6 +730,27 @@ def test_page_traces_source_per_branch(wire):
     src = {t["page_number"]: t["source"] for t in res.page_traces}
     assert src[1] == "odl_md"
     assert src[2] == "skip", "SKIP 은 정상적으로 비는 경로 — empty 와 구분해야 한다"
+
+
+def test_page_traces_processing_ms_from_gw_elapsed(wire):
+    """paddle_gw 페이지 — `elapsed_ms`가 attempts 를 거쳐 `processing_ms`로 합산된다
+    (2026-08-18, 페이지별 처리시간 노출)."""
+    wire["set_gate"](_decision({1: "paddle_gw"}))
+    wire["set_gw"]([{"page_number": 1, "blocks": [{"type": "text", "text": "GW 본문"}],
+                     "layout": [], "page_size": None, "status": "ok", "error": "",
+                     "gw2_meta": {"outcome": "skipped", "reason": "x"},
+                     "elapsed_ms": 123.4}])
+    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    assert res.page_traces[0]["processing_ms"] == 123.4
+
+
+def test_page_traces_processing_ms_none_when_no_attempt_measured(wire):
+    """gw/vl 시도 자체가 없는 순수 ODL 페이지는 `processing_ms`가 `None`(0 이 아니다 —
+    "측정 안 됨"과 "0ms 걸림"을 구분해야 한다)."""
+    wire["set_gate"](_decision({1: "odl"}))
+    wire["set_md"](["# 본문"])
+    res = pdf_parser.parse(b"%PDF", "a.pdf", ocr_url="http://ocr")
+    assert res.page_traces[0]["processing_ms"] is None
 
 
 def test_page_traces_empty_overrides_source(wire, monkeypatch, chain_off):

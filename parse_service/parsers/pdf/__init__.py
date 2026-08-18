@@ -765,7 +765,8 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
                 _att(_n, "gw", "no_result")
             else:
                 _att(_n, "gw", _pg.get("status") or "ok",
-                     {"error": _pg.get("error"), "blocks": len(_pg.get("blocks") or ())})
+                     {"error": _pg.get("error"), "blocks": len(_pg.get("blocks") or ()),
+                      "elapsed_ms": _pg.get("elapsed_ms")})
                 if _pg.get("gw2_meta"):
                     _att(_n, "gw2", _pg["gw2_meta"].get("outcome"), _pg["gw2_meta"])
 
@@ -1072,6 +1073,14 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
         chars = sum(len((b.get("table_body") or b.get("text") or "")) for b in bl)
         v = _verdict_by_pno.get(pno) or {}
         sig = _sig_by_pno.get(pno)
+        _pg_attempts = list(t["attempts"]) + list(attempts.get(0, ()))
+        # processing_ms(2026-08-18): 그 페이지의 attempts 안에 elapsed_ms 가 있는 것만
+        # 합산한다 — 지금은 paddle_gw("gw")·VL("vl") 두 주 경로만 잰다(비범위: ODL 전체
+        # 변환/hybrid_vl/폴백 체인은 계측 없음, 합산에서 자연히 0 기여). 하나도 없으면
+        # `None`("측정 안 됨")과 "0ms 걸림"을 구분해야 하므로 0이 아니라 None 을 낸다.
+        _times = [m.get("elapsed_ms") for _s, _o, m in _pg_attempts
+                  if isinstance(m, dict) and m.get("elapsed_ms") is not None]
+        processing_ms = round(sum(_times), 1) if _times else None
         page_traces.append({
             "page_number": pno,
             "bucket": (sig.bucket.name if sig and sig.bucket else None),
@@ -1083,11 +1092,12 @@ def _parse_routed(file_bytes: bytes, filename: str, *, ocr_url: str) -> RouteRes
             #    2b-2 의 "문서 실패 대상 집합" 을 정할 수 없다.
             "source": (t["source"] if (bl or t["source"] in _EMPTY_IS_NORMAL)
                        else "empty"),
-            "attempts": list(t["attempts"]) + list(attempts.get(0, ())),
+            "attempts": _pg_attempts,
             "chars": chars,
             "verdict": v.get("verdict"),
             "state": v.get("state"),
             "verdict_reason": v.get("reason"),
+            "processing_ms": processing_ms,
         })
 
     log.info("parse-svc pdf(%s): pages=%d odl=%d skip=%d paddle=%d vl=%d demoted=%d "

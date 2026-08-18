@@ -300,12 +300,13 @@ def test_empty_page_numbers_returns_empty(monkeypatch):
 # ══════════════════════════════════════════════════════════════════════════════
 # v7(§A.4) — `gw2_meta` 추가로 6키→7키. v8(2026-08-18, 사용자 지시): 트리거 안 돼도
 # gw2_meta 는 항상 채워진다({"outcome":"skipped","reason":...}) — "왜 안 불렸는지"가
-# 로그에 남아야 한다.
-_SEVEN_KEYS = {"page_number", "blocks", "layout", "page_size", "status", "error", "gw2_meta"}
+# 로그에 남아야 한다. 2026-08-18(오후) — `elapsed_ms` 추가로 7키→8키(페이지별 처리시간).
+_EIGHT_KEYS = {"page_number", "blocks", "layout", "page_size", "status", "error",
+               "gw2_meta", "elapsed_ms"}
 
 
 def test_page_dict_carries_six_key_contract_on_success(monkeypatch):
-    """정상 페이지 — 7키 전부 + `status == "ok"`.
+    """정상 페이지 — 8키 전부 + `status == "ok"`.
 
     `layout`/`page_size` 는 `_hybrid_scan_pages` 의 `pg.get("layout")`·`_has_visual` 이 쓴다
     (빠지면 hybrid 가 **영구 거짓**이 되어 통째로 죽는다).
@@ -318,15 +319,16 @@ def test_page_dict_carries_six_key_contract_on_success(monkeypatch):
     monkeypatch.setattr(paddle_gw, "_post_page",
                         lambda jpeg, name, opts=None: ("본문 텍스트", [{"label": "text"}], (800, 600)))
     (pg,) = paddle_gw.run_paddle_gateway(b"%PDF", "a.pdf")
-    assert set(pg) == _SEVEN_KEYS, f"7키 계약 위반: {sorted(pg)}"
+    assert set(pg) == _EIGHT_KEYS, f"8키 계약 위반: {sorted(pg)}"
     assert pg["status"] == "ok" and pg["error"] == ""
     assert pg["layout"] == [{"label": "text"}] and pg["page_size"] == (800, 600)
     assert pg["blocks"], "정상 페이지는 blocks 가 있다"
     assert pg["gw2_meta"] == {"outcome": "skipped", "reason": "skipped_no_image_labeled_blocks_in_layout"}
+    assert isinstance(pg["elapsed_ms"], float) and pg["elapsed_ms"] >= 0
 
 
 def test_page_dict_carries_six_key_contract_on_page_error(monkeypatch):
-    """개별 페이지 예외 — 7키 유지 + `status == "error"` + 사유 보존.
+    """개별 페이지 예외 — 8키 유지 + `status == "error"` + 사유 보존 + elapsed_ms 도 남는다.
 
     프로브(첫 페이지)가 아닌 페이지의 실패는 **레인 포기가 아니다** — 그 페이지만
     `status="error"` 로 표시하고 나머지는 계속 간다.
@@ -342,8 +344,9 @@ def test_page_dict_carries_six_key_contract_on_page_error(monkeypatch):
 
     monkeypatch.setattr(paddle_gw, "_post_page", flaky)
     p1, p2 = paddle_gw.run_paddle_gateway(b"%PDF", "a.pdf")
-    assert set(p2) == _SEVEN_KEYS, f"실패 페이지도 7키를 유지한다: {sorted(p2)}"
+    assert set(p2) == _EIGHT_KEYS, f"실패 페이지도 8키를 유지한다: {sorted(p2)}"
     assert p2["status"] == "error" and "TimeoutError" in p2["error"]
+    assert isinstance(p2["elapsed_ms"], float) and p2["elapsed_ms"] >= 0
     assert p2["blocks"] == [] and p2["layout"] == [] and p2["page_size"] is None
     assert p1["status"] == "ok", "다른 페이지는 영향 없다(레인 포기 아님)"
 
