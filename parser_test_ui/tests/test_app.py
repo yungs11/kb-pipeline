@@ -80,7 +80,7 @@ def test_upload_over_size_limit_returns_413(client, monkeypatch):
     assert resp.status_code == 413
 
 
-def test_submit_excel_job_redirects_with_since(client):
+def test_submit_excel_job_redirects_to_index(client):
     def fake_post(url, files, data):
         assert url.endswith("/jobs/parse")
         assert data["batch_key"] == "parser-test-ui"
@@ -93,7 +93,7 @@ def test_submit_excel_job_redirects_with_since(client):
     )
     assert resp.status_code == 303
     location = resp.headers["location"]
-    assert location.startswith("/result/job-excel-1?since=")
+    assert location == "/?submitted=job-excel-1", "제출 후 /result 로 넘어가지 않고 목록(/)으로 돌아가야 한다(사용자 요청)"
 
 
 def test_excel_success_renders_chunk_table_and_gate_banner(client):
@@ -147,7 +147,7 @@ def test_general_success_renders_page_traces_and_page_text(client):
     body = resp.text
     assert "ODL" in body
     assert "hello page one" in body
-    assert "1,234.5ms" in body, "문서 단위 총 처리시간이 보여야 한다(페이지별 processing_ms가 없는 레인 대응)"
+    assert "0분 1초" in body, "문서 단위 총 처리시간이 M분 S초 형식으로 보여야 한다(페이지별 processing_ms가 없는 레인 대응)"
     assert "—" in body, "페이지별 processing_ms 없을 때 빈 칸이 아니라 대시로 표시해야 한다"
 
 
@@ -197,3 +197,4 @@ def test_history_lists_jobs(client):
     assert resp.status_code == 200
     assert "job-abc" in resp.text
     assert "succeeded" in resp.text
+    assert "1분 0초" in resp.text, "created_at→completed_at 경과시간이 M분 S초로 표시돼야 한다"

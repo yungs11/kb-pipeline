@@ -145,11 +145,32 @@ def _gate_banner(gate: dict | None) -> str:
 
 
 def _fmt_ms(value) -> str:
-    """knowledge_base ParsingLanesCard.tsx 와 동일 관례 — 없으면 '—'(빈 문자열 아님,
-    "0"으로 오인하지 않게 명시적으로 표시)."""
+    """"M분 S초" 형식(사용자 요청, 2026-08-19) — 없으면 '—'(빈 문자열 아님, "0"으로
+    오인하지 않게 명시적으로 표시)."""
     if value is None:
         return "—"
-    return f"{float(value):,.1f}"
+    total_seconds = float(value) / 1000.0
+    minutes, seconds = divmod(round(total_seconds), 60)
+    return f"{minutes}분 {seconds}초"
+
+
+def _parse_iso(value: str | None):
+    if not value:
+        return None
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _job_duration_str(job: dict) -> str:
+    """created_at→completed_at 경과시간을 "M분 S초"로. 아직 안 끝났으면 '—'."""
+    start = _parse_iso(job.get("created_at"))
+    end = _parse_iso(job.get("completed_at"))
+    if start is None or end is None:
+        return "—"
+    return _fmt_ms((end - start).total_seconds() * 1000.0)
 
 
 def _page_traces_table(traces: list[dict]) -> str:
@@ -171,7 +192,7 @@ def _page_traces_table(traces: list[dict]) -> str:
     return (
         "<div class='parser-test-table'><table>"
         "<tr><th>페이지</th><th>lane</th><th>source</th><th>verdict</th>"
-        "<th>chars</th><th>처리(ms)</th></tr>"
+        "<th>chars</th><th>처리시간</th></tr>"
         + "".join(rows) + "</table></div>"
     )
 
@@ -196,7 +217,7 @@ def _render_result(result: dict[str, Any]) -> str:
         # 동일하게 문서 전체 파서 처리시간(timing_metrics.total_ms)을 별도로 보여준다.
         total_ms = (result.get("timing_metrics") or {}).get("total_ms")
         if total_ms is not None:
-            parts.append(f"<p>문서 파싱 처리시간: {_fmt_ms(total_ms)}ms</p>")
+            parts.append(f"<p>문서 파싱 처리시간: {_fmt_ms(total_ms)}</p>")
         parts.append(_page_traces_table(traces))
 
     if result.get("chunk_needed") is False:
@@ -247,8 +268,14 @@ def healthz() -> dict[str, str]:
 
 
 @app.get("/", response_class=HTMLResponse)
-async def index() -> str:
+async def index(submitted: str | None = Query(None)) -> str:
     history = await _render_history_summary()
+    banner = (
+        f"<div style='background:#e8f0fe;border:1px solid #4285f4;padding:8px 14px;"
+        f"margin:8px 0;border-radius:6px'>제출됨 — <a href='/result/{submitted}'>"
+        f"{_escape(submitted[:8])}…</a> (아래 목록에도 뜬다, 진행 중이면 잠시 후 새로고침)</div>"
+        if submitted else ""
+    )
     return f"""<!doctype html><meta charset="utf-8"><title>PARSER 테스트</title>
 <style>
 body{{font-family:sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem}}
@@ -268,6 +295,7 @@ standalone 테스트 화면입니다. 무인증 — 민감한 문서는 올리�
   </p>
   <p><button type="submit">파싱 실행</button></p>
 </form>
+{banner}
 <h3>최근 테스트 기록</h3>
 {history}
 """
@@ -294,11 +322,13 @@ async def _render_history_summary(limit: int = 10) -> str:
             f"<td>{_escape(j.get('status', ''))}</td>"
             f"<td>{_escape(j.get('created_at') or '')}</td>"
             f"<td>{_escape(j.get('completed_at') or '')}</td>"
+            f"<td>{_job_duration_str(j)}</td>"
             "</tr>"
         )
     return (
         "<table border='1' cellpadding='4' style='border-collapse:collapse;font-size:13px;width:100%'>"
-        "<tr style='background:#eee'><th>job_id</th><th>상태</th><th>생성</th><th>완료</th></tr>"
+        "<tr style='background:#eee'><th>job_id</th><th>상태</th><th>생성</th><th>완료</th>"
+        "<th>처리시간</th></tr>"
         + "".join(rows) + "</table>"
         "<p><a href='/history'>전체 기록 보기</a></p>"
     )
@@ -332,8 +362,10 @@ async def parse(file: UploadFile = File(...), mode: str = Form("general")) -> Re
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
     job_id = resp.json()["job_id"]
-    since = int(time.time())
-    return RedirectResponse(f"/result/{job_id}?since={since}", status_code=303)
+    # 사용자 요청(2026-08-19): 제출 즉시 /result 로 넘어가 폴링 화면을 보여주는 대신
+    # 목록(/)으로 돌아가 "최근 테스트 기록"에 새 행이 뜬 것만 보면 되게 한다 — 완료된
+    # 결과를 보려면 그 목록의 job_id 링크를 누른다.
+    return RedirectResponse(f"/?submitted={job_id}", status_code=303)
 
 
 @app.get("/result/{job_id}", response_class=HTMLResponse)
