@@ -282,6 +282,35 @@ def test_index_shows_worker_status(client):
     assert "12.5" in resp.text
 
 
+def test_index_recent_history_shows_lane_and_page_count(client):
+    """작은 "최근 테스트 기록"(10건)만 잡마다 result를 열어 lane/페이지수를
+    보강한다 — /history(페이징 대상)는 안 건드린다(사용자 요청, 2026-08-19)."""
+    def fake_get(url, params):
+        if url.endswith("/jobs/workers"):
+            return _FakeResponse(200, {"online": True})
+        if url.endswith("/jobs"):
+            return _FakeResponse(200, {"jobs": [
+                {"id": "dddddddd-2222-0000-0000-000000000005", "status": "succeeded",
+                 "filename": "a.pdf", "created_at": "2026-08-19T00:00:00",
+                 "completed_at": "2026-08-19T00:00:10"},
+            ]})
+        if url.endswith("/jobs/dddddddd-2222-0000-0000-000000000005/result"):
+            return _FakeResponse(200, {
+                "page_count": 3,
+                "page_traces": [
+                    {"lane": "odl"}, {"lane": "odl"}, {"lane": "paddle_gw"},
+                ],
+            })
+        raise AssertionError(f"unexpected GET {url}")
+
+    _HANDLER["get"] = fake_get
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert "ODL" in resp.text
+    assert "스캔(GW)" in resp.text
+    assert ">3<" in resp.text, "문서 페이지수 3이 표에 보여야 한다"
+
+
 def test_history_pagination_shows_next_page_link_only_when_cursor_present(client):
     def fake_get(url, params):
         assert "before_created_at" not in params
