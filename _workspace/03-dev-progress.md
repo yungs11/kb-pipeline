@@ -1949,3 +1949,45 @@ healthcheck가 상시 실패, (2) 엑셀 모드 렌더러가 8600 자신의 청�
 검증 후 격리 볼륨/컨테이너는 정리하고 원래 dev 스택(postgres/minio/edgequake/
 edgequake_webui)을 복원. knowledge_base `tsc --noEmit`/`eslint`는 §E 적용
 직후 clean 확인 완료(위 절 참고).
+
+## kb-pipeline — parser_test_ui/jobs API 후속 개선 — 배치(180만건) 대비 (2026-08-19)
+
+실사용(격리 검증 스택) 중 사용자 피드백을 받아 여러 라운드로 개선:
+
+- **healthcheck/엑셀 청크 필드명 버그 수정**: `parser_test_ui` Dockerfile에
+  `curl` 누락(healthcheck 상시 실패), 엑셀 모드 렌더러가 8600 자신의 청크 스키마
+  (chunk_type/sheet)를 그대로 써서 실제 parse-svc 스키마(chunk_index/text/
+  titles_context/pages)와 안 맞아 전부 빈칸이던 버그 — 둘 다 실사용 중 발견·수정.
+- **반사형 XSS 수정**: `submitted`/`job_id` 쿼리·경로 파라미터가 escape 없이
+  href/`<meta refresh>`/outbound URL에 그대로 실림 — 공유 정규식(`_JOB_ID_RE`,
+  facade uuid.uuid4() 형식)으로 검증 후 통과 못 하면 배너 생략/즉시 거절.
+- **UX**: 파싱 실행 후 `/result`로 자동 이동하지 않고 `/`(목록)로 복귀(제출 확인
+  배너만), 처리시간 표시를 "M분 S초"(분 없으면 "S초"만)로 통일.
+- **facade `_public()` 확장(additive)**: `filename`(payload에서), `page_count`/
+  `lanes`(완료 시점에 `parse_result_summary()`로 미리 뽑아 `kbp.jobs.page_count`/
+  `lanes text[]` 컬럼에 저장 — result blob의 TTL/오프로드와 독립이라 content를
+  나중에 지워도 이 요약은 남는다). 목록/집계가 result JSON을 안 열어도 되는 게
+  핵심 — 사용자가 180만건 배치 처리 후 리포트/로깅에 쓸 예정이라 스키마 변경으로
+  확정.
+- **keyset 페이징**: `GET /jobs`에 `before_created_at`/`before_id` + 응답의
+  `next_cursor` 추가(OFFSET 아님 — 배치 규모에서 뒤로 갈수록 선형으로 느려지는
+  문제 회피). `parser_test_ui` "/history"가 "다음 페이지" 링크로 이어붙인다.
+  batch_key 필터를 빼고 `kind=parse`로만 걸러 이 UI 밖에서(curl 등) 직접
+  `/jobs/parse`를 호출한 실행 기록도 함께 보인다.
+- **파싱 레인 로그 표**: `bucket`(triage 판정)·`시도`(attempts trace — 이미
+  page_traces에 있던 값, `route:X(...)/triage:Y(...) → gw:ok` 식으로 렌더) 컬럼
+  추가. facade-worker 온라인/capacity/queued 상태 요약도 index/history에 추가.
+- **결과 저장 구조 확인**(사용자 질문에서 정리): facade job queue는 항상 result
+  전체를 저장한다(비동기 hand-off 특성상 구조적으로 필요) — 전체 airgap 배포는
+  72h(기본), parse-only 테스트 배포만 8760h(1년, 이 배포 자체가 한 달 정도만
+  쓰고 삭제될 예정이라 실질적 영향 없음). edgequake가 실제 영구 저장소이고
+  facade 잡 큐는 어디까지나 파싱→청킹→적재 사이 임시 전달 통로 — 이미 있는
+  아키텍처가 "요약은 얇게 오래, 본문은 무겁게 짧게" 2단 구조와 같아 별도
+  스키마 분리는 불필요하다고 결론.
+
+검증: 격리 스택(`kbp-parse-verify`)에서 실제 7페이지 스캔 PDF로 lane=[odl,
+paddle_gw]/page_count=7이 result 없이 `GET /jobs/{id}`에 바로 노출, keyset
+페이징 curl 왕복(중복·누락 없음), attempts trace 실제 렌더 확인. facade
+schema.py의 `ALTER TABLE ADD COLUMN IF NOT EXISTS`가 실행 중 컨테이너에
+멱등 적용됨을 `\d kbp.jobs`로 확인. service/tests 337 passed, parser_test_ui/
+tests 16 passed.
