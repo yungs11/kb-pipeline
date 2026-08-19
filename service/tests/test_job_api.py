@@ -181,6 +181,26 @@ def test_job_status_has_no_queue_position(client):
     assert body["status"] == "queued"
 
 
+def test_job_status_and_list_expose_filename_for_parse_jobs(client):
+    """parser_test_ui "최근 테스트 기록" 화면이 파일명/확장자를 보여주려고
+    2026-08-19 추가 — payload.filename 을 GET /jobs/{id}·GET /jobs 둘 다에 얹는다."""
+    _use(get_parse_client, FakeParse())
+    job_id = client.post("/jobs/parse",
+                         files={"file": ("보고서.pdf", b"x", "application/pdf")}).json()["job_id"]
+    body = client.get(f"/jobs/{job_id}").json()
+    assert body["filename"] == "보고서.pdf"
+    listed = client.get("/jobs").json()["jobs"]
+    assert any(j["id"] == job_id and j["filename"] == "보고서.pdf" for j in listed)
+
+
+def test_job_status_filename_is_none_for_non_parse_jobs(client):
+    job_id = client.post(
+        "/jobs/chunk", json={"enriched_content": "x", "doc_name": "d"},
+    ).json()["job_id"]
+    body = client.get(f"/jobs/{job_id}").json()
+    assert body["filename"] is None
+
+
 # ── 레거시 래퍼 응답 매핑 ──────────────────────────────────────────────────
 
 def test_legacy_parse_returns_same_body_as_before(client):

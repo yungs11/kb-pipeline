@@ -529,6 +529,7 @@ def _public(repo, row) -> dict[str, Any]:
     버킷·workspace·로컬 슬롯 3중 조건이라 "앞에 N건" 이 대기 시간을 예측하지 못한다.
     """
     queued = row["status"] == "queued"
+    payload = row.get("payload")
     return {
         "id": str(row["id"]), "kind": row["kind"], "status": row["status"],
         "stage": row["stage"], "workspace_key": row["workspace_key"],
@@ -538,6 +539,13 @@ def _public(repo, row) -> dict[str, Any]:
         "started_at": _iso(row.get("started_at")),
         "completed_at": _iso(row.get("completed_at")),
         "error": row["error"],
+        # payload 는 항상 노출하지 않는다(적재 잡의 chunk 텍스트 등 큰 값이 섞임) —
+        # kind=="parse" 잡의 filename 만 표 목록용으로 additive 하게 뽑아 얹는다
+        # (parser_test_ui "최근 테스트 기록" 화면이 파일명/확장자를 보여주기 위해
+        # 2026-08-19 추가). payload_ref 로 오프로드된 경우(드묾 — filename 은
+        # 작아서 거의 항상 inline)엔 None.
+        "filename": (payload.get("filename") if row["kind"] == "parse"
+                     and isinstance(payload, dict) else None),
     }
 
 

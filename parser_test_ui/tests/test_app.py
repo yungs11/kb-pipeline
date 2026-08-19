@@ -65,6 +65,13 @@ def client():
     return TestClient(app_mod.app)
 
 
+def test_fmt_ms_omits_minutes_when_zero():
+    assert app_mod._fmt_ms(None) == "—"
+    assert app_mod._fmt_ms(1234.5) == "1초", "1분 미만이면 '분' 없이 초만"
+    assert app_mod._fmt_ms(60000) == "1분 0초", "1분 이상이면 M분 S초"
+    assert app_mod._fmt_ms(65000) == "1분 5초"
+
+
 def test_healthz(client):
     resp = client.get("/healthz")
     assert resp.status_code == 200
@@ -157,7 +164,7 @@ def test_general_success_renders_page_traces_and_page_text(client):
     body = resp.text
     assert "ODL" in body
     assert "hello page one" in body
-    assert "0분 1초" in body, "문서 단위 총 처리시간이 M분 S초 형식으로 보여야 한다(페이지별 processing_ms가 없는 레인 대응)"
+    assert "1초" in body, "문서 단위 총 처리시간이 보여야 한다(페이지별 processing_ms가 없는 레인 대응)"
     assert "—" in body, "페이지별 processing_ms 없을 때 빈 칸이 아니라 대시로 표시해야 한다"
 
 
@@ -210,9 +217,12 @@ def test_result_non_terminal_past_timeout_has_no_refresh_tag(client):
 
 def test_history_lists_jobs(client):
     def fake_get(url, params):
-        assert params["batch_key"] == "parser-test-ui"
+        # batch_key 로 안 거른다(사용자 요청) — 이 UI 밖에서 curl 등으로 직접
+        # /jobs/parse 를 호출한 실행 기록도 kind=parse 전부 보여야 한다.
+        assert "batch_key" not in params
+        assert params["kind"] == "parse"
         return _FakeResponse(200, {"jobs": [
-            {"id": "job-abc12345", "status": "succeeded",
+            {"id": "job-abc12345", "status": "succeeded", "filename": "보고서.pdf",
              "created_at": "2026-08-19T00:00:00", "completed_at": "2026-08-19T00:01:00"},
         ]})
 
@@ -222,3 +232,5 @@ def test_history_lists_jobs(client):
     assert "job-abc" in resp.text
     assert "succeeded" in resp.text
     assert "1분 0초" in resp.text, "created_at→completed_at 경과시간이 M분 S초로 표시돼야 한다"
+    assert "보고서.pdf" in resp.text, "파일명이 표에 보여야 한다"
+    assert "pdf" in resp.text, "확장자가 표에 보여야 한다"

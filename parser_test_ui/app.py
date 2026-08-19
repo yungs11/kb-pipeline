@@ -6,8 +6,10 @@ FastAPI, 무인증, doc_guard 판정은 facade 응답의 `gate_summary`를 로�
 의존성이 전혀 없다(fastapi+uvicorn+httpx 뿐).
 
 잡 제출은 명시적 `POST /jobs/parse` + 폴링을 쓴다(레거시 동기 `/parse` 아님) —
-`batch_key="parser-test-ui"`로 태깅해 `/history`에서 이 도구가 만든 실행 기록을
-나중에 다시 조회할 수 있다. plan: /Users/xxx/.claude/plans/concurrent-soaring-mango.md
+`batch_key="parser-test-ui"`로 태깅한다(디버깅용 표식). `/history`는
+**batch_key 로 걸러지 않는다**(사용자 요청, 2026-08-19) — 이 도구뿐 아니라
+같은 facade 의 `/jobs/parse`를 직접(curl 등) 호출한 실행 기록도 `kind=parse`
+전부 여기서 보인다. plan: /Users/xxx/.claude/plans/concurrent-soaring-mango.md
 """
 from __future__ import annotations
 
@@ -150,13 +152,13 @@ def _gate_banner(gate: dict | None) -> str:
 
 
 def _fmt_ms(value) -> str:
-    """"M분 S초" 형식(사용자 요청, 2026-08-19) — 없으면 '—'(빈 문자열 아님, "0"으로
-    오인하지 않게 명시적으로 표시)."""
+    """분이 있으면 "M분 S초", 없으면 "S초"만(사용자 요청, 2026-08-19) — 값 자체가
+    없으면 '—'(빈 문자열 아님, "0"으로 오인하지 않게 명시적으로 표시)."""
     if value is None:
         return "—"
     total_seconds = float(value) / 1000.0
     minutes, seconds = divmod(round(total_seconds), 60)
-    return f"{minutes}분 {seconds}초"
+    return f"{minutes}분 {seconds}초" if minutes else f"{seconds}초"
 
 
 def _parse_iso(value: str | None):
@@ -312,11 +314,21 @@ standalone 테스트 화면입니다. 무인증 — 민감한 문서는 올리�
 """
 
 
+def _ext_of(filename: str | None) -> str:
+    if not filename or "." not in filename:
+        return ""
+    return filename.rsplit(".", 1)[-1].lower()
+
+
 async def _render_history_summary(limit: int = 10) -> str:
     try:
         async with httpx.AsyncClient(timeout=10) as client:
+            # batch_key 필터 없음(사용자 요청, 2026-08-19) — 이 UI 뿐 아니라 facade
+            # /jobs/parse 를 직접 호출한 배치·스크립트 결과도 여기서 같이 보인다.
+            # kind=parse 만 걸러서 이 화면과 무관한 chunk/insert/ingest 잡(다른 자동화가
+            # 같은 facade 를 쓸 경우)이 섞이지 않게 한다.
             resp = await client.get(
-                f"{FACADE_URL}/jobs", params={"batch_key": BATCH_KEY, "limit": limit},
+                f"{FACADE_URL}/jobs", params={"kind": "parse", "limit": limit},
                 headers=await _facade_headers(),
             )
             resp.raise_for_status()
@@ -327,9 +339,12 @@ async def _render_history_summary(limit: int = 10) -> str:
         return "<p class='muted'>아직 실행한 테스트가 없습니다.</p>"
     rows = []
     for j in jobs:
+        filename = j.get("filename") or ""
         rows.append(
             "<tr>"
             f"<td><a href='/result/{j['id']}'>{_escape(j['id'][:8])}…</a></td>"
+            f"<td>{_escape(filename) if filename else '—'}</td>"
+            f"<td>{_escape(_ext_of(filename)) or '—'}</td>"
             f"<td>{_escape(j.get('status', ''))}</td>"
             f"<td>{_escape(j.get('created_at') or '')}</td>"
             f"<td>{_escape(j.get('completed_at') or '')}</td>"
@@ -338,8 +353,8 @@ async def _render_history_summary(limit: int = 10) -> str:
         )
     return (
         "<table border='1' cellpadding='4' style='border-collapse:collapse;font-size:13px;width:100%'>"
-        "<tr style='background:#eee'><th>job_id</th><th>상태</th><th>생성</th><th>완료</th>"
-        "<th>처리시간</th></tr>"
+        "<tr style='background:#eee'><th>job_id</th><th>파일명</th><th>확장자</th>"
+        "<th>상태</th><th>생성</th><th>완료</th><th>처리시간</th></tr>"
         + "".join(rows) + "</table>"
         "<p><a href='/history'>전체 기록 보기</a></p>"
     )
