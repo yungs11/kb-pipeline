@@ -62,6 +62,11 @@ _TAG_RE = re.compile(r"<\/?\s*([a-zA-Z][a-zA-Z0-9]*)\b[^>]*>")
 _SCRIPT_STYLE_RE = re.compile(r"<\s*(script|style)\b[\s\S]*?<\s*/\s*\1\s*>", re.IGNORECASE)
 _TABLE_SEGMENT_RE = re.compile(r"<\s*table\b[\s\S]*?<\s*/\s*table\s*>", re.IGNORECASE)
 
+#: facade job_id 형식(uuid.uuid4()) 허용치. 사용자 입력 경로(`/result/{job_id}`)
+#: URL 경로파라미터·`submitted` 쿼리파라미터 둘 다 이걸로 검증한다(반사형 XSS 방지,
+#: 2026-08-19 보안 리뷰 — outbound URL 조립에도 쓰이므로 escape만으로는 부족하다).
+_JOB_ID_RE = re.compile(r"[0-9a-fA-F-]{1,64}")
+
 
 def _escape(s: str) -> str:
     return html.escape(s, quote=False)
@@ -270,12 +275,18 @@ def healthz() -> dict[str, str]:
 @app.get("/", response_class=HTMLResponse)
 async def index(submitted: str | None = Query(None)) -> str:
     history = await _render_history_summary()
-    banner = (
-        f"<div style='background:#e8f0fe;border:1px solid #4285f4;padding:8px 14px;"
-        f"margin:8px 0;border-radius:6px'>제출됨 — <a href='/result/{submitted}'>"
-        f"{_escape(submitted[:8])}…</a> (아래 목록에도 뜬다, 진행 중이면 잠시 후 새로고침)</div>"
-        if submitted else ""
-    )
+    # 반사형 XSS 방지(2026-08-19, 보안 리뷰) — submitted 는 쿼리파라미터라 사용자가
+    # 임의 문자열을 실어 보낼 수 있다. job_id 는 항상 facade uuid.uuid4() 형식이므로
+    # 그 형식이 아니면 배너 자체를 안 그린다(escape만으로 방어하지 않는다 — href
+    # 속성값 인코딩 규칙이 텍스트 escape와 달라 실수하기 쉽다).
+    banner = ""
+    if submitted and _JOB_ID_RE.fullmatch(submitted):
+        safe_id = _escape(submitted)
+        banner = (
+            f"<div style='background:#e8f0fe;border:1px solid #4285f4;padding:8px 14px;"
+            f"margin:8px 0;border-radius:6px'>제출됨 — <a href='/result/{safe_id}'>"
+            f"{_escape(submitted[:8])}…</a> (아래 목록에도 뜬다, 진행 중이면 잠시 후 새로고침)</div>"
+        )
     return f"""<!doctype html><meta charset="utf-8"><title>PARSER 테스트</title>
 <style>
 body{{font-family:sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem}}
@@ -370,6 +381,13 @@ async def parse(file: UploadFile = File(...), mode: str = Form("general")) -> Re
 
 @app.get("/result/{job_id}", response_class=HTMLResponse)
 async def result(job_id: str, since: int | None = Query(None)) -> str:
+    # job_id 는 URL 경로 파라미터라 사용자가 임의 문자열을 실어 보낼 수 있다(반사형
+    # XSS 방지, 2026-08-19 보안 리뷰) — 아래 <meta refresh> 에 그대로 다시 실리고
+    # facade 로 나가는 URL 조립에도 쓰이므로, facade uuid.uuid4() 형식이 아니면
+    # 여기서 즉시 거절한다(escape만으로는 outbound URL 조립 쪽을 못 지킨다).
+    if not _JOB_ID_RE.fullmatch(job_id):
+        return _error_page("잘못된 job_id 형식입니다.")
+
     now = int(time.time())
     if since is None:
         since = now

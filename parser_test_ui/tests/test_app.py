@@ -71,6 +71,16 @@ def test_healthz(client):
     assert resp.json() == {"status": "ok"}
 
 
+def test_index_ignores_malformed_submitted_param(client):
+    """반사형 XSS 방지(2026-08-19 보안 리뷰) — submitted 쿼리파라미터가 job_id
+    형식이 아니면 배너 자체를 안 그린다(href 속성에 그대로 실리는 값이라
+    escape만으로는 부족)."""
+    resp = client.get('/?submitted=%22%3E%3Cscript%3Ealert(1)%3C/script%3E')
+    assert resp.status_code == 200
+    assert "<script>" not in resp.text
+    assert "제출됨" not in resp.text
+
+
 def test_upload_over_size_limit_returns_413(client, monkeypatch):
     monkeypatch.setattr(app_mod, "MAX_UPLOAD_BYTES", 10)
     resp = client.post(
@@ -84,7 +94,7 @@ def test_submit_excel_job_redirects_to_index(client):
     def fake_post(url, files, data):
         assert url.endswith("/jobs/parse")
         assert data["batch_key"] == "parser-test-ui"
-        return _FakeResponse(202, {"job_id": "job-excel-1", "status": "queued"})
+        return _FakeResponse(202, {"job_id": "aaaaaaaa-0000-0000-0000-000000000001", "status": "queued"})
 
     _HANDLER["post"] = fake_post
     resp = client.post(
@@ -93,14 +103,14 @@ def test_submit_excel_job_redirects_to_index(client):
     )
     assert resp.status_code == 303
     location = resp.headers["location"]
-    assert location == "/?submitted=job-excel-1", "제출 후 /result 로 넘어가지 않고 목록(/)으로 돌아가야 한다(사용자 요청)"
+    assert location == "/?submitted=aaaaaaaa-0000-0000-0000-000000000001", "제출 후 /result 로 넘어가지 않고 목록(/)으로 돌아가야 한다(사용자 요청)"
 
 
 def test_excel_success_renders_chunk_table_and_gate_banner(client):
     def fake_get(url, params):
-        if url.endswith("/jobs/job-excel-1"):
-            return _FakeResponse(200, {"id": "job-excel-1", "status": "succeeded"})
-        if url.endswith("/jobs/job-excel-1/result"):
+        if url.endswith("/jobs/aaaaaaaa-0000-0000-0000-000000000001"):
+            return _FakeResponse(200, {"id": "aaaaaaaa-0000-0000-0000-000000000001", "status": "succeeded"})
+        if url.endswith("/jobs/aaaaaaaa-0000-0000-0000-000000000001/result"):
             return _FakeResponse(200, {
                 "chunk_needed": False,
                 "chunks": [{"chunk_index": 0, "titles_context": ["Sheet1"],
@@ -114,7 +124,7 @@ def test_excel_success_renders_chunk_table_and_gate_banner(client):
         raise AssertionError(f"unexpected GET {url}")
 
     _HANDLER["get"] = fake_get
-    resp = client.get("/result/job-excel-1")
+    resp = client.get("/result/aaaaaaaa-0000-0000-0000-000000000001")
     assert resp.status_code == 200
     body = resp.text
     assert "excel_openpyxl" not in body or "Excel(openpyxl)" in body  # LANE_LABEL 변환 확인
@@ -125,9 +135,9 @@ def test_excel_success_renders_chunk_table_and_gate_banner(client):
 
 def test_general_success_renders_page_traces_and_page_text(client):
     def fake_get(url, params):
-        if url.endswith("/jobs/job-gen-1"):
-            return _FakeResponse(200, {"id": "job-gen-1", "status": "succeeded"})
-        if url.endswith("/jobs/job-gen-1/result"):
+        if url.endswith("/jobs/bbbbbbbb-0000-0000-0000-000000000002"):
+            return _FakeResponse(200, {"id": "bbbbbbbb-0000-0000-0000-000000000002", "status": "succeeded"})
+        if url.endswith("/jobs/bbbbbbbb-0000-0000-0000-000000000002/result"):
             return _FakeResponse(200, {
                 "chunk_needed": True,
                 "enriched_content": "hello page one",
@@ -142,7 +152,7 @@ def test_general_success_renders_page_traces_and_page_text(client):
         raise AssertionError(f"unexpected GET {url}")
 
     _HANDLER["get"] = fake_get
-    resp = client.get("/result/job-gen-1")
+    resp = client.get("/result/bbbbbbbb-0000-0000-0000-000000000002")
     assert resp.status_code == 200
     body = resp.text
     assert "ODL" in body
@@ -156,17 +166,31 @@ def test_result_404_shows_friendly_error(client):
         return _FakeResponse(404, {"detail": "job not found"})
 
     _HANDLER["get"] = fake_get
-    resp = client.get("/result/does-not-exist")
+    resp = client.get("/result/dddddddd-0000-0000-0000-000000000004")
     assert resp.status_code == 200
     assert "찾을 수 없습니다" in resp.text
 
 
-def test_result_non_terminal_within_timeout_has_refresh_tag(client):
+def test_result_rejects_malformed_job_id_without_calling_facade(client):
+    """반사형 XSS 방지(2026-08-19 보안 리뷰) — job_id 가 uuid 형식이 아니면 facade를
+    부르지도 않고 즉시 거절해야 한다(<meta refresh>/outbound URL 조립에 그대로
+    실리는 값이라 escape만으로는 부족)."""
     def fake_get(url, params):
-        return _FakeResponse(200, {"id": "job-x", "status": "running"})
+        raise AssertionError("malformed job_id 인데 facade 를 불렀다")
 
     _HANDLER["get"] = fake_get
-    resp = client.get("/result/job-x", params={"since": int(app_mod.time.time())})
+    resp = client.get("/result/%22%3E%3Cimg%20src=x%20onerror=alert(1)%3E")
+    assert resp.status_code == 200
+    assert "잘못된 job_id" in resp.text
+    assert "<img" not in resp.text
+
+
+def test_result_non_terminal_within_timeout_has_refresh_tag(client):
+    def fake_get(url, params):
+        return _FakeResponse(200, {"id": "cccccccc-0000-0000-0000-000000000003", "status": "running"})
+
+    _HANDLER["get"] = fake_get
+    resp = client.get("/result/cccccccc-0000-0000-0000-000000000003", params={"since": int(app_mod.time.time())})
     assert resp.status_code == 200
     assert "http-equiv='refresh'" in resp.text
     assert "since=" in resp.text
@@ -174,11 +198,11 @@ def test_result_non_terminal_within_timeout_has_refresh_tag(client):
 
 def test_result_non_terminal_past_timeout_has_no_refresh_tag(client):
     def fake_get(url, params):
-        return _FakeResponse(200, {"id": "job-x", "status": "running"})
+        return _FakeResponse(200, {"id": "cccccccc-0000-0000-0000-000000000003", "status": "running"})
 
     _HANDLER["get"] = fake_get
     old_since = int(app_mod.time.time()) - app_mod.POLL_TIMEOUT_SECONDS - 10
-    resp = client.get("/result/job-x", params={"since": old_since})
+    resp = client.get("/result/cccccccc-0000-0000-0000-000000000003", params={"since": old_since})
     assert resp.status_code == 200
     assert "시간 초과" in resp.text
     assert "refresh" not in resp.text
