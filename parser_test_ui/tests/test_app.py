@@ -88,13 +88,19 @@ def test_index_ignores_malformed_submitted_param(client):
     assert "제출됨" not in resp.text
 
 
-def test_upload_over_size_limit_returns_413(client, monkeypatch):
-    monkeypatch.setattr(app_mod, "MAX_UPLOAD_BYTES", 10)
+def test_large_upload_is_not_rejected_by_this_ui(client):
+    """이 화면 자체의 업로드 크기 제한은 없다(사용자 요청, 2026-08-19) — facade
+    자신의 KBP_JOB_MAX_UPLOAD_BYTES 가 실질적인 상한으로 남는다."""
+    def fake_post(url, files, data):
+        return _FakeResponse(202, {"job_id": "eeeeeeee-0000-0000-0000-000000000006",
+                                   "status": "queued"})
+
+    _HANDLER["post"] = fake_post
     resp = client.post(
-        "/parse", files={"file": ("big.pdf", b"x" * 100, "application/pdf")},
-        data={"mode": "general"},
+        "/parse", files={"file": ("big.pdf", b"x" * (20 * 1024 * 1024), "application/pdf")},
+        data={"mode": "general"}, follow_redirects=False,
     )
-    assert resp.status_code == 413
+    assert resp.status_code == 303
 
 
 def test_submit_excel_job_redirects_to_index(client):

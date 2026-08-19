@@ -29,7 +29,6 @@ app = FastAPI()
 FACADE_URL = os.environ.get("KBP_FACADE_URL", "http://localhost:3000").rstrip("/")
 FACADE_KEY = os.environ.get("KBP_FACADE_KEY") or None
 BATCH_KEY = "parser-test-ui"
-MAX_UPLOAD_BYTES = int(os.environ.get("KBP_PARSER_TEST_UI_MAX_UPLOAD_MB", "15")) * 1024 * 1024
 POLL_TIMEOUT_SECONDS = int(os.environ.get("KBP_PARSER_TEST_UI_POLL_TIMEOUT_SECONDS", "600"))
 TERMINAL = frozenset({"succeeded", "failed", "canceled"})
 
@@ -453,12 +452,9 @@ async def history(before_created_at: str | None = Query(None),
 
 @app.post("/parse")
 async def parse(file: UploadFile = File(...), mode: str = Form("general")) -> RedirectResponse:
+    # 이 화면 자체의 업로드 크기 제한은 없다(사용자 요청, 2026-08-19) — facade
+    # 자신의 KBP_JOB_MAX_UPLOAD_BYTES(기본 50MB)가 실질적인 상한으로 남는다.
     data = await file.read()
-    if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"업로드는 {MAX_UPLOAD_BYTES // (1024 * 1024)}MB 이하만 지원합니다",
-        )
     docs_id = f"admtest-{uuid4().hex[:12]}"
     async with httpx.AsyncClient(timeout=30) as client:
         try:
