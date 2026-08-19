@@ -7,6 +7,7 @@ dependencies = [
     "markdown-it-py>=3.0",
     "beautifulsoup4>=4.12",
     "lxml>=5.0",
+    "markdownify>=1.2.0",
     # W3 community-report pipeline
     "networkx>=3.0",
     "python-louvain>=0.16",
