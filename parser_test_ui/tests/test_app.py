@@ -146,6 +146,32 @@ def test_excel_success_renders_chunk_table_and_gate_banner(client):
     assert "a,b,c" in body
 
 
+def test_job_succeeded_but_domain_failure_shows_detail(client):
+    """실사용 중 발견(2026-08-19) — 잡 큐는 "파싱 실패는 잡 실패가 아니다" 계약이라
+    job.status=succeeded 인데 result 본문은 {"status":"failed","detail":...}일 수
+    있다(예: vl_failed 로 특정 페이지가 비어 문서 전체가 실패 처리된 경우). 이때
+    빈 결과처럼 조용히 넘기지 않고 detail을 그대로 보여줘야 한다."""
+    job_id = "ffffffff-0000-0000-0000-000000000007"
+
+    def fake_get(url, params):
+        if url.endswith(f"/jobs/{job_id}"):
+            return _FakeResponse(200, {"id": job_id, "status": "succeeded"})
+        if url.endswith(f"/jobs/{job_id}/result"):
+            return _FakeResponse(200, {
+                "status": "failed",
+                "detail": "parse_failed: vl_failed: 1 page(s) empty — p46(empty_result/empty_result)",
+                "page_traces": [{"page_number": 46, "lane": "paddle_gw", "source": "empty"}],
+            })
+        raise AssertionError(f"unexpected GET {url}")
+
+    _HANDLER["get"] = fake_get
+    resp = client.get(f"/result/{job_id}")
+    assert resp.status_code == 200
+    body = resp.text
+    assert "도메인" in body
+    assert "vl_failed: 1 page(s) empty" in body
+
+
 def test_general_success_renders_page_traces_and_page_text(client):
     def fake_get(url, params):
         if url.endswith("/jobs/bbbbbbbb-0000-0000-0000-000000000002"):

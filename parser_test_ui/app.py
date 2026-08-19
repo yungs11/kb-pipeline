@@ -230,6 +230,19 @@ def _merge_page_text(parse_result: dict[str, Any]) -> None:
 
 def _render_result(result: dict[str, Any]) -> str:
     parts = ["<a href='/'>← 뒤로</a>"]
+    # 도메인 실패(2026-08-19 실사용 중 발견) — 잡 큐는 "파싱 실패는 잡 실패가
+    # 아니다" 계약이라(service/jobs/runner.py is_domain_failure) job 자체는
+    # status=succeeded로 끝나지만, 이 result 본문은 {"status":"failed","detail":...}
+    # 형태다(page_count/chunks/pages 등 정상 응답 키가 전혀 없음). 이 표시 없이
+    # 그대로 렌더하면 오류 원인이 안 보이고 빈 결과처럼만 보인다.
+    if result.get("status") == "failed":
+        parts.append(
+            "<div style='background:#fdecea;border:2px solid #d93025;padding:10px 14px;"
+            "margin:8px 0;border-radius:6px'><b style='color:#d93025'>⚠️ 파싱 실패"
+            "(도메인)</b> — 잡 자체는 완료됐지만 파서가 실패를 보고했습니다."
+            f"<pre style='white-space:pre-wrap;margin:6px 0 0'>{_escape(str(result.get('detail') or ''))}"
+            "</pre></div>"
+        )
     traces = result.get("page_traces") or []
     if traces:
         parts.append("<h3>파싱 레인 로그</h3>")
