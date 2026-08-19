@@ -360,20 +360,26 @@ def test_index_recent_history_shows_lane_and_page_count(client):
 
 
 def test_history_pagination_shows_next_page_link_only_when_cursor_present(client):
+    """실사용 중 500 발견(2026-08-19) — created_at 의 타임존 오프셋(+00:00)이
+    포함된 커서를 URL 인코딩 없이 링크에 넣으면, 브라우저가 그 raw '+'를 그대로
+    보내고 서버(facade)는 쿼리파라미터의 '+'를 공백으로 디코딩해
+    "...625280 00:00" 이 되어 psycopg InvalidDatetimeFormat 500이 났다. href 에
+    '+'가 그대로 노출되면 안 되고 %2B로 인코딩돼야 한다."""
     def fake_get(url, params):
         assert "before_created_at" not in params
         return _FakeResponse(200, {
             "jobs": [{"id": "job-abc12345", "status": "succeeded",
                      "created_at": "2026-08-19T00:00:00", "completed_at": None}],
-            "next_cursor": {"before_created_at": "2026-08-19T00:00:00", "before_id": "job-abc12345"},
+            "next_cursor": {"before_created_at": "2026-08-18T04:44:03.625280+00:00",
+                            "before_id": "job-abc12345"},
         })
 
     _HANDLER["get"] = fake_get
     resp = client.get("/history")
     assert resp.status_code == 200
     assert "다음 페이지" in resp.text
-    assert "before_created_at=2026-08-19T00%3A00%3A00" in resp.text or \
-           "before_created_at=2026-08-19T00:00:00" in resp.text
+    assert "625280+00%3A00" not in resp.text, "'+'가 인코딩 안 된 채로 남아있으면 안 된다"
+    assert "625280%2B00%3A00" in resp.text, "타임존 오프셋의 '+'가 %2B 로 인코딩돼야 한다"
 
     def fake_get_no_more(url, params):
         return _FakeResponse(200, {"jobs": [], "next_cursor": None})

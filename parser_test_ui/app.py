@@ -18,6 +18,7 @@ import os
 import re
 import time
 from typing import Any
+from urllib.parse import urlencode
 from uuid import uuid4
 
 import httpx
@@ -466,10 +467,15 @@ async def history(before_created_at: str | None = Query(None),
     if before_created_at or before_id:
         nav.append("<a href='/history'>← 처음으로</a>")
     if next_cursor:
-        nav.append(
-            f"<a href='/history?before_created_at={_escape(str(next_cursor['before_created_at']))}"
-            f"&before_id={_escape(str(next_cursor['before_id']))}'>다음 페이지 →</a>"
-        )
+        # URL 인코딩 없이 그대로 넣으면 안 된다(실사용 중 발견, 2026-08-19) —
+        # created_at 의 타임존 오프셋(+00:00)이 브라우저에서 그대로 요청되면
+        # 인코딩 안 된 '+' 가 공백으로 디코딩되어 facade 의 timestamptz 파싱이
+        # 깨진다(500). _escape() 는 HTML 이스케이프일 뿐 URL 이스케이프가 아니다.
+        next_qs = urlencode({
+            "before_created_at": str(next_cursor["before_created_at"]),
+            "before_id": str(next_cursor["before_id"]),
+        })
+        nav.append(f"<a href='/history?{_escape(next_qs)}'>다음 페이지 →</a>")
     nav_html = " · ".join(nav)
     worker_status = await _render_worker_status()
     return (
