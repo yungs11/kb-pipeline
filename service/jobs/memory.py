@@ -58,7 +58,11 @@ class InMemoryJobRepo:
         return copy.deepcopy(row) if row else None
 
     def list_jobs(self, *, workspace_key=None, batch_key=None, status=None,
-                  kind=None, limit=100) -> list[dict[str, Any]]:
+                  kind=None, limit=100, before_created_at=None,
+                  before_id=None) -> list[dict[str, Any]]:
+        # 인라인 더블은 created_at 을 안 채운다(claim 이 없어 실제 DB 타임스탬프가
+        # 없음) — keyset 페이징은 real JobRepo(postgres)에서만 의미가 있다. 여기선
+        # 파라미터만 받아 시그니처를 맞추고 동작은 무시한다(no-op).
         out = []
         for row in self.rows.values():
             if workspace_key is not None and row["workspace_key"] != workspace_key:

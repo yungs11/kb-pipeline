@@ -158,6 +158,23 @@ def test_list_jobs_filters_by_batch_key(client):
     assert len(rows) == 1 and rows[0]["batch_key"] == "b1"
 
 
+def test_list_jobs_returns_next_cursor_only_when_page_is_full(client):
+    """keyset 페이징(2026-08-19, 대량배치 대비) — 페이지가 꽉 찼을 때만
+    next_cursor 를 준다(마지막 페이지에서 빈 루프 방지)."""
+    _use(get_parse_client, FakeParse())
+    for i in range(3):
+        client.post("/jobs/parse", data={"batch_key": "cursor-test"},
+                    files={"file": (f"{i}.pdf", b"x", "application/pdf")})
+    full = client.get("/jobs", params={"batch_key": "cursor-test", "limit": 2}).json()
+    assert len(full["jobs"]) == 2
+    assert full["next_cursor"] is not None
+    assert set(full["next_cursor"]) == {"before_created_at", "before_id"}
+
+    partial = client.get("/jobs", params={"batch_key": "cursor-test", "limit": 10}).json()
+    assert len(partial["jobs"]) == 3
+    assert partial["next_cursor"] is None
+
+
 def test_cancel_queued_job(client):
     _use(get_parse_client, FakeParse())
     job_id = client.post("/jobs/parse",

@@ -168,6 +168,36 @@ def test_general_success_renders_page_traces_and_page_text(client):
     assert "—" in body, "페이지별 processing_ms 없을 때 빈 칸이 아니라 대시로 표시해야 한다"
 
 
+def test_page_traces_table_shows_bucket_and_attempts_trace(client):
+    """사용자 요청(2026-08-19) — 로그 표에 bucket·시도(attempts trace) 컬럼."""
+    def fake_get(url, params):
+        if url.endswith("/jobs/cccccccc-1111-0000-0000-000000000099"):
+            return _FakeResponse(200, {"id": "cccccccc-1111-0000-0000-000000000099", "status": "succeeded"})
+        if url.endswith("/jobs/cccccccc-1111-0000-0000-000000000099/result"):
+            return _FakeResponse(200, {
+                "chunk_needed": True,
+                "enriched_content": "x", "page_spans": [], "pages": [],
+                "page_traces": [{
+                    "page_number": 7, "bucket": "OCR_NEEDED", "lane": "paddle_gw",
+                    "source": "gw", "verdict": "accept_gw", "chars": 1405,
+                    "processing_ms": None,
+                    "attempts": [
+                        ["triage", "OCR_NEEDED",
+                         {"reason": "텍스트없는 콘텐츠 (이미지=55, content=0B) → OCR/VL"}],
+                        ["gw", "ok", {"error": ""}],
+                    ],
+                }],
+            })
+        raise AssertionError(f"unexpected GET {url}")
+
+    _HANDLER["get"] = fake_get
+    resp = client.get("/result/cccccccc-1111-0000-0000-000000000099")
+    assert resp.status_code == 200
+    body = resp.text
+    assert "OCR_NEEDED" in body
+    assert "triage:OCR_NEEDED(텍스트없는 콘텐츠 (이미지=55, content=0B) → OCR/VL) → gw:ok" in body
+
+
 def test_result_404_shows_friendly_error(client):
     def fake_get(url, params):
         return _FakeResponse(404, {"detail": "job not found"})
@@ -234,3 +264,46 @@ def test_history_lists_jobs(client):
     assert "1분 0초" in resp.text, "created_at→completed_at 경과시간이 M분 S초로 표시돼야 한다"
     assert "보고서.pdf" in resp.text, "파일명이 표에 보여야 한다"
     assert "pdf" in resp.text, "확장자가 표에 보여야 한다"
+
+
+def test_index_shows_worker_status(client):
+    def fake_get(url, params):
+        if url.endswith("/jobs/workers"):
+            return _FakeResponse(200, {"online": True, "capacity": 4, "active": 1,
+                                       "available": 3, "queued": 2, "processing": 1,
+                                       "oldest_queued_age_seconds": 12.5})
+        return _FakeResponse(200, {"jobs": []})
+
+    _HANDLER["get"] = fake_get
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert "capacity 4" in resp.text
+    assert "queued 2" in resp.text
+    assert "12.5" in resp.text
+
+
+def test_history_pagination_shows_next_page_link_only_when_cursor_present(client):
+    def fake_get(url, params):
+        assert "before_created_at" not in params
+        return _FakeResponse(200, {
+            "jobs": [{"id": "job-abc12345", "status": "succeeded",
+                     "created_at": "2026-08-19T00:00:00", "completed_at": None}],
+            "next_cursor": {"before_created_at": "2026-08-19T00:00:00", "before_id": "job-abc12345"},
+        })
+
+    _HANDLER["get"] = fake_get
+    resp = client.get("/history")
+    assert resp.status_code == 200
+    assert "다음 페이지" in resp.text
+    assert "before_created_at=2026-08-19T00%3A00%3A00" in resp.text or \
+           "before_created_at=2026-08-19T00:00:00" in resp.text
+
+    def fake_get_no_more(url, params):
+        return _FakeResponse(200, {"jobs": [], "next_cursor": None})
+
+    _HANDLER["get"] = fake_get_no_more
+    resp2 = client.get("/history", params={"before_created_at": "2026-08-19T00:00:00",
+                                           "before_id": "job-abc12345"})
+    assert resp2.status_code == 200
+    assert "다음 페이지" not in resp2.text
+    assert "처음으로" in resp2.text

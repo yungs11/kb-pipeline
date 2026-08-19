@@ -455,11 +455,24 @@ def list_jobs(
     workspace_id: str | None = Query(None), batch_key: str | None = Query(None),
     status: str | None = Query(None), kind: str | None = Query(None),
     limit: int = Query(100),
+    before_created_at: str | None = Query(None),
+    before_id: str | None = Query(None),
     repo=Depends(get_job_repo),
 ):
+    """최신순 페이지. 다음 페이지는 이번 응답 마지막 행의 ``created_at``/``id``
+    를 그대로 ``before_created_at``/``before_id``에 실어 다시 호출한다(keyset —
+    대량 배치(수십만~수백만 잡)에서 OFFSET 페이징은 뒤로 갈수록 선형으로 느려진다).
+    """
     rows = repo.list_jobs(workspace_key=workspace_id, batch_key=batch_key,
-                          status=status, kind=kind, limit=limit)
-    return {"jobs": [_public(repo, r) for r in rows]}
+                          status=status, kind=kind, limit=limit,
+                          before_created_at=before_created_at, before_id=before_id)
+    jobs = [_public(repo, r) for r in rows]
+    last = jobs[-1] if jobs else None
+    next_cursor = (
+        {"before_created_at": last["created_at"], "before_id": last["id"]}
+        if last and len(rows) == max(1, min(limit, 500)) else None
+    )
+    return {"jobs": jobs, "next_cursor": next_cursor}
 
 
 @router.get("/jobs/{job_id}")

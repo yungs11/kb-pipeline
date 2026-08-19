@@ -226,7 +226,17 @@ class JobRepo:
         status: str | None = None,
         kind: str | None = None,
         limit: int = 100,
+        before_created_at=None,
+        before_id: uuid.UUID | str | None = None,
     ) -> list[dict[str, Any]]:
+        """최신순 페이지 조회. ``before_created_at``/``before_id`` 를 함께 주면(둘 다
+        필요 — 동률 시각 tie-break) 그 행보다 **오래된** 페이지를 이어서 준다(keyset).
+
+        배치 규모(수십만~수백만 행)에서 ``OFFSET`` 은 건너뛴 행까지 전부 스캔해
+        페이지가 뒤로 갈수록 선형으로 느려진다 — keyset 은 인덱스(created_at, id)만
+        타므로 몇 페이지째든 동일한 비용이다(2026-08-19, parser_test_ui /history
+        페이징 요구로 도입).
+        """
         where: list[str] = []
         args: list[Any] = []
         for col, val in (("workspace_key", workspace_key), ("batch_key", batch_key),
@@ -234,12 +244,17 @@ class JobRepo:
             if val is not None:
                 where.append(f"{col} = %s")
                 args.append(val)
+        if before_created_at is not None and before_id is not None:
+            # ORDER BY 가 (created_at DESC, id DESC) 라 튜플비교가 그대로 "더 오래된 행"과 맞는다.
+            where.append("(created_at, id) < (%s, %s)")
+            args.append(before_created_at)
+            args.append(_as_uuid(before_id))
         clause = ("WHERE " + " AND ".join(where)) if where else ""
         args.append(max(1, min(limit, 500)))
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    f"SELECT * FROM kbp.jobs {clause} ORDER BY created_at DESC, id LIMIT %s",
+                    f"SELECT * FROM kbp.jobs {clause} ORDER BY created_at DESC, id DESC LIMIT %s",
                     args,
                 )
                 return list(cur.fetchall())

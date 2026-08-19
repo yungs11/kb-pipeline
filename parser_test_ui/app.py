@@ -180,6 +180,19 @@ def _job_duration_str(job: dict) -> str:
     return _fmt_ms((end - start).total_seconds() * 1000.0)
 
 
+def _fmt_attempts(attempts) -> str:
+    """`attempts`(route/triage/gw 단계별 [stage, outcome, meta] 리스트)를 한 칸에
+    담는다 — parse_service/parsers/pdf/__init__.py `_fmt_attempts` 관례를 그대로
+    포팅(`stage:outcome(detail)` 을 " → "로 이음, 사용자 요청 2026-08-19)."""
+    parts = []
+    for a in attempts or []:
+        stage, outcome = a[0], a[1]
+        meta = a[2] if len(a) > 2 else {}
+        detail = meta.get("reason") or meta.get("error") or ""
+        parts.append(f"{stage}:{outcome}" + (f"({detail})" if detail else ""))
+    return " → ".join(parts) if parts else "—"
+
+
 def _page_traces_table(traces: list[dict]) -> str:
     if not traces:
         return ""
@@ -189,17 +202,19 @@ def _page_traces_table(traces: list[dict]) -> str:
         rows.append(
             "<tr>"
             f"<td>{_escape(str(t.get('page_number', '')))}</td>"
+            f"<td>{_escape(str(t.get('bucket') or '—'))}</td>"
             f"<td>{_escape(_lane_label(lane))}</td>"
             f"<td>{_escape(str(t.get('source') or ''))}</td>"
             f"<td>{_escape(str(t.get('verdict') or ''))}</td>"
             f"<td>{_escape(str(t.get('chars', '')))}</td>"
             f"<td>{_fmt_ms(t.get('processing_ms'))}</td>"
+            f"<td>{_escape(_fmt_attempts(t.get('attempts')))}</td>"
             "</tr>"
         )
     return (
         "<div class='parser-test-table'><table>"
-        "<tr><th>페이지</th><th>lane</th><th>source</th><th>verdict</th>"
-        "<th>chars</th><th>처리시간</th></tr>"
+        "<tr><th>#</th><th>bucket</th><th>lane</th><th>source</th><th>verdict</th>"
+        "<th>자수</th><th>처리시간</th><th>시도</th></tr>"
         + "".join(rows) + "</table></div>"
     )
 
@@ -277,6 +292,7 @@ def healthz() -> dict[str, str]:
 @app.get("/", response_class=HTMLResponse)
 async def index(submitted: str | None = Query(None)) -> str:
     history = await _render_history_summary()
+    worker_status = await _render_worker_status()
     # 반사형 XSS 방지(2026-08-19, 보안 리뷰) — submitted 는 쿼리파라미터라 사용자가
     # 임의 문자열을 실어 보낼 수 있다. job_id 는 항상 facade uuid.uuid4() 형식이므로
     # 그 형식이 아니면 배너 자체를 안 그린다(escape만으로 방어하지 않는다 — href
@@ -309,6 +325,7 @@ standalone 테스트 화면입니다. 무인증 — 민감한 문서는 올리�
   <p><button type="submit">파싱 실행</button></p>
 </form>
 {banner}
+{worker_status}
 <h3>최근 테스트 기록</h3>
 {history}
 """
@@ -320,21 +337,23 @@ def _ext_of(filename: str | None) -> str:
     return filename.rsplit(".", 1)[-1].lower()
 
 
-async def _render_history_summary(limit: int = 10) -> str:
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            # batch_key 필터 없음(사용자 요청, 2026-08-19) — 이 UI 뿐 아니라 facade
-            # /jobs/parse 를 직접 호출한 배치·스크립트 결과도 여기서 같이 보인다.
-            # kind=parse 만 걸러서 이 화면과 무관한 chunk/insert/ingest 잡(다른 자동화가
-            # 같은 facade 를 쓸 경우)이 섞이지 않게 한다.
-            resp = await client.get(
-                f"{FACADE_URL}/jobs", params={"kind": "parse", "limit": limit},
-                headers=await _facade_headers(),
-            )
-            resp.raise_for_status()
-            jobs = resp.json().get("jobs") or []
-    except Exception as exc:  # noqa: BLE001 — 목록 조회 실패는 표시만 생략
-        return f"<p class='muted'>기록을 불러오지 못했습니다: {_escape(str(exc))}</p>"
+async def _fetch_jobs(*, limit: int, before_created_at: str | None = None,
+                      before_id: str | None = None) -> dict[str, Any]:
+    """batch_key 필터 없음(사용자 요청, 2026-08-19) — 이 UI 뿐 아니라 facade
+    `/jobs/parse`를 직접 호출한 배치·스크립트 결과도 여기서 같이 보인다. kind=parse
+    만 걸러서 이 화면과 무관한 chunk/insert/ingest 잡이 섞이지 않게 한다."""
+    params: dict[str, Any] = {"kind": "parse", "limit": limit}
+    if before_created_at and before_id:
+        params["before_created_at"] = before_created_at
+        params["before_id"] = before_id
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(f"{FACADE_URL}/jobs", params=params,
+                                headers=await _facade_headers())
+        resp.raise_for_status()
+        return resp.json()
+
+
+def _jobs_table_html(jobs: list[dict]) -> str:
     if not jobs:
         return "<p class='muted'>아직 실행한 테스트가 없습니다.</p>"
     rows = []
@@ -356,14 +375,71 @@ async def _render_history_summary(limit: int = 10) -> str:
         "<tr style='background:#eee'><th>job_id</th><th>파일명</th><th>확장자</th>"
         "<th>상태</th><th>생성</th><th>완료</th><th>처리시간</th></tr>"
         + "".join(rows) + "</table>"
-        "<p><a href='/history'>전체 기록 보기</a></p>"
+    )
+
+
+async def _render_history_summary(limit: int = 10) -> str:
+    try:
+        jobs = (await _fetch_jobs(limit=limit)).get("jobs") or []
+    except Exception as exc:  # noqa: BLE001 — 목록 조회 실패는 표시만 생략
+        return f"<p class='muted'>기록을 불러오지 못했습니다: {_escape(str(exc))}</p>"
+    return _jobs_table_html(jobs) + "<p><a href='/history'>전체 기록 보기</a></p>"
+
+
+async def _render_worker_status() -> str:
+    """facade-worker 온라인/큐 상태 요약 — 배치 대량 처리 중 진행 상황 확인용
+    (사용자 요청, 2026-08-19)."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(f"{FACADE_URL}/jobs/workers", headers=await _facade_headers())
+            resp.raise_for_status()
+            w = resp.json()
+    except Exception as exc:  # noqa: BLE001 — 조회 실패는 표시만 생략
+        return f"<p class='muted'>worker 상태를 불러오지 못했습니다: {_escape(str(exc))}</p>"
+    online = w.get("online")
+    dot = "🟢" if online else "🔴"
+    return (
+        f"<p>{dot} worker {'online' if online else 'offline'} — "
+        f"capacity {_escape(str(w.get('capacity')))} · "
+        f"active {_escape(str(w.get('active')))} · "
+        f"available {_escape(str(w.get('available')))} · "
+        f"queued {_escape(str(w.get('queued')))} · "
+        f"processing {_escape(str(w.get('processing')))}"
+        + (f" · 대기 최고령 {_escape(str(w.get('oldest_queued_age_seconds')))}초"
+           if w.get("oldest_queued_age_seconds") is not None else "")
+        + "</p>"
     )
 
 
 @app.get("/history", response_class=HTMLResponse)
-async def history() -> str:
-    body = await _render_history_summary(limit=30)
-    return f"<!doctype html><meta charset='utf-8'><title>테스트 기록</title><a href='/'>← 뒤로</a><h2>최근 테스트 기록</h2>{body}"
+async def history(before_created_at: str | None = Query(None),
+                  before_id: str | None = Query(None)) -> str:
+    # 배치로 대량 처리(수십만~수백만 건) 예정이라 keyset 페이징(2026-08-19) —
+    # OFFSET 이 아니라 "이 페이지 마지막 행보다 오래된 것"으로 이어붙인다.
+    PAGE_SIZE = 50
+    try:
+        page = await _fetch_jobs(limit=PAGE_SIZE, before_created_at=before_created_at,
+                                 before_id=before_id)
+    except Exception as exc:  # noqa: BLE001
+        return (f"<!doctype html><meta charset='utf-8'><title>테스트 기록</title>"
+                f"<a href='/'>← 뒤로</a><p>기록을 불러오지 못했습니다: {_escape(str(exc))}</p>")
+    jobs = page.get("jobs") or []
+    next_cursor = page.get("next_cursor")
+    nav = []
+    if before_created_at or before_id:
+        nav.append("<a href='/history'>← 처음으로</a>")
+    if next_cursor:
+        nav.append(
+            f"<a href='/history?before_created_at={_escape(str(next_cursor['before_created_at']))}"
+            f"&before_id={_escape(str(next_cursor['before_id']))}'>다음 페이지 →</a>"
+        )
+    nav_html = " · ".join(nav)
+    worker_status = await _render_worker_status()
+    return (
+        "<!doctype html><meta charset='utf-8'><title>테스트 기록</title>"
+        f"<a href='/'>← 뒤로</a><h2>최근 테스트 기록</h2>{worker_status}"
+        f"{_jobs_table_html(jobs)}<p>{nav_html}</p>"
+    )
 
 
 @app.post("/parse")
