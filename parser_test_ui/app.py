@@ -144,6 +144,14 @@ def _gate_banner(gate: dict | None) -> str:
     )
 
 
+def _fmt_ms(value) -> str:
+    """knowledge_base ParsingLanesCard.tsx 와 동일 관례 — 없으면 '—'(빈 문자열 아님,
+    "0"으로 오인하지 않게 명시적으로 표시)."""
+    if value is None:
+        return "—"
+    return f"{float(value):,.1f}"
+
+
 def _page_traces_table(traces: list[dict]) -> str:
     if not traces:
         return ""
@@ -157,7 +165,7 @@ def _page_traces_table(traces: list[dict]) -> str:
             f"<td>{_escape(str(t.get('source') or ''))}</td>"
             f"<td>{_escape(str(t.get('verdict') or ''))}</td>"
             f"<td>{_escape(str(t.get('chars', '')))}</td>"
-            f"<td>{_escape(str(t.get('processing_ms') if t.get('processing_ms') is not None else ''))}</td>"
+            f"<td>{_fmt_ms(t.get('processing_ms'))}</td>"
             "</tr>"
         )
     return (
@@ -183,6 +191,12 @@ def _render_result(result: dict[str, Any]) -> str:
     traces = result.get("page_traces") or []
     if traces:
         parts.append("<h3>파싱 레인 로그</h3>")
+        # ODL/kordoc/markdownify 등 다수 레인은 페이지별 processing_ms가 없다(문서
+        # 단위 파서라 페이지로 안 쪼개짐) — knowledge_base ParsingLanesCard.tsx와
+        # 동일하게 문서 전체 파서 처리시간(timing_metrics.total_ms)을 별도로 보여준다.
+        total_ms = (result.get("timing_metrics") or {}).get("total_ms")
+        if total_ms is not None:
+            parts.append(f"<p>문서 파싱 처리시간: {_fmt_ms(total_ms)}ms</p>")
         parts.append(_page_traces_table(traces))
 
     if result.get("chunk_needed") is False:

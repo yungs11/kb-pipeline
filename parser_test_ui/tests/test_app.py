@@ -133,8 +133,11 @@ def test_general_success_renders_page_traces_and_page_text(client):
                 "enriched_content": "hello page one",
                 "page_spans": [{"page_number": 1, "char_start": 0, "char_end": 15}],
                 "pages": [{"page_number": 1, "page_uuid": "x_1", "minio_object": None}],
-                "page_traces": [{"page_number": 1, "lane": "odl", "source": "odl_md",
-                                "chars": 15, "processing_ms": 12.3}],
+                "page_traces": [
+                    {"page_number": 1, "lane": "odl", "source": "odl_md", "chars": 15,
+                     "processing_ms": None},
+                ],
+                "timing_metrics": {"total_ms": 1234.5},
             })
         raise AssertionError(f"unexpected GET {url}")
 
@@ -144,6 +147,8 @@ def test_general_success_renders_page_traces_and_page_text(client):
     body = resp.text
     assert "ODL" in body
     assert "hello page one" in body
+    assert "1,234.5ms" in body, "문서 단위 총 처리시간이 보여야 한다(페이지별 processing_ms가 없는 레인 대응)"
+    assert "—" in body, "페이지별 processing_ms 없을 때 빈 칸이 아니라 대시로 표시해야 한다"
 
 
 def test_result_404_shows_friendly_error(client):
