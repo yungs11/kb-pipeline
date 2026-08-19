@@ -80,6 +80,14 @@ CREATE INDEX IF NOT EXISTS jobs_parent_idx  ON kbp.jobs (parent_job_id) WHERE pa
 -- 않으므로 ALTER 를 함께 둔다(둘 다 멱등).
 ALTER TABLE kbp.jobs ADD COLUMN IF NOT EXISTS idem_key text;
 
+-- kind=parse 결과 요약(2026-08-19, 대량배치 리포팅용) — page_count/lane 분포는
+-- result(jsonb, 크면 MinIO 로 오프로드)에 이미 있지만, 목록/집계 쿼리가 매 행마다
+-- 그 blob 을 열어보게 하지 않으려고 완료 시점에 이 얇은 컬럼에도 같이 남긴다.
+-- result 본문(파싱된 텍스트 자체)의 TTL/보존 정책과 **독립**이다 — content 를
+-- GC 해도 이 요약은 남길 수 있다.
+ALTER TABLE kbp.jobs ADD COLUMN IF NOT EXISTS page_count int;
+ALTER TABLE kbp.jobs ADD COLUMN IF NOT EXISTS lanes text[];
+
 -- 제출 멱등키. failed/canceled 로 끝난 잡은 idem_key 를 NULL 로 비우므로(repo.complete),
 -- 부분 유니크 조건은 "NULL 이 아닌 것"만으로 충분하다. 고친 뒤 같은 파일을 다시 올리면
 -- 새 잡이 만들어진다 — 실패가 영구히 캐시되지 않는다.

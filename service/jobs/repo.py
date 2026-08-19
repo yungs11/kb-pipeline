@@ -597,13 +597,19 @@ class JobRepo:
         result_ref: str | None = None,
         error: str | None = None,
         clear_idem: bool = False,
+        page_count: int | None = None,
+        lanes: list[str] | None = None,
     ) -> None:
+        """``page_count``/``lanes``: kind=parse 결과 요약(2026-08-19, 대량배치
+        리포팅용) — 호출자(worker.py)가 result blob 에서 미리 뽑아 넘긴다. 이 컬럼은
+        result 자체의 TTL/오프로드와 독립이라, content 를 나중에 지워도 남는다."""
         if status not in TERMINAL:
             raise ValueError(f"not a terminal status: {status!r}")
         self._fenced(
             """
             UPDATE kbp.jobs
                SET status = %s, result = %s, result_ref = %s, error = %s,
+                   page_count = %s, lanes = %s,
                    completed_at = now(), heartbeat_at = NULL, stage = NULL,
                    -- 실패로 끝나면 멱등키를 비운다. 설정을 고치고 같은 파일을 다시
                    -- 올렸을 때 옛 실패 job_id 가 반환되어 영구 실패로 굳는 것을 막는다.
@@ -616,7 +622,8 @@ class JobRepo:
                AND status = 'running'
             """,
             (status, Jsonb(result) if result is not None else None,
-             result_ref, error, status, clear_idem, job_id, worker_id, attempt),
+             result_ref, error, page_count, lanes,
+             status, clear_idem, job_id, worker_id, attempt),
         )
 
     def requeue(

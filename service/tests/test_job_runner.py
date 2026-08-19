@@ -16,7 +16,32 @@ import pytest
 
 from service.jobs.repo import LeaseLost
 from service.jobs.runner import (JobAborted, JobFailed, JobRetryable, JobRunner,
-                                 classify)
+                                 classify, parse_result_summary)
+
+
+def test_parse_result_summary_extracts_page_count_and_lanes():
+    page_count, lanes = parse_result_summary({
+        "page_count": 7,
+        "page_traces": [
+            {"lane": "odl"}, {"lane": "odl"}, {"lane": "paddle_gw"},
+        ],
+    })
+    assert page_count == 7
+    assert lanes == ["odl", "paddle_gw"]
+
+
+def test_parse_result_summary_excel_gets_page_count_one():
+    page_count, lanes = parse_result_summary({
+        "chunk_needed": False, "page_count": 0,
+        "page_traces": [{"lane": "excel_openpyxl"}],
+    })
+    assert page_count == 1
+    assert lanes == ["excel_openpyxl"]
+
+
+def test_parse_result_summary_non_parse_result_is_none():
+    assert parse_result_summary({"chunks": ["a"], "method_selected": "x"}) == (None, None)
+    assert parse_result_summary(None) == (None, None)
 
 
 class FakeBlobs:

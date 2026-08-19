@@ -34,7 +34,7 @@ from service.jobs import blobs as blobs_mod
 from service.jobs import gc as gc_mod
 from service.jobs.repo import JobRepo, LeaseLost
 from service.jobs.runner import (JobAborted, JobFailed, JobRetryable, JobRunner,
-                                 is_domain_failure)
+                                 is_domain_failure, parse_result_summary)
 from service.jobs.schema import ensure_schema
 
 log = logging.getLogger("kb_pipeline.service.worker")
@@ -217,6 +217,11 @@ class Worker:
         # job 은 succeeded 지만 본문이 도메인 실패(parse-svc {"status":"failed"})면
         # idem_key 를 비운다 — 안 그러면 명시적 키(시간창 없음)가 영구 캐싱된다(2026-08-06).
         clear_idem = is_domain_failure(result)
+        # page_count/lanes(2026-08-19, 대량배치 리포팅용) — offload 되기 **전** 전체
+        # result 에서 뽑는다. offload 후(inline=None) 뽑으면 큰 결과(대부분의 실제
+        # 문서)에서 전부 비어버린다. kind != parse 결과에는 해당 키가 없어 무해하게
+        # (None, None) 이 된다.
+        page_count, lanes = parse_result_summary(result)
         inline, ref = (None, None)
         if result is not None:
             try:
@@ -226,7 +231,8 @@ class Worker:
                 status, error, inline, ref = "failed", f"result store failed: {exc}", None, None
         self._safe(self.repo.complete, job_id, worker_id=self.worker_id,
                    attempt=attempt, status=status, result=inline,
-                   result_ref=ref, error=error, clear_idem=clear_idem)
+                   result_ref=ref, error=error, clear_idem=clear_idem,
+                   page_count=page_count, lanes=lanes)
         self._purge_legacy_inputs(job_id)
 
     def _purge_legacy_inputs(self, job_id) -> None:

@@ -47,6 +47,23 @@ def is_domain_failure(result: Any) -> bool:
     return isinstance(result, dict) and result.get("status") == "failed"
 
 
+def parse_result_summary(result: Any) -> tuple[int | None, list[str] | None]:
+    """parse 잡 결과에서 ``(page_count, lanes)`` 요약을 뽑는다(2026-08-19, 대량배치
+    리포팅용) — kbp.jobs 의 얇은 컬럼에 남겨 목록/집계가 result blob 을 안 열어보게
+    한다. kind != "parse" 이거나 모양이 안 맞으면 ``(None, None)``(무해)."""
+    if not isinstance(result, dict):
+        return None, None
+    page_count = result.get("page_count")
+    traces = result.get("page_traces")
+    lanes = None
+    if isinstance(traces, list) and traces:
+        lanes = sorted({t.get("lane") for t in traces
+                        if isinstance(t, dict) and t.get("lane")})
+    if not page_count and result.get("chunk_needed") is False:
+        page_count = 1  # 엑셀 등 chunk_needed=False 는 논리적으로 1 문서단위
+    return page_count, (lanes or None)
+
+
 class JobFailed(Exception):
     """재시도해도 소용없는 실패 — 즉시 ``failed``(§5.1)."""
 

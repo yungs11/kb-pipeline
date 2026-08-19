@@ -210,6 +210,22 @@ def test_job_status_and_list_expose_filename_for_parse_jobs(client):
     assert any(j["id"] == job_id and j["filename"] == "보고서.pdf" for j in listed)
 
 
+def test_completed_parse_job_exposes_page_count_and_lanes(client, job_queue_inline):
+    """대량배치 리포팅용 요약(2026-08-19) — legacy /parse(인라인 실행 경로)로 완료된
+    잡이 GET /jobs 목록에서 바로 page_count/lanes를 보여야 한다(result blob 없이)."""
+    _use(get_parse_client, FakeParse(result={
+        "enriched_content": "## H\nbody", "n_blocks": 1, "page_count": 3,
+        "page_traces": [{"lane": "odl"}, {"lane": "odl"}, {"lane": "paddle_gw"}],
+    }))
+    r = client.post("/parse", files={"file": ("a.pdf", b"x", "application/pdf")})
+    assert r.status_code == 200
+
+    listed = client.get("/jobs", params={"kind": "parse", "limit": 1}).json()["jobs"]
+    assert len(listed) == 1
+    assert listed[0]["page_count"] == 3
+    assert listed[0]["lanes"] == ["odl", "paddle_gw"]
+
+
 def test_job_status_filename_is_none_for_non_parse_jobs(client):
     job_id = client.post(
         "/jobs/chunk", json={"enriched_content": "x", "doc_name": "d"},

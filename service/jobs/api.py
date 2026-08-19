@@ -23,7 +23,7 @@ from fastapi import (APIRouter, Body, Depends, File, Form, Header, HTTPException
 from service.jobs import blobs as blobs_mod
 from service.jobs.repo import JobRepo
 from service.jobs.runner import (JobAborted, JobFailed, JobRetryable, JobRunner,
-                                 is_domain_failure)
+                                 is_domain_failure, parse_result_summary)
 
 log = logging.getLogger("kb_pipeline.service.jobs.api")
 
@@ -297,9 +297,12 @@ def _run_inline(repo, blobs, job_id, runner) -> None:
         return
     inline_result, ref = blobs.store_json(job_id, "result", result)
     # worker.py 의 _finish 와 동일 — 도메인 실패 본문이면 idem_key 를 비운다(2026-08-06).
+    # page_count/lanes 도 동일하게 offload 전 result 에서 뽑는다(2026-08-19).
+    page_count, lanes = parse_result_summary(result)
     repo.complete(job_id, worker_id=worker_id, attempt=attempt,
                   status="succeeded", result=inline_result, result_ref=ref,
-                  clear_idem=is_domain_failure(result))
+                  clear_idem=is_domain_failure(result),
+                  page_count=page_count, lanes=lanes)
 
 
 def result_body(blobs, row) -> Any:
@@ -559,6 +562,10 @@ def _public(repo, row) -> dict[str, Any]:
         # 작아서 거의 항상 inline)엔 None.
         "filename": (payload.get("filename") if row["kind"] == "parse"
                      and isinstance(payload, dict) else None),
+        # 완료 시점에 repo.complete() 가 미리 뽑아 남긴 요약(2026-08-19, 대량배치
+        # 리포팅용) — result blob 을 안 열어도 목록/집계에서 바로 쓸 수 있다.
+        "page_count": row.get("page_count"),
+        "lanes": row.get("lanes"),
     }
 
 

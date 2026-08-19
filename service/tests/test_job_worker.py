@@ -55,10 +55,13 @@ class FakeRepo:
                                       "parent_job_id": None})
 
     def complete(self, job_id, *, worker_id, attempt, status, result=None,
-                 result_ref=None, error=None, clear_idem=False):
+                 result_ref=None, error=None, clear_idem=False,
+                 page_count=None, lanes=None):
         with self.lock:
             self.completed.append((job_id, status, result, error))
             self.clear_idem_calls.append((job_id, clear_idem))
+            self.summaries = getattr(self, "summaries", [])
+            self.summaries.append((job_id, page_count, lanes))
 
     def requeue(self, job_id, *, worker_id, attempt, error):
         with self.lock:

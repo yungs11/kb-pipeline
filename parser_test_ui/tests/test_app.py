@@ -283,8 +283,8 @@ def test_index_shows_worker_status(client):
 
 
 def test_index_recent_history_shows_lane_and_page_count(client):
-    """작은 "최근 테스트 기록"(10건)만 잡마다 result를 열어 lane/페이지수를
-    보강한다 — /history(페이징 대상)는 안 건드린다(사용자 요청, 2026-08-19)."""
+    """lane/page_count는 facade _public()이 완료 시점에 미리 뽑아 남긴 얇은 컬럼에서
+    바로 온다(2026-08-19) — 목록 조회 시 잡마다 result를 따로 열어보지 않는다."""
     def fake_get(url, params):
         if url.endswith("/jobs/workers"):
             return _FakeResponse(200, {"online": True})
@@ -292,15 +292,9 @@ def test_index_recent_history_shows_lane_and_page_count(client):
             return _FakeResponse(200, {"jobs": [
                 {"id": "dddddddd-2222-0000-0000-000000000005", "status": "succeeded",
                  "filename": "a.pdf", "created_at": "2026-08-19T00:00:00",
-                 "completed_at": "2026-08-19T00:00:10"},
+                 "completed_at": "2026-08-19T00:00:10",
+                 "lanes": ["odl", "paddle_gw"], "page_count": 3},
             ]})
-        if url.endswith("/jobs/dddddddd-2222-0000-0000-000000000005/result"):
-            return _FakeResponse(200, {
-                "page_count": 3,
-                "page_traces": [
-                    {"lane": "odl"}, {"lane": "odl"}, {"lane": "paddle_gw"},
-                ],
-            })
         raise AssertionError(f"unexpected GET {url}")
 
     _HANDLER["get"] = fake_get

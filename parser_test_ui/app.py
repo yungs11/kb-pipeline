@@ -13,7 +13,6 @@ FastAPI, 무인증, doc_guard 판정은 facade 응답의 `gate_summary`를 로�
 """
 from __future__ import annotations
 
-import asyncio
 import html
 import os
 import re
@@ -354,48 +353,26 @@ async def _fetch_jobs(*, limit: int, before_created_at: str | None = None,
         return resp.json()
 
 
-async def _enrich_job_with_lanes_and_pages(job: dict) -> dict:
-    """succeeded 잡만 result 를 열어 lane 목록/페이지수를 보강한다 — **작은 "최근
-    테스트 기록" 요약(10건)에만** 쓴다. 이 값은 이미 kbp.jobs 의 result JSON 안에
-    있지만(page_traces[].lane, page_count), 목록 API(`_public`)는 배치 규모
-    (수십만~수백만 행)에서 느려지지 않게 그 JSON을 안 읽는다 — 그래서 목록 자체는
-    못 보여주고, 개별 조회가 저렴한 소수 건에서만 이렇게 보강한다(사용자 요청,
-    2026-08-19). 대량 페이징 대상인 /history 에는 안 쓴다."""
-    if job.get("status") != "succeeded":
-        return job
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(f"{FACADE_URL}/jobs/{job['id']}/result",
-                                    headers=await _facade_headers())
-            resp.raise_for_status()
-            result = resp.json()
-    except Exception:  # noqa: BLE001 — 보강 실패는 그 행만 빈칸으로(표 전체는 정상 출력)
-        return job
-    traces = result.get("page_traces") or []
-    lanes = sorted({_lane_label(t.get("lane") or "") for t in traces if t.get("lane")})
-    page_count = result.get("page_count")
-    if not page_count and result.get("chunk_needed") is False:
-        page_count = 1  # 엑셀 등 chunk_needed=False 는 논리적으로 1 문서단위
-    job = dict(job)
-    job["_lanes"] = ", ".join(lanes) if lanes else None
-    job["_page_count"] = page_count
-    return job
-
-
-def _recent_jobs_table_html(jobs: list[dict]) -> str:
+def _jobs_table_html(jobs: list[dict]) -> str:
+    """lane/page_count 는 facade `_public()`이 완료 시점에 미리 뽑아 남긴 얇은
+    컬럼에서 바로 온다(2026-08-19, kbp.jobs.lanes/page_count) — result blob 을
+    안 읽으므로 이 표는 /history(페이징, 배치 규모)에서 써도 느려지지 않는다."""
     if not jobs:
         return "<p class='muted'>아직 실행한 테스트가 없습니다.</p>"
     rows = []
     for j in jobs:
         filename = j.get("filename") or ""
+        lanes = j.get("lanes") or []
+        lanes_str = ", ".join(_lane_label(lane) for lane in lanes) if lanes else "—"
+        page_count = j.get("page_count")
         rows.append(
             "<tr>"
             f"<td><a href='/result/{j['id']}'>{_escape(j['id'][:8])}…</a></td>"
             f"<td>{_escape(filename) if filename else '—'}</td>"
             f"<td>{_escape(_ext_of(filename)) or '—'}</td>"
             f"<td>{_escape(j.get('status', ''))}</td>"
-            f"<td>{_escape(j.get('_lanes') or '—')}</td>"
-            f"<td>{_escape(str(j.get('_page_count'))) if j.get('_page_count') is not None else '—'}</td>"
+            f"<td>{_escape(lanes_str)}</td>"
+            f"<td>{_escape(str(page_count)) if page_count is not None else '—'}</td>"
             f"<td>{_escape(j.get('created_at') or '')}</td>"
             f"<td>{_escape(j.get('completed_at') or '')}</td>"
             f"<td>{_job_duration_str(j)}</td>"
@@ -410,40 +387,12 @@ def _recent_jobs_table_html(jobs: list[dict]) -> str:
     )
 
 
-def _jobs_table_html(jobs: list[dict]) -> str:
-    if not jobs:
-        return "<p class='muted'>아직 실행한 테스트가 없습니다.</p>"
-    rows = []
-    for j in jobs:
-        filename = j.get("filename") or ""
-        rows.append(
-            "<tr>"
-            f"<td><a href='/result/{j['id']}'>{_escape(j['id'][:8])}…</a></td>"
-            f"<td>{_escape(filename) if filename else '—'}</td>"
-            f"<td>{_escape(_ext_of(filename)) or '—'}</td>"
-            f"<td>{_escape(j.get('status', ''))}</td>"
-            f"<td>{_escape(j.get('created_at') or '')}</td>"
-            f"<td>{_escape(j.get('completed_at') or '')}</td>"
-            f"<td>{_job_duration_str(j)}</td>"
-            "</tr>"
-        )
-    return (
-        "<table border='1' cellpadding='4' style='border-collapse:collapse;font-size:13px;width:100%'>"
-        "<tr style='background:#eee'><th>job_id</th><th>파일명</th><th>확장자</th>"
-        "<th>상태</th><th>생성</th><th>완료</th><th>처리시간</th></tr>"
-        + "".join(rows) + "</table>"
-    )
-
-
 async def _render_history_summary(limit: int = 10) -> str:
     try:
         jobs = (await _fetch_jobs(limit=limit)).get("jobs") or []
     except Exception as exc:  # noqa: BLE001 — 목록 조회 실패는 표시만 생략
         return f"<p class='muted'>기록을 불러오지 못했습니다: {_escape(str(exc))}</p>"
-    # 이 표는 10건 한정이라 lane/페이지수 보강(잡마다 result 조회 1회)을 감당할 만
-    # 하다 — /history(페이징, 배치 규모)에는 안 쓴다(사용자 요청, 2026-08-19).
-    enriched = await asyncio.gather(*(_enrich_job_with_lanes_and_pages(j) for j in jobs))
-    return _recent_jobs_table_html(list(enriched)) + "<p><a href='/history'>전체 기록 보기</a></p>"
+    return _jobs_table_html(jobs) + "<p><a href='/history'>전체 기록 보기</a></p>"
 
 
 async def _render_worker_status() -> str:
