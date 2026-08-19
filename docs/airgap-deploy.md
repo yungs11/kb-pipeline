@@ -11,9 +11,9 @@
 
 | 목적 | 쓸 스크립트 | 서비스 수 | 절차 |
 |---|---|---|---|
-| **kbp만** (적재·검색 엔진) | `load-and-up.sh` | 9 | §1→§5 |
-| **kbp + kb 웹앱** (전체) | `deploy-both.sh` | 9 + 4 | §1→§6 |
-| **파싱 배치만** (청킹·적재·검색 불필요) | `parse-only-up.sh` | 5 | §7 |
+| **kbp만** (적재·검색 엔진) | `load-and-up.sh` | 10 | §1→§5 |
+| **kbp + kb 웹앱** (전체) | `deploy-both.sh` | 10 + 4 | §1→§6 |
+| **파싱 배치만** (청킹·적재·검색 불필요) | `parse-only-up.sh` | 6 | §7 |
 
 ---
 
@@ -27,7 +27,7 @@ LLM·임베딩·리랭커·VL은 스키마 호환 목업으로 대체(응답 품
 | 항목 | 결과 |
 |---|---|
 | 번들 전송 → `sha256sum -c` 무결성 → 재결합 → 압축해제 | ✅ |
-| `deploy-both.sh` → kbp 9개 전부 healthy | ✅ |
+| `deploy-both.sh` → kbp 10개 전부 healthy | ✅ |
 | MinIO 버킷 자동 생성 / facade-worker 등록 | ✅ |
 | kb `/readyz`(스키마 마이그레이션 완료 판정) | ✅ |
 | **관리자 시드**(`admin@kb.local`, role=developer) | ✅ |
@@ -43,7 +43,7 @@ LLM·임베딩·리랭커·VL은 스키마 호환 목업으로 대체(응답 품
 
 ---
 
-## 0. 구성 (번들에 포함되는 9개 이미지)
+## 0. 구성 (번들에 포함되는 10개 이미지)
 
 | 티어 | 서비스 | 이미지 | 호스트 포트 | 출처 |
 |------|--------|--------|-------------|------|
@@ -55,13 +55,21 @@ LLM·임베딩·리랭커·VL은 스키마 호환 목업으로 대체(응답 품
 | 앱 | parse-svc | `kbp-parse-svc:airgap` | 19001 | 빌드 |
 | 앱 | facade | `kbp-facade:airgap` | **3000** | 빌드 |
 | 앱 | facade-worker | `kbp-facade:airgap`(명령만 다름) | (내부) | 재사용 |
+| 테스트 | parser-test-ui | `kbp-parser-test-ui:airgap` | **8601**(무인증) | 빌드 |
 | 확인용 | edgequake_webui | `kbp-edgequake_webui:airgap` | **3002** | 빌드 |
 
 포트는 **호스트 발행 포트**다. 권위 출처는 `docker-compose.airgap.yml`,
 전체 포트 맵은 `docs/architecture-ports.md`.
 
 기동 순서: postgres → edgequake / minio / doc_guard / adaptive_chunk → parse-svc →
-facade / edgequake_webui.
+facade / edgequake_webui / parser-test-ui.
+
+> ⚠️ **`parser-test-ui`(:8601)는 완전 무인증**이고 `load-and-up.sh`가
+> `docker compose up -d`를 서비스 제한 없이 돌리므로 **이 전체 번들에도 같이
+> 뜬다**(원래는 parse-only 전용으로 만들었으나, 같은 `docker-compose.airgap.yml`을
+> 공유해 분리하지 않기로 결정 — 2026-08-19). `/history`에서 누구나 다른 사람이
+> 올린 문서의 파싱 결과(본문 포함)를 볼 수 있다는 점을 감안해, 배포 전 반드시
+> 방화벽/네트워크 정책으로 8601을 막거나 접근을 제한할 것.
 
 > **인프라 이미지도 로컬 태그(`kbp-*:airgap`)로 참조한다.** build-bundle.sh 가 재현성을
 > 위해 digest 로 pull 한 뒤 로컬 태그를 붙여 save 하기 때문이다.
@@ -88,7 +96,7 @@ LLM · 임베딩 · 리랭커 · VL-OCR · **파일변환(한컴)**
 
 ```bash
 cd /path/to/8.kb-pipeline
-./scripts/airgap/build-bundle.sh                 # 전체(9개 이미지)
+./scripts/airgap/build-bundle.sh                 # 전체(10개 이미지)
 ./scripts/airgap/build-bundle.sh --parse-only    # 파싱 배치용 축소 번들(§7)
 ./scripts/airgap/build-bundle.sh --no-build      # 이미지 재사용, 번들만 다시 묶기
 ```
@@ -238,7 +246,7 @@ kb 쪽 나머지 값은 `knowledge_base/docs/airgap-deploy.md` 참고
 > 설치부터 API 사용법·배치 튜닝·트러블슈팅까지 전용 문서가 있다 →
 > **[`parse-only-guide.md`](parse-only-guide.md)**. 아래는 요약이다.
 
-청킹·적재·검색 없이 **대량 파싱만** 할 때. 9개 대신 **5개**만 띄운다.
+청킹·적재·검색 없이 **대량 파싱만** 할 때. 10개 대신 **6개**만 띄운다.
 
 ```bash
 ./scripts/airgap/parse-only-up.sh
@@ -251,6 +259,7 @@ kb 쪽 나머지 값은 `knowledge_base/docs/airgap-deploy.md` 참고
 | **facade-worker** | **잡 실행.** 없으면 healthz 다 통과해도 `/parse` 가 503 → 한 건도 처리 안 됨 |
 | postgres | 잡 큐(`kbp.jobs`). 기동 시 스키마 자동 생성 — 빈 DB로 충분 |
 | **minio** | **잡 staging.** 파서 단독이면 없어도 되지만 facade 잡 큐엔 **필수** — 없으면 접수가 `NoSuchBucket` 500 |
+| parser-test-ui | kb-backend/frontend 없이 facade에 직접 붙는 무인증 테스트 화면(:8601) — 없어도 파싱 자체는 정상 |
 
 빠지는 것: edgequake / adaptive_chunk / doc_guard / edgequake_webui
 → `/chunk`·`/insert`·`/search`·`/gate` 는 이 구성에서 **동작하지 않는다**.
