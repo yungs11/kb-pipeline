@@ -297,12 +297,12 @@ def _run_inline(repo, blobs, job_id, runner) -> None:
         return
     inline_result, ref = blobs.store_json(job_id, "result", result)
     # worker.py 의 _finish 와 동일 — 도메인 실패 본문이면 idem_key 를 비운다(2026-08-06).
-    # page_count/lanes 도 동일하게 offload 전 result 에서 뽑는다(2026-08-19).
-    page_count, lanes = parse_result_summary(result)
+    # page_count/lanes/domain_error 도 동일하게 offload 전 result 에서 뽑는다(2026-08-19).
+    page_count, lanes, domain_error = parse_result_summary(result)
     repo.complete(job_id, worker_id=worker_id, attempt=attempt,
                   status="succeeded", result=inline_result, result_ref=ref,
                   clear_idem=is_domain_failure(result),
-                  page_count=page_count, lanes=lanes)
+                  page_count=page_count, lanes=lanes, domain_error=domain_error)
 
 
 def result_body(blobs, row) -> Any:
@@ -566,6 +566,9 @@ def _public(repo, row) -> dict[str, Any]:
         # 리포팅용) — result blob 을 안 열어도 목록/집계에서 바로 쓸 수 있다.
         "page_count": row.get("page_count"),
         "lanes": row.get("lanes"),
+        # status="succeeded" 인데 결과가 도메인 실패인 경우의 detail(2026-08-19,
+        # 사용자 혼란 방지 — job.status 만 보고 "성공"으로 오해하기 쉽다).
+        "domain_error": row.get("domain_error"),
     }
 
 

@@ -73,6 +73,14 @@ def _escape(s: str) -> str:
     return html.escape(s, quote=False)
 
 
+def _escape_attr(s: str) -> str:
+    """HTML 속성값(quoted attribute)용 — 텍스트 노드용 `_escape`와 달리 따옴표도
+    escape한다. `_escape`를 attribute 안에 그대로 넣으면 값에 `'`가 있을 때 속성을
+    깨고 나갈 수 있다(2026-08-19, domain_error 같은 자유 텍스트를 title=에 넣을 때
+    발견 — job_id류는 정규식 검증을 먼저 하지만 에러 메시지는 형식을 강제할 수 없다)."""
+    return html.escape(s, quote=True)
+
+
 def _sanitize_table_html(raw: str) -> str:
     cleaned = _SCRIPT_STYLE_RE.sub("", raw)
     out: list[str] = []
@@ -377,12 +385,20 @@ def _jobs_table_html(jobs: list[dict]) -> str:
         lanes = j.get("lanes") or []
         lanes_str = ", ".join(_lane_label(lane) for lane in lanes) if lanes else "—"
         page_count = j.get("page_count")
+        # job.status=succeeded 인데 결과가 도메인 실패(parse-svc {"status":"failed"})
+        # 인 경우가 있다(2026-08-19, job 876cfb16 실사용 중 발견 — "성공"으로 보여
+        # 헷갈렸다) — 목록에서부터 상태를 "failed(도메인)"으로 덮어써 바로 드러낸다.
+        domain_error = j.get("domain_error")
+        status_html = (
+            f"<span style='color:#d93025' title='{_escape_attr(domain_error)}'>failed(도메인)</span>"
+            if domain_error else _escape(j.get("status", ""))
+        )
         rows.append(
             "<tr>"
             f"<td><a href='/result/{j['id']}'>{_escape(j['id'][:8])}…</a></td>"
             f"<td>{_escape(filename) if filename else '—'}</td>"
             f"<td>{_escape(_ext_of(filename)) or '—'}</td>"
-            f"<td>{_escape(j.get('status', ''))}</td>"
+            f"<td>{status_html}</td>"
             f"<td>{_escape(lanes_str)}</td>"
             f"<td>{_escape(str(page_count)) if page_count is not None else '—'}</td>"
             f"<td>{_escape(j.get('created_at') or '')}</td>"

@@ -47,12 +47,22 @@ def is_domain_failure(result: Any) -> bool:
     return isinstance(result, dict) and result.get("status") == "failed"
 
 
-def parse_result_summary(result: Any) -> tuple[int | None, list[str] | None]:
-    """parse 잡 결과에서 ``(page_count, lanes)`` 요약을 뽑는다(2026-08-19, 대량배치
-    리포팅용) — kbp.jobs 의 얇은 컬럼에 남겨 목록/집계가 result blob 을 안 열어보게
-    한다. kind != "parse" 이거나 모양이 안 맞으면 ``(None, None)``(무해)."""
+def parse_result_summary(
+    result: Any,
+) -> tuple[int | None, list[str] | None, str | None]:
+    """parse 잡 결과에서 ``(page_count, lanes, domain_error)`` 요약을 뽑는다
+    (2026-08-19, 대량배치 리포팅용) — kbp.jobs 의 얇은 컬럼에 남겨 목록/집계가
+    result blob 을 안 열어보게 한다. kind != "parse" 이거나 모양이 안 맞으면
+    ``(None, None, None)``(무해).
+
+    ``domain_error``: job 은 "succeeded" 로 끝나지만 본문이 도메인 실패
+    (``is_domain_failure``)인 경우의 ``detail`` — 사용자 혼란 방지(2026-08-19
+    실사용 중 발견, job 876cfb16: status=succeeded 인데 결과가 비어 보임).
+    목록에서 "성공"처럼 보이지 않게 이 값으로 상태 표시를 덮어씌운다.
+    """
     if not isinstance(result, dict):
-        return None, None
+        return None, None, None
+    domain_error = str(result.get("detail")) if is_domain_failure(result) else None
     page_count = result.get("page_count")
     traces = result.get("page_traces")
     lanes = None
@@ -61,7 +71,7 @@ def parse_result_summary(result: Any) -> tuple[int | None, list[str] | None]:
                         if isinstance(t, dict) and t.get("lane")})
     if not page_count and result.get("chunk_needed") is False:
         page_count = 1  # 엑셀 등 chunk_needed=False 는 논리적으로 1 문서단위
-    return page_count, (lanes or None)
+    return page_count, (lanes or None), domain_error
 
 
 class JobFailed(Exception):

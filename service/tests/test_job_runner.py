@@ -20,7 +20,7 @@ from service.jobs.runner import (JobAborted, JobFailed, JobRetryable, JobRunner,
 
 
 def test_parse_result_summary_extracts_page_count_and_lanes():
-    page_count, lanes = parse_result_summary({
+    page_count, lanes, domain_error = parse_result_summary({
         "page_count": 7,
         "page_traces": [
             {"lane": "odl"}, {"lane": "odl"}, {"lane": "paddle_gw"},
@@ -28,20 +28,35 @@ def test_parse_result_summary_extracts_page_count_and_lanes():
     })
     assert page_count == 7
     assert lanes == ["odl", "paddle_gw"]
+    assert domain_error is None
 
 
 def test_parse_result_summary_excel_gets_page_count_one():
-    page_count, lanes = parse_result_summary({
+    page_count, lanes, domain_error = parse_result_summary({
         "chunk_needed": False, "page_count": 0,
         "page_traces": [{"lane": "excel_openpyxl"}],
     })
     assert page_count == 1
     assert lanes == ["excel_openpyxl"]
+    assert domain_error is None
 
 
 def test_parse_result_summary_non_parse_result_is_none():
-    assert parse_result_summary({"chunks": ["a"], "method_selected": "x"}) == (None, None)
-    assert parse_result_summary(None) == (None, None)
+    assert parse_result_summary({"chunks": ["a"], "method_selected": "x"}) == (None, None, None)
+    assert parse_result_summary(None) == (None, None, None)
+
+
+def test_parse_result_summary_extracts_domain_error():
+    """job.status=succeeded 인데 결과가 도메인 실패인 경우(2026-08-19, job
+    876cfb16 실사용 중 발견) — detail을 뽑아 목록 표시에 쓴다."""
+    page_count, lanes, domain_error = parse_result_summary({
+        "status": "failed",
+        "detail": "parse_failed: vl_failed: 1 page(s) empty — p46(empty_result/empty_result)",
+        "page_traces": [{"lane": "paddle_gw"}],
+    })
+    assert page_count is None
+    assert lanes == ["paddle_gw"]
+    assert domain_error == "parse_failed: vl_failed: 1 page(s) empty — p46(empty_result/empty_result)"
 
 
 class FakeBlobs:

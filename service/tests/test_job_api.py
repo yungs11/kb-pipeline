@@ -224,6 +224,24 @@ def test_completed_parse_job_exposes_page_count_and_lanes(client, job_queue_inli
     assert len(listed) == 1
     assert listed[0]["page_count"] == 3
     assert listed[0]["lanes"] == ["odl", "paddle_gw"]
+    assert listed[0]["domain_error"] is None
+
+
+def test_domain_failed_parse_job_still_status_succeeded_but_exposes_domain_error(client, job_queue_inline):
+    """job.status=succeeded인데 결과가 도메인 실패인 실사용 사례(2026-08-19, job
+    876cfb16) — GET /jobs 목록에서 domain_error로 그 구분을 드러낼 수 있어야 한다."""
+    _use(get_parse_client, FakeParse(result={
+        "status": "failed",
+        "detail": "parse_failed: vl_failed: 1 page(s) empty — p46(empty_result/empty_result)",
+        "page_traces": [{"lane": "paddle_gw"}],
+    }))
+    r = client.post("/parse", files={"file": ("scan.pdf", b"x", "application/pdf")})
+    assert r.status_code == 200
+
+    listed = client.get("/jobs", params={"kind": "parse", "limit": 1}).json()["jobs"]
+    assert listed[0]["status"] == "succeeded"
+    assert listed[0]["domain_error"] == \
+        "parse_failed: vl_failed: 1 page(s) empty — p46(empty_result/empty_result)"
 
 
 def test_job_status_filename_is_none_for_non_parse_jobs(client):

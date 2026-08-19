@@ -56,7 +56,7 @@ class FakeRepo:
 
     def complete(self, job_id, *, worker_id, attempt, status, result=None,
                  result_ref=None, error=None, clear_idem=False,
-                 page_count=None, lanes=None):
+                 page_count=None, lanes=None, domain_error=None):
         with self.lock:
             self.completed.append((job_id, status, result, error))
             self.clear_idem_calls.append((job_id, clear_idem))

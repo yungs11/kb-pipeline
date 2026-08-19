@@ -314,6 +314,28 @@ def test_index_shows_worker_status(client):
     assert "12.5" in resp.text
 
 
+def test_history_shows_domain_error_status_with_safe_attribute_escaping(client):
+    """job.status=succeeded인데 도메인 실패면 목록에서부터 "failed(도메인)"으로
+    덮어써 보여야 한다(사용자 요청, 2026-08-19). domain_error를 title= 속성에
+    넣을 때 홑따옴표가 있어도 속성을 깨고 나가면 안 된다(자유 텍스트라 형식을
+    강제할 수 없음 — _escape_attr 회귀 확인)."""
+    def fake_get(url, params):
+        return _FakeResponse(200, {"jobs": [
+            {"id": "12121212-0000-0000-0000-000000000008", "status": "succeeded",
+             "filename": "a.pdf", "created_at": "2026-08-19T00:00:00",
+             "completed_at": "2026-08-19T00:00:10",
+             "domain_error": "parse_failed: it's broken — <script>alert(1)</script>"},
+        ]})
+
+    _HANDLER["get"] = fake_get
+    resp = client.get("/history")
+    assert resp.status_code == 200
+    body = resp.text
+    assert "failed(도메인)" in body
+    assert "<script>alert(1)</script>" not in body
+    assert "it&#x27;s broken" in body or "it&#39;s broken" in body
+
+
 def test_index_recent_history_shows_lane_and_page_count(client):
     """lane/page_count는 facade _public()이 완료 시점에 미리 뽑아 남긴 얇은 컬럼에서
     바로 온다(2026-08-19) — 목록 조회 시 잡마다 result를 따로 열어보지 않는다."""

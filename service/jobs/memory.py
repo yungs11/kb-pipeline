@@ -100,11 +100,12 @@ class InMemoryJobRepo:
 
     def complete(self, job_id, *, worker_id, attempt, status,
                  result=None, result_ref=None, error=None,
-                 clear_idem: bool = False, page_count=None, lanes=None) -> None:
+                 clear_idem: bool = False, page_count=None, lanes=None,
+                 domain_error=None) -> None:
         row = self._fenced(job_id, worker_id, attempt)
         row.update(status=status, result=copy.deepcopy(result),
                    result_ref=result_ref, error=error, stage=None,
-                   page_count=page_count, lanes=lanes)
+                   page_count=page_count, lanes=lanes, domain_error=domain_error)
         if status != "succeeded" or clear_idem:
             row["idem_key"] = None   # 실패(또는 도메인 실패 본문)는 캐시하지 않는다
 

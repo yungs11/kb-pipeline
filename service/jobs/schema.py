@@ -88,6 +88,12 @@ ALTER TABLE kbp.jobs ADD COLUMN IF NOT EXISTS idem_key text;
 ALTER TABLE kbp.jobs ADD COLUMN IF NOT EXISTS page_count int;
 ALTER TABLE kbp.jobs ADD COLUMN IF NOT EXISTS lanes text[];
 
+-- job(잡 큐 레벨)은 "succeeded"인데 결과 본문이 도메인 실패(parse-svc
+-- {"status":"failed"})인 경우의 detail(2026-08-19, 사용자 혼란 방지 — job
+-- 876cfb16: status=succeeded인데 결과가 비어 보여 헷갈렸다). NULL이면 도메인
+-- 실패 아님(성공, 또는 아직 미완료, 또는 잡 큐 자체 실패로 error 컬럼에 있음).
+ALTER TABLE kbp.jobs ADD COLUMN IF NOT EXISTS domain_error text;
+
 -- 제출 멱등키. failed/canceled 로 끝난 잡은 idem_key 를 NULL 로 비우므로(repo.complete),
 -- 부분 유니크 조건은 "NULL 이 아닌 것"만으로 충분하다. 고친 뒤 같은 파일을 다시 올리면
 -- 새 잡이 만들어진다 — 실패가 영구히 캐시되지 않는다.
